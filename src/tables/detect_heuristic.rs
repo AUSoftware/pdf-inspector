@@ -653,13 +653,7 @@ fn detect_table_in_region(items: &[(usize, &TextItem)], mode: TableDetectionMode
         return None;
     }
 
-    // Validation 8: Check for Table of Contents pattern
-    if is_table_of_contents(&cells) {
-        log::debug!("  validation 8 fail: table of contents");
-        return None;
-    }
-
-    // Validation 9: Reject paragraph-like content falsely detected as tables
+    // Validation 8: Reject paragraph-like content falsely detected as tables
     if is_paragraph_content(&cells) {
         log::debug!("  validation 9 fail: paragraph content");
         return None;
@@ -900,7 +894,7 @@ fn looks_like_number(s: &str) -> bool {
 
 /// Check if this looks like a Table of Contents
 /// TOCs have characteristic patterns: leader dots, page numbers, section names
-fn is_table_of_contents(cells: &[Vec<String>]) -> bool {
+pub(super) fn is_table_of_contents(cells: &[Vec<String>]) -> bool {
     if cells.is_empty() {
         return false;
     }
@@ -963,12 +957,12 @@ fn is_table_of_contents(cells: &[Vec<String>]) -> bool {
         return false;
     }
 
-    // If a significant portion of cells are dots or page numbers, it's likely a TOC
+    // If a significant portion of cells are dots AND page numbers, it's likely a TOC.
+    // Requiring both signals prevents false-positives on register/data tables that
+    // use `...` as a continuation marker but have no actual page numbers.
     let dot_ratio = dot_cells as f32 / total_cells as f32;
     let page_num_ratio = page_number_cells as f32 / total_cells as f32;
-
-    // TOC typically has >15% dot cells and >10% page number cells
-    if dot_ratio > 0.15 || (dot_ratio > 0.05 && page_num_ratio > 0.15) {
+    if dot_ratio > 0.15 && page_num_ratio > 0.10 {
         return true;
     }
 

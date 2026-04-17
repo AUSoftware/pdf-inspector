@@ -1,5 +1,6 @@
 //! Table-to-markdown formatting and cell cleanup.
 
+use super::detect_heuristic::is_table_of_contents;
 use super::Table;
 
 pub fn table_to_markdown(table: &Table) -> String {
@@ -7,11 +8,25 @@ pub fn table_to_markdown(table: &Table) -> String {
         return String::new();
     }
 
+    // Detect TOC on the raw cells: clean_table_cells merges rows in ways
+    // that can make genuine data tables superficially resemble a TOC
+    // (short numeric cells, few columns) — but the raw detection here
+    // preserves the original multi-column structure and only matches the
+    // true TOC pattern.
+    let is_toc = is_table_of_contents(&table.cells);
+
     // Clean up the table: merge continuation rows, extract footnotes, remove empty rows
     let (cleaned_cells, footnotes) = clean_table_cells(&table.cells);
 
     if cleaned_cells.is_empty() {
         return String::new();
+    }
+
+    // Tables of contents render poorly as markdown tables — emit a flat
+    // per-row text list instead so the page numbers stay aligned with
+    // their section titles rather than drifting to a separate column.
+    if is_toc {
+        return format_toc_as_list(&cleaned_cells, &footnotes);
     }
 
     let num_cols = cleaned_cells[0].len();
@@ -47,6 +62,76 @@ pub fn table_to_markdown(table: &Table) -> String {
     }
 
     output
+}
+
+/// Render a table-of-contents as a flat per-row text block.
+///
+/// Each row becomes one line: non-empty cells joined with spaces, and the
+/// last cell (typically a page number) is separated by a tab so the page
+/// numbers stay aligned with their titles instead of being pulled into a
+/// separate column by the column-aware reader.
+fn format_toc_as_list(cells: &[Vec<String>], footnotes: &[String]) -> String {
+    let mut output = String::new();
+
+    for row in cells {
+        let trimmed: Vec<&str> = row.iter().map(|c| c.trim()).collect();
+        let last_idx = trimmed.iter().rposition(|c| !c.is_empty());
+        let Some(last_idx) = last_idx else {
+            continue;
+        };
+
+        let last_cell = trimmed[last_idx];
+        let last_is_page = is_page_number_cell(last_cell);
+
+        let (title_cells, trailing) = if last_is_page && last_idx > 0 {
+            (&trimmed[..last_idx], Some(last_cell))
+        } else {
+            (&trimmed[..=last_idx], None)
+        };
+
+        let title = title_cells
+            .iter()
+            .filter(|c| !c.is_empty())
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        if title.is_empty() && trailing.is_none() {
+            continue;
+        }
+
+        if !title.is_empty() {
+            output.push_str(&title);
+        }
+        if let Some(page) = trailing {
+            if !title.is_empty() {
+                output.push('\t');
+            }
+            output.push_str(page);
+        }
+        output.push('\n');
+    }
+
+    if !footnotes.is_empty() {
+        output.push('\n');
+        for footnote in footnotes {
+            output.push_str(footnote);
+            output.push('\n');
+        }
+    }
+
+    output
+}
+
+/// True when the cell is a run of 1-3 digit tokens (e.g. "42" or "86 86").
+fn is_page_number_cell(cell: &str) -> bool {
+    let tokens: Vec<&str> = cell.split_whitespace().collect();
+    if tokens.is_empty() {
+        return false;
+    }
+    tokens
+        .iter()
+        .all(|t| !t.is_empty() && t.len() <= 4 && t.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// Clean up table cells: merge continuation rows, extract footnotes, remove empty rows
@@ -431,5 +516,43 @@ mod tests {
             item_indices: vec![],
         };
         assert_eq!(table_to_markdown(&table), "");
+    }
+
+    #[test]
+    fn test_table_to_markdown_toc_renders_as_flat_list() {
+        // A TOC-shaped table with section numbers in col 0 and page numbers
+        // in the last column should render as a flat list, not a markdown
+        // table, so the page numbers stay on the same line as their titles.
+        let table = Table {
+            columns: vec![50.0, 80.0, 300.0],
+            rows: vec![500.0; 5],
+            cells: vec![
+                vec![
+                    "4.3".into(),
+                    "Case studies and targeted evaluations".into(),
+                    "86".into(),
+                ],
+                vec![
+                    "4.3.1".into(),
+                    "Destructive or reckless actions".into(),
+                    "86".into(),
+                ],
+                vec![
+                    "4.3.2".into(),
+                    "Adherence to its constitution".into(),
+                    "89".into(),
+                ],
+                vec!["4.4".into(), "Capability evaluations".into(), "101".into()],
+                vec!["4.5".into(), "White-box analyses".into(), "113".into()],
+            ],
+            item_indices: vec![],
+        };
+        let md = table_to_markdown(&table);
+        assert!(
+            !md.contains("|---|"),
+            "TOC should not render as a markdown table: {md}"
+        );
+        assert!(md.contains("4.3 Case studies and targeted evaluations\t86"));
+        assert!(md.contains("4.5 White-box analyses\t113"));
     }
 }
