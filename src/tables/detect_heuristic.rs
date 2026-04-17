@@ -968,7 +968,66 @@ fn is_table_of_contents(cells: &[Vec<String>]) -> bool {
     let page_num_ratio = page_number_cells as f32 / total_cells as f32;
 
     // TOC typically has >15% dot cells and >10% page number cells
-    dot_ratio > 0.15 || (dot_ratio > 0.05 && page_num_ratio > 0.15)
+    if dot_ratio > 0.15 || (dot_ratio > 0.05 && page_num_ratio > 0.15) {
+        return true;
+    }
+
+    // Dot-less TOC: tagged PDFs (e.g. tabular TOCs) emit entries as rows
+    // where the first column starts with a dotted section number
+    // (e.g. "4.3.1 Something") and the last column is one or more page
+    // numbers.  These have no leader dots but are still TOCs, not tables.
+    if num_cols >= 2 && cells.len() >= 4 {
+        let section_rows = cells
+            .iter()
+            .filter(|row| {
+                row.iter()
+                    .find(|c| !c.trim().is_empty())
+                    .is_some_and(|c| starts_with_section_number(c.trim()))
+            })
+            .count();
+
+        let last_col = num_cols - 1;
+        let (last_filled, last_page_num) = cells.iter().fold((0u32, 0u32), |(f, n), row| {
+            let cell = row.get(last_col).map(|s| s.trim()).unwrap_or("");
+            if cell.is_empty() {
+                return (f, n);
+            }
+            let is_page_nums = cell
+                .split_whitespace()
+                .all(|tok| !tok.is_empty() && tok.chars().all(|c| c.is_ascii_digit()));
+            (f + 1, n + if is_page_nums { 1 } else { 0 })
+        });
+
+        let section_ratio = section_rows as f32 / cells.len() as f32;
+        let page_num_last_ratio = if last_filled > 0 {
+            last_page_num as f32 / last_filled as f32
+        } else {
+            0.0
+        };
+
+        if section_ratio >= 0.6 && last_filled >= 3 && page_num_last_ratio >= 0.7 {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Returns true when the leading token looks like a dotted section number:
+/// "1", "1.2", "1.2.3", "4.3.1.2" — integer components joined by dots,
+/// with at least one dot (single-number prefixes are too ambiguous).
+fn starts_with_section_number(s: &str) -> bool {
+    let Some(first) = s.split_whitespace().next() else {
+        return false;
+    };
+    let first = first.trim_end_matches('.');
+    let parts: Vec<&str> = first.split('.').collect();
+    if parts.len() < 2 || parts.len() > 6 {
+        return false;
+    }
+    parts
+        .iter()
+        .all(|p| !p.is_empty() && p.len() <= 3 && p.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// Check if detected "table" cells are actually paragraph text fragments.
@@ -1424,5 +1483,62 @@ mod tests {
             !is_table_of_contents(&cells),
             "data table with dot-leader labels should not be rejected as TOC"
         );
+    }
+
+    #[test]
+    fn is_table_of_contents_rejects_dotless_toc() {
+        // Tabular TOC without leader dots: first column starts with dotted
+        // section numbers, last column is page numbers.  Pattern from
+        // Mythos system card pages 6-8.
+        let cells = vec![
+            vec![
+                "4.3 Case studies and targeted evaluations".to_string(),
+                String::new(),
+                "86".to_string(),
+            ],
+            vec![
+                "4.3.1 Destructive or reckless actions".to_string(),
+                "4.3.1.1 Synthetic-backend evaluation".to_string(),
+                "86 86".to_string(),
+            ],
+            vec![
+                "4.3.2 Adherence to constitution".to_string(),
+                "4.3.2.1 Overview".to_string(),
+                "89 89".to_string(),
+            ],
+            vec![
+                "4.3.3 Honesty and hallucinations".to_string(),
+                "4.3.3.1 Factual hallucinations".to_string(),
+                "93 94".to_string(),
+            ],
+            vec![
+                "4.4 Capability evaluations".to_string(),
+                String::new(),
+                "101".to_string(),
+            ],
+        ];
+        assert!(
+            is_table_of_contents(&cells),
+            "dot-less TOC with section numbers + page numbers should be rejected"
+        );
+    }
+
+    #[test]
+    fn starts_with_section_number_matches_dotted() {
+        assert!(starts_with_section_number("1.2"));
+        assert!(starts_with_section_number("4.3.1"));
+        assert!(starts_with_section_number("4.3.1.2"));
+        assert!(starts_with_section_number("4.3 Case studies"));
+        assert!(starts_with_section_number("2.2.5.1 Expert red teaming"));
+    }
+
+    #[test]
+    fn starts_with_section_number_rejects_non_sections() {
+        assert!(!starts_with_section_number("Chapter 1"));
+        assert!(!starts_with_section_number("1973"));
+        assert!(!starts_with_section_number("1.5M"));
+        assert!(!starts_with_section_number("10.0%"));
+        assert!(!starts_with_section_number(""));
+        assert!(!starts_with_section_number("Hello world"));
     }
 }
