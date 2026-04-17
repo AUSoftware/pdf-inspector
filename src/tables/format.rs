@@ -13,20 +13,22 @@ pub fn table_to_markdown(table: &Table) -> String {
     // (short numeric cells, few columns) — but the raw detection here
     // preserves the original multi-column structure and only matches the
     // true TOC pattern.
-    let is_toc = is_table_of_contents(&table.cells);
+    //
+    // Tables of contents render poorly as markdown tables — emit a flat
+    // per-row text list instead so the page numbers stay aligned with
+    // their section titles rather than drifting to a separate column.
+    // Format from raw cells: continuation-row merging collapses separate
+    // TOC entries (e.g. "6.2 Contamination" + "6.2.1 SWE-bench") into a
+    // single line because sub-entries leave column 0 empty.
+    if is_table_of_contents(&table.cells) {
+        return format_toc_as_list(&table.cells, &[]);
+    }
 
     // Clean up the table: merge continuation rows, extract footnotes, remove empty rows
     let (cleaned_cells, footnotes) = clean_table_cells(&table.cells);
 
     if cleaned_cells.is_empty() {
         return String::new();
-    }
-
-    // Tables of contents render poorly as markdown tables — emit a flat
-    // per-row text list instead so the page numbers stay aligned with
-    // their section titles rather than drifting to a separate column.
-    if is_toc {
-        return format_toc_as_list(&cleaned_cells, &footnotes);
     }
 
     let num_cols = cleaned_cells[0].len();
@@ -89,9 +91,12 @@ fn format_toc_as_list(cells: &[Vec<String>], footnotes: &[String]) -> String {
             (&trimmed[..=last_idx], None)
         };
 
+        // Skip dots-only cells when joining the title — in a detected TOC
+        // layout, a "...." cell is a leader separator, not part of the
+        // entry name.
         let title = title_cells
             .iter()
-            .filter(|c| !c.is_empty())
+            .filter(|c| !c.is_empty() && !is_dots_only(c))
             .copied()
             .collect::<Vec<_>>()
             .join(" ");
@@ -123,15 +128,37 @@ fn format_toc_as_list(cells: &[Vec<String>], footnotes: &[String]) -> String {
     output
 }
 
-/// True when the cell is a run of 1-3 digit tokens (e.g. "42" or "86 86").
+/// True when the cell looks like a page number.  Accepts:
+///   - plain digit tokens: "42", "86 86"
+///   - dashed section-page IDs: "5-21", "A-1", "B--3", "TC-2" (common in
+///     technical manuals)
 fn is_page_number_cell(cell: &str) -> bool {
     let tokens: Vec<&str> = cell.split_whitespace().collect();
     if tokens.is_empty() {
         return false;
     }
-    tokens
-        .iter()
-        .all(|t| !t.is_empty() && t.len() <= 4 && t.chars().all(|c| c.is_ascii_digit()))
+    tokens.iter().all(|t| {
+        if t.is_empty() || t.len() > 8 {
+            return false;
+        }
+        let all_digits = t.chars().all(|c| c.is_ascii_digit());
+        if all_digits {
+            return t.len() <= 4;
+        }
+        // Section-page form: uppercase letters, digits, dashes; at least
+        // one digit present.
+        t.chars()
+            .all(|c| c.is_ascii_digit() || c.is_ascii_uppercase() || c == '-')
+            && t.chars().any(|c| c.is_ascii_digit())
+    })
+}
+
+/// True when the cell is purely leader dots (any length ≥ 3) with optional
+/// whitespace.
+fn is_dots_only(cell: &str) -> bool {
+    let t = cell.trim();
+    let dots = t.chars().filter(|&c| c == '.').count();
+    dots >= 3 && t.chars().all(|c| c == '.' || c.is_whitespace())
 }
 
 /// Clean up table cells: merge continuation rows, extract footnotes, remove empty rows
