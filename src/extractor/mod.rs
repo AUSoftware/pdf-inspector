@@ -315,20 +315,78 @@ pub(crate) fn merge_text_items(items: Vec<TextItem>) -> Vec<TextItem> {
         return items;
     }
 
-    // Group items by (page, Y position) with 5pt tolerance
+    // Group items by (page, Y position) with 5pt tolerance, walking in
+    // stream order.  A new group also starts when the incoming item's X
+    // would be a significant backtrack — signature of a new PDF text
+    // block (`BT ... Tm`) starting at the left of the same Y band.
+    // Without this split, slide-deck PDFs that stack several copy-paste
+    // layers at the same tiny-text Y (e.g. a color-palette row and a
+    // disclaimer body) later sort-by-X into character-interleaved
+    // gibberish.
     let y_tolerance = 5.0;
-    let mut line_groups: Vec<(u32, f32, Vec<&TextItem>)> = Vec::new();
+    struct LineGroup<'a> {
+        page: u32,
+        y: f32,
+        end_x: f32,
+        font_size: f32,
+        items: Vec<&'a TextItem>,
+    }
+    let mut line_groups: Vec<LineGroup> = Vec::new();
 
     for item in &items {
-        let found = line_groups
-            .iter_mut()
-            .find(|(pg, y, _)| *pg == item.page && (item.y - *y).abs() < y_tolerance);
-        if let Some((_, _, group)) = found {
-            group.push(item);
-        } else {
-            line_groups.push((item.page, item.y, vec![item]));
+        // Find the most recently touched matching (page, y) bucket that
+        // the item can legitimately continue (no sharp X backtrack).
+        // Scanning from the end means the last-updated bucket wins, so a
+        // new back-tracked block reliably opens a fresh group instead of
+        // re-joining the old one.
+        let item_right_limit = item.x + effective_merge_width(item);
+        let mut target: Option<usize> = None;
+        for (i, g) in line_groups.iter().enumerate().rev() {
+            if g.page != item.page {
+                continue;
+            }
+            if (g.y - item.y).abs() >= y_tolerance {
+                continue;
+            }
+            // Detect a sharp X backtrack that can only be a new PDF text
+            // block (`BT ... Tm`) starting at the same Y band.  Only
+            // trigger for very small fonts: in slide-deck PDFs, multiple
+            // text blocks get stacked at the same Y in a tiny copy-paste
+            // layer, and sort-by-X later interleaves them.  Normal-sized
+            // fonts (≥ 3pt) stay on the original behaviour — splitting
+            // there tends to break tables and other valid layouts.
+            if item.font_size < 3.0 && g.font_size < 3.0 {
+                let backtrack = g.end_x - item.x;
+                let min_backtrack = (item.font_size * 5.0).max(5.0);
+                if backtrack > min_backtrack {
+                    continue;
+                }
+            }
+            target = Some(i);
+            break;
+        }
+        match target {
+            Some(i) => {
+                line_groups[i].end_x = line_groups[i].end_x.max(item_right_limit);
+                line_groups[i].items.push(item);
+            }
+            None => {
+                line_groups.push(LineGroup {
+                    page: item.page,
+                    y: item.y,
+                    end_x: item_right_limit,
+                    font_size: item.font_size,
+                    items: vec![item],
+                });
+            }
         }
     }
+
+    // Re-shape into the tuple layout the rest of this function expects.
+    let mut line_groups: Vec<(u32, f32, Vec<&TextItem>)> = line_groups
+        .into_iter()
+        .map(|g| (g.page, g.y, g.items))
+        .collect();
 
     // Sort each group by X position (direction-aware)
     for (_, _, group) in &mut line_groups {
@@ -571,6 +629,112 @@ mod tests {
         let merged = merge_text_items(items);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].text, "hello world");
+    }
+
+    fn make_tiny_item(text: &str, x: f32, width: f32) -> TextItem {
+        TextItem {
+            text: text.into(),
+            x,
+            y: 700.0,
+            width,
+            height: 1.3,
+            font: "F1".into(),
+            font_size: 1.3, // tiny copy-paste / accessibility layer font
+            page: 1,
+            is_bold: false,
+            is_italic: false,
+            item_type: ItemType::Text,
+            mcid: None,
+        }
+    }
+
+    #[test]
+    fn merge_items_splits_tiny_interleaved_text_blocks_at_same_y() {
+        // Slide-deck copy-paste layers render several `BT` blocks into a
+        // tiny (<3pt) text layer all at the same Y.  Before the fix,
+        // grouping by Y alone would fuse them into one bucket, and the
+        // subsequent sort-by-X would character-interleave them:
+        // "A O B S G T..." instead of "Alpha...Omega...".
+        //
+        // The sharp X backtrack between blocks must open a new group so
+        // block-A items stay before block-B items in the output, even
+        // after their shared Y bucket would be X-sorted.
+        let items = vec![
+            make_tiny_item("Alpha", 10.0, 2.0),
+            make_tiny_item("Gamma", 40.0, 2.0),
+            // Block B: Tm resets X back to the left.  With the fix, this
+            // opens a new group; without, X-sort would put "Omega"
+            // between "Alpha" and "Gamma" (interleaving).
+            make_tiny_item("Omega", 20.0, 2.0),
+            make_tiny_item("Theta", 50.0, 2.0),
+        ];
+        let merged = merge_text_items(items);
+        let texts: Vec<String> = merged.iter().map(|m| m.text.clone()).collect();
+        // The critical property is that "Alpha" + "Gamma" appear
+        // together in stream order before "Omega" + "Theta" — not
+        // interleaved.  Individual merges within each block depend on
+        // gap thresholds that don't matter for this invariant.
+        let alpha_idx = texts.iter().position(|t| t.contains("Alpha")).unwrap();
+        let gamma_idx = texts.iter().position(|t| t.contains("Gamma")).unwrap();
+        let omega_idx = texts.iter().position(|t| t.contains("Omega")).unwrap();
+        let theta_idx = texts.iter().position(|t| t.contains("Theta")).unwrap();
+        assert!(
+            alpha_idx < omega_idx && gamma_idx < omega_idx,
+            "block-A items (Alpha, Gamma) must precede block-B items (Omega, Theta); got {texts:?}"
+        );
+        assert!(
+            omega_idx < theta_idx,
+            "Omega must come before Theta within block B; got {texts:?}"
+        );
+    }
+
+    #[test]
+    fn merge_items_does_not_split_normal_font_table_rows() {
+        // Normal body/table text at 12pt must not be split by the
+        // X-backtrack rule — that rule applies only to tiny (<3pt)
+        // copy-paste layers.  A single 12pt group here means the rule
+        // didn't fire: the items all end up X-sorted together, so
+        // "extra" at X=50 sits between "Row1-ColA" (10) and "Row1-ColB"
+        // (100) rather than staying at the end.
+        let items = vec![
+            make_merge_item("Row1-ColA", 10.0, 50.0),
+            make_merge_item("Row1-ColB", 100.0, 50.0),
+            make_merge_item("Row1-ColC", 200.0, 50.0),
+            make_merge_item("extra", 50.0, 30.0),
+        ];
+        let merged = merge_text_items(items);
+        let texts: Vec<String> = merged.iter().map(|m| m.text.clone()).collect();
+        // Find positions of the non-merged anchors.
+        let a_idx = texts
+            .iter()
+            .position(|t| t.contains("Row1-ColA"))
+            .expect("ColA in output");
+        let extra_idx = texts
+            .iter()
+            .position(|t| t.contains("extra"))
+            .expect("extra in output");
+        let b_idx = texts
+            .iter()
+            .position(|t| t.contains("Row1-ColB"))
+            .expect("ColB in output");
+        assert!(
+            a_idx < extra_idx && extra_idx < b_idx,
+            "12pt items must be X-sorted together (Row1-ColA, extra, Row1-ColB); got {texts:?}"
+        );
+    }
+
+    #[test]
+    fn merge_items_tolerates_small_kerning_overlap() {
+        // Small negative gaps (ligature/kerning) must NOT split a word.
+        // A ~1pt overlap between "Wo" and "rld" is well within normal
+        // kerning and should stay in one group.
+        let items = vec![
+            make_merge_item("Wo", 100.0, 20.0),  // end = 120
+            make_merge_item("rld", 119.0, 25.0), // 1pt overlap: kerning, not a reset
+        ];
+        let merged = merge_text_items(items);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "World");
     }
 
     #[test]
