@@ -1646,6 +1646,134 @@ fn test_extract_tables_with_structure_empty_inputs() {
     assert!(mds.is_empty());
 }
 
+#[test]
+fn test_extract_tables_with_structure_cells_real_pdf_bits_pilani() {
+    use pdf_inspector::{extract_tables_with_structure_cells_mem, TsrTableInput};
+    // Same fixture as test_extract_tables_with_structure_real_pdf_bits_pilani
+    // but exercising the cell-level API. Verifies that callers receive
+    // structured per-cell metadata (row/col/spans/is_header/page_pt_bbox)
+    // alongside the extracted text.
+    let buf = std::fs::read("tests/fixtures/bits_pilani_feedback.pdf").unwrap();
+
+    let crop = [80.0_f32, 170.0, 280.0, 240.0];
+    let dpi = 72.0_f32;
+    let cell_bboxes = vec![
+        poly(10.0, 7.0, 100.0, 18.0),
+        poly(110.0, 7.0, 200.0, 18.0),
+        poly(10.0, 35.0, 100.0, 60.0),
+        poly(110.0, 35.0, 200.0, 60.0),
+    ];
+    let tokens: Vec<String> = [
+        "<table>",
+        "<thead>",
+        "<tr>",
+        "<th></th>",
+        "<th></th>",
+        "</tr>",
+        "</thead>",
+        "<tbody>",
+        "<tr>",
+        "<td></td>",
+        "<td></td>",
+        "</tr>",
+        "</tbody>",
+        "</table>",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+
+    let inputs = vec![TsrTableInput {
+        page: 3,
+        crop_pdf_pt_bbox: crop,
+        render_dpi: dpi,
+        structure_tokens: tokens,
+        cell_bboxes,
+    }];
+
+    let cells_lists = extract_tables_with_structure_cells_mem(&buf, &inputs).unwrap();
+    assert_eq!(cells_lists.len(), 1);
+    let cells = &cells_lists[0];
+    assert_eq!(cells.len(), 4);
+
+    // Header row: both cells flagged as headers (they were in <thead>/<th>).
+    assert!(cells[0].is_header);
+    assert!(cells[1].is_header);
+    assert_eq!((cells[0].row, cells[0].col), (0, 0));
+    assert_eq!((cells[1].row, cells[1].col), (0, 1));
+    assert_eq!(cells[0].text, "Department");
+    assert_eq!(cells[1].text, "Core Courses");
+
+    // Data row: not flagged as header.
+    assert!(!cells[2].is_header);
+    assert!(!cells[3].is_header);
+    assert_eq!((cells[2].row, cells[2].col), (1, 0));
+    assert_eq!((cells[3].row, cells[3].col), (1, 1));
+    assert_eq!(cells[2].text, "BIO");
+    assert_eq!(cells[3].text, "8.23");
+
+    // Every cell carries a non-degenerate page-pt bbox.
+    for c in cells {
+        let [x1, y1, x2, y2] = c.page_pt_bbox;
+        assert!(
+            x1 < x2 && y1 < y2,
+            "cell bbox should be non-empty: {:?}",
+            c.page_pt_bbox
+        );
+    }
+}
+
+#[test]
+fn test_extract_tables_with_structure_separator_after_thead() {
+    use pdf_inspector::{extract_tables_with_structure_mem, TsrTableInput};
+    // Re-run the same 2x2 fixture but assert exact markdown output: with
+    // <thead> + <th> headers, the separator should land after the header
+    // row (which is also row 0 here, so the gold-standard hasn't changed).
+    let buf = std::fs::read("tests/fixtures/bits_pilani_feedback.pdf").unwrap();
+
+    let crop = [80.0_f32, 170.0, 280.0, 240.0];
+    let dpi = 72.0_f32;
+    let cell_bboxes = vec![
+        poly(10.0, 7.0, 100.0, 18.0),
+        poly(110.0, 7.0, 200.0, 18.0),
+        poly(10.0, 35.0, 100.0, 60.0),
+        poly(110.0, 35.0, 200.0, 60.0),
+    ];
+    let tokens: Vec<String> = [
+        "<table>",
+        "<thead>",
+        "<tr>",
+        "<th></th>",
+        "<th></th>",
+        "</tr>",
+        "</thead>",
+        "<tbody>",
+        "<tr>",
+        "<td></td>",
+        "<td></td>",
+        "</tr>",
+        "</tbody>",
+        "</table>",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+
+    let mds = extract_tables_with_structure_mem(
+        &buf,
+        &[TsrTableInput {
+            page: 3,
+            crop_pdf_pt_bbox: crop,
+            render_dpi: dpi,
+            structure_tokens: tokens,
+            cell_bboxes,
+        }],
+    )
+    .unwrap();
+    assert_eq!(mds.len(), 1);
+    assert_eq!(mds[0], "|Department|Core Courses|\n|---|---|\n|BIO|8.23|\n");
+}
+
 // =========================================================================
 // extract_pages_markdown_mem tests
 // =========================================================================

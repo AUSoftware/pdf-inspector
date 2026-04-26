@@ -363,6 +363,65 @@ pub fn extract_tables_with_structure(
     })
 }
 
+/// One resolved cell from `extractTablesWithStructureCells`.
+#[napi(object)]
+pub struct StructuredCellJs {
+    /// 0-indexed grid row.
+    pub row: u32,
+    /// 0-indexed grid column.
+    pub col: u32,
+    /// 1 for a normal cell.
+    pub rowspan: u32,
+    /// 1 for a normal cell.
+    pub colspan: u32,
+    /// `true` when the cell is a `<th>` or sits inside `<thead>`.
+    pub is_header: bool,
+    /// Text extracted from the native PDF for this cell (may be empty).
+    pub text: String,
+    /// Axis-aligned bbox `[x1, y1, x2, y2]` in page PDF-points, top-left
+    /// origin. Useful for debug overlays or per-cell post-processing.
+    pub page_pt_bbox: Vec<f64>,
+}
+
+/// Extract structured cells using externally-supplied structure recovery.
+///
+/// Lower-level sibling of [`extractTablesWithStructure`]: instead of
+/// rendering markdown, returns the resolved cells (row, col, rowspan,
+/// colspan, isHeader, text, pagePtBbox) so callers can drive their own
+/// rendering, debug overlays, or per-cell post-processing.
+///
+/// Returns one `Array<StructuredCellJs>` per input, in input order.
+#[napi]
+pub fn extract_tables_with_structure_cells(
+    buffer: Buffer,
+    inputs: Vec<TsrTableInputJs>,
+) -> Result<Vec<Vec<StructuredCellJs>>> {
+    let bytes: Vec<u8> = buffer.to_vec();
+    let parsed = parse_tsr_inputs(&inputs);
+
+    catch_panic("extract_tables_with_structure_cells", move || {
+        let result = pdf_inspector::extract_tables_with_structure_cells_mem(&bytes, &parsed)
+            .map_err(|e| to_napi_err(e, "extract_tables_with_structure_cells"))?;
+        Ok(result
+            .into_iter()
+            .map(|cells| {
+                cells
+                    .into_iter()
+                    .map(|c| StructuredCellJs {
+                        row: c.row as u32,
+                        col: c.col as u32,
+                        rowspan: c.rowspan as u32,
+                        colspan: c.colspan as u32,
+                        is_header: c.is_header,
+                        text: c.text,
+                        page_pt_bbox: c.page_pt_bbox.iter().map(|v| *v as f64).collect(),
+                    })
+                    .collect()
+            })
+            .collect())
+    })
+}
+
 fn parse_tsr_inputs(inputs: &[TsrTableInputJs]) -> Vec<pdf_inspector::TsrTableInput> {
     inputs
         .iter()

@@ -254,10 +254,11 @@ fn sanitize_cell(text: &str) -> String {
 /// markdown stays a valid rectangular grid that downstream readers can
 /// column-count correctly.
 ///
-/// A separator row (`|---|...|`) is always emitted after row 0, matching the
-/// crate's `table_to_markdown` style — this keeps the output a valid
-/// pipe-table even when the first row is not strictly a header in the
-/// source PDF.
+/// The separator row (`|---|...|`) is emitted after the **last** row that
+/// contains a header cell (`is_header == true`). When no cells are flagged
+/// as headers — e.g. the upstream TSR model didn't emit `<thead>`/`<th>` —
+/// the separator falls back to "after row 0" so the output is still a
+/// valid pipe-table.
 pub fn cells_to_markdown(cells: &[StructuredCell]) -> String {
     if cells.is_empty() {
         return String::new();
@@ -276,6 +277,17 @@ pub fn cells_to_markdown(cells: &[StructuredCell]) -> String {
         return String::new();
     }
 
+    // Separator goes after the last header row, falling back to row 0 when
+    // no header cells exist. Clamped into range so a malformed cell with
+    // row >= num_rows can't push it past the table.
+    let separator_after_row = cells
+        .iter()
+        .filter(|c| c.is_header)
+        .map(|c| c.row)
+        .max()
+        .unwrap_or(0)
+        .min(num_rows.saturating_sub(1));
+
     let mut grid: Vec<Vec<String>> = vec![vec![String::new(); num_cols]; num_rows];
     for cell in cells {
         if cell.row < num_rows && cell.col < num_cols {
@@ -291,7 +303,7 @@ pub fn cells_to_markdown(cells: &[StructuredCell]) -> String {
             output.push('|');
         }
         output.push('\n');
-        if row_idx == 0 {
+        if row_idx == separator_after_row {
             output.push('|');
             for _ in 0..num_cols {
                 output.push_str("---|");
@@ -654,5 +666,73 @@ mod tests {
         }];
         let md = cells_to_markdown(&cells);
         assert!(md.contains("|foo bar baz|"));
+    }
+
+    fn cell(row: usize, col: usize, is_header: bool, text: &str) -> StructuredCell {
+        StructuredCell {
+            row,
+            col,
+            rowspan: 1,
+            colspan: 1,
+            is_header,
+            text: text.into(),
+            page_pt_bbox: [0.0, 0.0, 0.0, 0.0],
+        }
+    }
+
+    #[test]
+    fn cells_to_markdown_separator_after_last_header_row() {
+        // Two-row header (a multi-row thead), then two body rows. Separator
+        // should land after row 1 (the LAST header row), not after row 0.
+        let cells = vec![
+            cell(0, 0, true, "H0a"),
+            cell(0, 1, true, "H0b"),
+            cell(1, 0, true, "H1a"),
+            cell(1, 1, true, "H1b"),
+            cell(2, 0, false, "d0a"),
+            cell(2, 1, false, "d0b"),
+            cell(3, 0, false, "d1a"),
+            cell(3, 1, false, "d1b"),
+        ];
+        let md = cells_to_markdown(&cells);
+        let expected = "|H0a|H0b|\n|H1a|H1b|\n|---|---|\n|d0a|d0b|\n|d1a|d1b|\n";
+        assert_eq!(md, expected, "got: {md}");
+    }
+
+    #[test]
+    fn cells_to_markdown_separator_when_row_0_not_header() {
+        // Row 0 is not flagged as a header but row 1 is. Separator should
+        // follow row 1 (the header), demonstrating that we don't blindly
+        // emit after row 0.
+        let cells = vec![
+            cell(0, 0, false, "x0a"),
+            cell(0, 1, false, "x0b"),
+            cell(1, 0, true, "Hdr1"),
+            cell(1, 1, true, "Hdr2"),
+            cell(2, 0, false, "data1"),
+            cell(2, 1, false, "data2"),
+        ];
+        let md = cells_to_markdown(&cells);
+        // Confirm the separator is NOT after row 0.
+        assert!(!md.starts_with("|x0a|x0b|\n|---|"), "got: {md}");
+        // Confirm it IS after row 1.
+        assert!(
+            md.contains("|Hdr1|Hdr2|\n|---|---|\n|data1|data2|"),
+            "got: {md}"
+        );
+    }
+
+    #[test]
+    fn cells_to_markdown_no_headers_falls_back_to_row_0() {
+        // No header cells at all — fallback: separator after row 0 so the
+        // output is still a valid markdown pipe-table.
+        let cells = vec![
+            cell(0, 0, false, "a"),
+            cell(0, 1, false, "b"),
+            cell(1, 0, false, "c"),
+            cell(1, 1, false, "d"),
+        ];
+        let md = cells_to_markdown(&cells);
+        assert_eq!(md, "|a|b|\n|---|---|\n|c|d|\n");
     }
 }

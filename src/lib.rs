@@ -814,7 +814,7 @@ pub struct TsrTableInput {
     pub cell_bboxes: Vec<Vec<f32>>,
 }
 
-/// Extract markdown tables using externally-supplied structure recovery.
+/// Extract structured cells using externally-supplied structure recovery.
 ///
 /// For each input, this:
 /// 1. Pairs each cell open-tag in `structure_tokens` with the next bbox in
@@ -823,17 +823,23 @@ pub struct TsrTableInput {
 /// 2. Converts each cell bbox from crop image-pixels into page PDF-points.
 /// 3. Pulls the cell's text by overlap-testing PDF text items inside that
 ///    bbox — same primitives used by [`extract_text_in_regions_mem`].
-/// 4. Emits a markdown pipe-table.
 ///
-/// Returns one markdown string per input, in input order. Inputs whose page
-/// is out of range or whose tokens parse to zero cells produce an empty
-/// string.
-pub fn extract_tables_with_structure_mem(
+/// Returns one `Vec<StructuredCell>` per input, in input order. Each cell
+/// carries its (row, col, rowspan, colspan, is_header) metadata, the
+/// extracted text, and its page-PDF-pt bbox so callers can do their own
+/// rendering, debug overlays, or per-cell post-processing.
+///
+/// Inputs whose page is out of range or whose tokens parse to zero cells
+/// produce an empty `Vec`.
+///
+/// See [`extract_tables_with_structure_mem`] if you just want the rendered
+/// markdown.
+pub fn extract_tables_with_structure_cells_mem(
     buffer: &[u8],
     inputs: &[TsrTableInput],
-) -> Result<Vec<String>, PdfError> {
+) -> Result<Vec<Vec<tables::StructuredCell>>, PdfError> {
     use tables::structured::{
-        cell_px_to_page_pt, cells_to_markdown, parse_structure, polygon_to_aabb, StructuredCell,
+        cell_px_to_page_pt, parse_structure, polygon_to_aabb, StructuredCell,
     };
 
     validate_pdf_bytes(buffer)?;
@@ -873,13 +879,13 @@ pub fn extract_tables_with_structure_mem(
         items_by_page.insert(*page_num, items);
     }
 
-    let mut results = Vec::with_capacity(inputs.len());
+    let mut results: Vec<Vec<StructuredCell>> = Vec::with_capacity(inputs.len());
 
     for input in inputs {
         let page_1idx = input.page + 1;
         let Some(items) = items_by_page.get(&page_1idx) else {
             // Out-of-range page or page with no extractable text — emit empty.
-            results.push(String::new());
+            results.push(Vec::new());
             continue;
         };
         let page_h = page_heights.get(&page_1idx).copied().unwrap_or(792.0);
@@ -894,7 +900,7 @@ pub fn extract_tables_with_structure_mem(
 
         let slots = parse_structure(&input.structure_tokens);
         if slots.is_empty() {
-            results.push(String::new());
+            results.push(Vec::new());
             continue;
         }
 
@@ -940,10 +946,34 @@ pub fn extract_tables_with_structure_mem(
             });
         }
 
-        results.push(cells_to_markdown(&cells));
+        results.push(cells);
     }
 
     Ok(results)
+}
+
+/// Extract markdown tables using externally-supplied structure recovery.
+///
+/// Convenience wrapper around [`extract_tables_with_structure_cells_mem`]
+/// that renders each cell list to markdown via
+/// [`tables::cells_to_markdown`]. Returns one markdown string per input,
+/// in input order. Inputs whose page is out of range or whose tokens parse
+/// to zero cells produce an empty string.
+pub fn extract_tables_with_structure_mem(
+    buffer: &[u8],
+    inputs: &[TsrTableInput],
+) -> Result<Vec<String>, PdfError> {
+    let cells_lists = extract_tables_with_structure_cells_mem(buffer, inputs)?;
+    Ok(cells_lists
+        .into_iter()
+        .map(|cells| {
+            if cells.is_empty() {
+                String::new()
+            } else {
+                tables::cells_to_markdown(&cells)
+            }
+        })
+        .collect())
 }
 
 /// Get page height in points from MediaBox.
