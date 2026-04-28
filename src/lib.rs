@@ -837,6 +837,13 @@ pub fn detect_vector_grid_in_region_mem(
     } else {
         RegionCoordSpace::Standard
     };
+    if matches!(coords, RegionCoordSpace::Rotated90Ccw) {
+        // TODO: add a rotated-page vector-grid fixture before enabling this.
+        // The TSR crop contract is top-left page coordinates, while rotated
+        // extraction normalizes vector geometry into a synthetic coordinate
+        // space. Returning None is safer than emitting misleading bboxes.
+        return Ok(None);
+    }
     let [rx1, ry1, rx2, ry2] = region_pdf_pt_bbox;
     let bounds = region_bounds(rx1, ry1, rx2, ry2, page_h, coords);
 
@@ -919,7 +926,7 @@ fn vector_grid_result_from_table(
     }
 
     let (x_edges, y_edges) = match source {
-        VectorGridSource::Rects => rect_grid_edges(table, rects, num_cols, num_rows)
+        VectorGridSource::Rects => rect_grid_edges(rects, num_cols, num_rows)
             .or_else(|| inferred_grid_edges(table, rects, lines, num_cols, num_rows))?,
         VectorGridSource::Lines => line_grid_edges(table, lines, num_cols, num_rows)
             .or_else(|| inferred_grid_edges(table, rects, lines, num_cols, num_rows))?,
@@ -933,6 +940,9 @@ fn vector_grid_result_from_table(
     let mut cell_bboxes = Vec::with_capacity(num_rows * num_cols);
     structure_tokens.push("<table>".to_string());
 
+    // TODO: refactor vector detectors to return normalized `(x_edges, y_edges)`.
+    // Today `Table.columns` / `Table.rows` have detector-specific semantics,
+    // so this export reconstructs edges from the validated table plus geometry.
     // Keep v1 structural output uniform: the downstream TSR text-fill path
     // does not require header semantics, and reliable header detection can be
     // layered later without changing the geometry contract.
@@ -947,6 +957,9 @@ fn vector_grid_result_from_table(
                 page_height,
                 coord_space,
             )?;
+            if !crop_px_bbox_is_plausible(bbox_px, crop_pdf_pt_bbox, render_dpi) {
+                return None;
+            }
             cell_bboxes.push(bbox_px.to_vec());
         }
         structure_tokens.push("</tr>".to_string());
@@ -959,18 +972,36 @@ fn vector_grid_result_from_table(
     })
 }
 
+fn crop_px_bbox_is_plausible(
+    bbox_px: [f32; 4],
+    crop_pdf_pt_bbox: [f32; 4],
+    render_dpi: f32,
+) -> bool {
+    let ppi = if render_dpi > 0.0 {
+        render_dpi / 72.0
+    } else {
+        1.0
+    };
+    let crop_w = (crop_pdf_pt_bbox[2] - crop_pdf_pt_bbox[0]).abs() * ppi;
+    let crop_h = (crop_pdf_pt_bbox[3] - crop_pdf_pt_bbox[1]).abs() * ppi;
+    let slack = 1.0;
+    bbox_px[0] >= -slack
+        && bbox_px[1] >= -slack
+        && bbox_px[2] <= crop_w + slack
+        && bbox_px[3] <= crop_h + slack
+}
+
 fn line_grid_edges(
-    _table: &tables::Table,
+    table: &tables::Table,
     lines: &[PdfLine],
     num_cols: usize,
     num_rows: usize,
 ) -> Option<(Vec<f32>, Vec<f32>)> {
-    if lines.is_empty() {
+    if lines.is_empty() || table.columns.len() != num_cols + 1 || table.rows.len() != num_rows {
         return None;
     }
 
     let angle_tolerance = 2.0_f32.to_radians().tan();
-    let mut xs = Vec::new();
     let mut ys = Vec::new();
 
     for line in lines {
@@ -982,13 +1013,31 @@ fn line_grid_edges(
         }
         if dx > 0.01 && dy / dx <= angle_tolerance {
             ys.push((line.y1 + line.y2) * 0.5);
-        } else if dy > 0.01 && dx / dy <= angle_tolerance {
-            xs.push((line.x1 + line.x2) * 0.5);
         }
     }
 
-    let x_edges = snap_vector_edges(xs, false);
-    let y_edges = snap_vector_edges(ys, true);
+    let mut x_edges = table.columns.clone();
+    x_edges.sort_by(|a, b| a.total_cmp(b));
+
+    let snapped_y = snap_vector_edges(ys, true);
+    let mut y_edges = Vec::with_capacity(num_rows + 1);
+    for &row_top in &table.rows {
+        let matched = snapped_y
+            .iter()
+            .copied()
+            .find(|y| (*y - row_top).abs() <= 3.0)
+            .unwrap_or(row_top);
+        y_edges.push(matched);
+    }
+
+    let last_top = *y_edges.last()?;
+    let bottom = snapped_y
+        .iter()
+        .copied()
+        .filter(|y| *y < last_top - 3.0)
+        .max_by(|a, b| a.total_cmp(b))?;
+    y_edges.push(bottom);
+
     if x_edges.len() == num_cols + 1 && y_edges.len() == num_rows + 1 {
         Some((x_edges, y_edges))
     } else {
@@ -997,7 +1046,6 @@ fn line_grid_edges(
 }
 
 fn rect_grid_edges(
-    _table: &tables::Table,
     rects: &[PdfRect],
     num_cols: usize,
     num_rows: usize,
