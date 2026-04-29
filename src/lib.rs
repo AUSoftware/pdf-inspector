@@ -991,6 +991,71 @@ fn crop_px_bbox_is_plausible(
         && bbox_px[3] <= crop_h + slack
 }
 
+#[cfg(test)]
+mod vector_grid_tests {
+    use super::crop_px_bbox_is_plausible;
+
+    #[test]
+    fn test_crop_px_bbox_is_plausible_bounds() {
+        let crop = [10.0, 20.0, 110.0, 220.0];
+
+        assert!(crop_px_bbox_is_plausible(
+            [0.0, 0.0, 100.0, 200.0],
+            crop,
+            72.0
+        ));
+        assert!(crop_px_bbox_is_plausible(
+            [0.0, 0.0, 200.0, 400.0],
+            crop,
+            144.0
+        ));
+        assert!(!crop_px_bbox_is_plausible(
+            [-2.0, 0.0, 50.0, 100.0],
+            crop,
+            72.0
+        ));
+        assert!(!crop_px_bbox_is_plausible(
+            [0.0, -2.0, 50.0, 100.0],
+            crop,
+            72.0
+        ));
+        assert!(!crop_px_bbox_is_plausible(
+            [0.0, 0.0, 102.0, 200.0],
+            crop,
+            72.0
+        ));
+        assert!(!crop_px_bbox_is_plausible(
+            [0.0, 0.0, 100.0, 202.0],
+            crop,
+            72.0
+        ));
+
+        // Boundary values at the existing 1px slack should remain valid.
+        assert!(crop_px_bbox_is_plausible(
+            [-1.0, -1.0, 101.0, 201.0],
+            crop,
+            72.0
+        ));
+
+        // Non-positive DPI falls back to 1.0 ppi, so crop points equal pixels.
+        assert!(crop_px_bbox_is_plausible(
+            [0.0, 0.0, 100.0, 200.0],
+            crop,
+            0.0
+        ));
+        assert!(crop_px_bbox_is_plausible(
+            [0.0, 0.0, 100.0, 200.0],
+            crop,
+            -144.0
+        ));
+        assert!(!crop_px_bbox_is_plausible(
+            [0.0, 0.0, 102.0, 200.0],
+            crop,
+            -144.0
+        ));
+    }
+}
+
 fn line_grid_edges(
     table: &tables::Table,
     lines: &[PdfLine],
