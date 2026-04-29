@@ -1943,6 +1943,8 @@ fn build_tsr_row_expansion(
         }
     }
 
+    // V1 targets the common 1-2 lost-row cases; larger compressions stay on
+    // the existing heuristic fallback path until we have evidence to broaden it.
     if !(2..=4).contains(&bands.len()) {
         return None;
     }
