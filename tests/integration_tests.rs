@@ -3000,3 +3000,158 @@ fn test_extract_pages_markdown_path_none_returns_all_pages() {
     let result = extract_pages_markdown(path, None).unwrap();
     assert_eq!(result.pages.len() as u32, page_count);
 }
+
+// ============================================================================
+// PROBE: investigate dense-cell text-assignment failure mode (failure mode 2)
+// ============================================================================
+
+fn synthetic_wide_row_pdf() -> Vec<u8> {
+    use lopdf::content::{Content, Operation};
+    use lopdf::{dictionary, Document, Object, Stream};
+
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let page_id = doc.new_object_id();
+    let font_id = doc.new_object_id();
+    let content_id = doc.new_object_id();
+
+    doc.objects.insert(
+        font_id,
+        dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+        }
+        .into(),
+    );
+
+    let operations = vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec!["F1".into(), 10.into()]),
+        Operation::new("Td", vec![20.into(), 700.into()]),
+        // A single Tj that visually spans multiple cells. This mirrors PDFs
+        // where a row's address/role/email columns are emitted as one literal
+        // string with embedded spaces, producing one wide TextItem.
+        Operation::new(
+            "Tj",
+            vec![Object::string_literal("Name JobTitle Email Phone")],
+        ),
+        Operation::new("ET", vec![]),
+    ];
+    let content = Content { operations }.encode().unwrap();
+    doc.objects
+        .insert(content_id, Stream::new(dictionary! {}, content).into());
+
+    doc.objects.insert(
+        page_id,
+        dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 200.into(), 800.into()],
+            "Resources" => dictionary! {
+                "Font" => dictionary! {
+                    "F1" => font_id,
+                },
+            },
+            "Contents" => content_id,
+        }
+        .into(),
+    );
+    doc.objects.insert(
+        pages_id,
+        dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![page_id.into()],
+            "Count" => 1,
+        }
+        .into(),
+    );
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    doc.trailer.set("Root", catalog_id);
+
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).unwrap();
+    bytes
+}
+
+#[test]
+fn test_extract_tables_with_structure_distributes_wide_item_across_cells() {
+    use pdf_inspector::{extract_tables_with_structure_cells_mem, TsrTableInput};
+
+    // Reproduces failure mode 2: a row of multi-token text rendered as one
+    // Tj produces a single wide TextItem that visually spans multiple cells.
+    // The current first-match-by-center routing parks the entire item in
+    // whichever cell holds the item's center, leaving the other cells empty.
+    // See production samples in scrape_id 019de788-ff41-... where 10-column
+    // grids ended up with row text packed into one cell.
+    let buf = synthetic_wide_row_pdf();
+
+    // Helvetica 10pt with width=0 falls back to char_count*font_size*0.5.
+    // "Name JobTitle Email Phone" is 25 chars → effective_width 125pt,
+    // text starts at PDF (20, 700), top-down y=[90, 100], char_w≈5pt.
+    // Tokens land at:
+    //   "Name"     chars 0-3   center≈x=30
+    //   "JobTitle" chars 5-12  center≈x=65
+    //   "Email"    chars 14-18 center≈x=100
+    //   "Phone"    chars 20-24 center≈x=130
+    let cell_bboxes = vec![
+        poly(15.0, 88.0, 50.0, 102.0),
+        poly(50.0, 88.0, 85.0, 102.0),
+        poly(85.0, 88.0, 120.0, 102.0),
+        poly(120.0, 88.0, 155.0, 102.0),
+    ];
+
+    let tokens: Vec<String> = [
+        "<table>",
+        "<tbody>",
+        "<tr>",
+        "<td></td>",
+        "<td></td>",
+        "<td></td>",
+        "<td></td>",
+        "</tr>",
+        "</tbody>",
+        "</table>",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+
+    let cells_lists = extract_tables_with_structure_cells_mem(
+        &buf,
+        &[TsrTableInput {
+            page: 0,
+            crop_pdf_pt_bbox: [0.0, 0.0, 200.0, 800.0],
+            render_dpi: 72.0,
+            structure_tokens: tokens,
+            cell_bboxes,
+        }],
+    )
+    .unwrap();
+
+    let cells = &cells_lists[0];
+    assert_eq!(cells.len(), 4);
+    assert_eq!(
+        cells[0].text, "Name",
+        "cell 0 should hold 'Name', got {:?}",
+        cells[0].text
+    );
+    assert_eq!(
+        cells[1].text, "JobTitle",
+        "cell 1 should hold 'JobTitle', got {:?}",
+        cells[1].text
+    );
+    assert_eq!(
+        cells[2].text, "Email",
+        "cell 2 should hold 'Email', got {:?}",
+        cells[2].text
+    );
+    assert_eq!(
+        cells[3].text, "Phone",
+        "cell 3 should hold 'Phone', got {:?}",
+        cells[3].text
+    );
+}
