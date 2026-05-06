@@ -277,6 +277,39 @@ pub fn detect_tables_from_rects(
             );
         }
 
+        // Drop exact / near-exact duplicates first.  Many PDFs draw the
+        // same cell rectangle multiple times — once for the cell border,
+        // again for an inner padding fill, plus a per-text-run background
+        // wrapper.  Without this dedup, the contained-sub-rect pass below
+        // can't help (it requires container area to strictly exceed the
+        // sub-rect by 20%), and the duplicated edges over-segment the grid
+        // into spurious thin rows / columns that collapse content density.
+        //
+        // Preserve original order (no sort) — cluster output is keyed by
+        // first-seen index, and a sort here would shuffle the table-emission
+        // order on multi-table pages.
+        if page_rects.len() < MAX_CLUSTER_RECTS {
+            let before = page_rects.len();
+            let mut seen: std::collections::HashSet<(i32, i32, i32, i32)> =
+                std::collections::HashSet::new();
+            page_rects.retain(|&(x, y, w, h)| {
+                let key = (
+                    x.round() as i32,
+                    y.round() as i32,
+                    w.round() as i32,
+                    h.round() as i32,
+                );
+                seen.insert(key)
+            });
+            if page_rects.len() < before {
+                debug!(
+                    "page {}: removed {} duplicate rects",
+                    page,
+                    before - page_rects.len(),
+                );
+            }
+        }
+
         // Deduplicate sub-rects: when a rect is fully contained within a
         // slightly larger rect (same column, interior Y range), the smaller
         // one is a cell-internal decoration (e.g. content-area shading
@@ -285,7 +318,11 @@ pub fn detect_tables_from_rects(
         //
         // Only remove when the container is a similarly-sized cell (height
         // ratio < 4×), NOT when the container is a table-wide background
-        // that dwarfs the sub-rect.
+        // that dwarfs the sub-rect.  Origin-anchored page-background rects
+        // also disqualify as containers — they normally exceed the 4× ratio,
+        // but when the sub-rect is itself a tall table-frame the ratio can
+        // fall under the gate, and dropping the frame collapses cluster
+        // adjacency between adjacent column-cell groups.
         //
         // Skip this O(n²) dedup when there are too many rects — pages with
         // thousands of vector-drawing rects won't benefit from cell dedup.
@@ -295,9 +332,11 @@ pub fn detect_tables_from_rects(
             page_rects.retain(|&(ax, ay, aw, ah)| {
                 let tol = 2.0;
                 !snapshot.iter().any(|&(bx, by, bw, bh)| {
+                    let container_is_page_bg = bx < 5.0 && by < 5.0;
                     // b must strictly contain a (b is larger in area)
                     bw * bh > aw * ah * 1.2
                         && bh < ah * 4.0 // container must be similarly sized, not a table background
+                        && !container_is_page_bg
                         && bx <= ax + tol
                         && (bx + bw) >= (ax + aw) - tol
                         && by <= ay + tol
@@ -1728,9 +1767,17 @@ fn detect_row_stripe_table_from_cell_rects(
     // inside a bounding-box rect (e.g. chat-transcript figures) the
     // word-boundary gaps cluster into many spurious columns, and the
     // resulting cells hold sentence fragments riddled with common English
-    // function words. Count cells with any such word and reject when
-    // 20%+ of non-empty cells match — real tabular data (labels, units,
-    // numbers) rarely contains these words.
+    // function words.
+    //
+    // The 20%-of-cells threshold catches both shapes — a prose paragraph
+    // chunked across cols where every cell carries prose, and a single
+    // prose column flanked by empty cols where the prose dominates the
+    // small population of non-empty cells. To avoid rejecting real data
+    // tables that happen to include one description column, relax only
+    // when content is well-distributed: at least 75% of columns must hold
+    // ≥2 non-empty cells. That excludes the prose-in-a-frame case (one
+    // filled col, the rest empty) while admitting "label / value /
+    // explanation / benefit"-style tables.
     if num_cols >= 4 {
         const PROSE_WORDS: &[&str] = &[
             "a", "an", "the", "of", "to", "is", "was", "are", "were", "be", "been", "in", "on",
@@ -1758,11 +1805,33 @@ fn detect_row_stripe_table_from_cell_rects(
             }
         }
         if counted > 0 && prose_cells * 5 >= counted {
+            let filled_cols = (0..num_cols)
+                .filter(|&c| {
+                    cells
+                        .iter()
+                        .filter(|row| {
+                            !row.get(c)
+                                .map(String::as_str)
+                                .unwrap_or("")
+                                .trim()
+                                .is_empty()
+                        })
+                        .count()
+                        >= 2
+                })
+                .count();
+            let well_distributed = filled_cols * 4 >= num_cols * 3;
+            if !well_distributed {
+                debug!(
+                    "  cell-rect rejected: {}/{} cells contain prose function words — likely prose ({}/{} cols filled)",
+                    prose_cells, counted, filled_cols, num_cols
+                );
+                return None;
+            }
             debug!(
-                "  cell-rect rejected: {}/{} cells contain prose function words — likely prose",
-                prose_cells, counted
+                "  cell-rect prose check relaxed: {}/{} cols filled — table-with-description-col",
+                filled_cols, num_cols
             );
-            return None;
         }
     }
 
