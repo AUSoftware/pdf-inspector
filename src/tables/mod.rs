@@ -676,14 +676,16 @@ pub(crate) fn try_build_key_value_table_from_rows(items: &[TextItem], page: u32)
     }
 
     let single_pair_allowed = key_value_single_pair_allowed(
+        KeyValueSinglePairStats {
+            paired_rows,
+            section_rows,
+            raw_left_only_rows,
+            raw_right_only_rows,
+        },
         &kv_rows,
-        paired_rows,
-        section_rows,
         header_inferred,
         left_x,
         right_x,
-        raw_left_only_rows,
-        raw_right_only_rows,
     );
     if (kv_rows.len() < 2 || paired_rows < 2) && !single_pair_allowed {
         return None;
@@ -813,6 +815,14 @@ struct KeyValueRow {
     left: String,
     right: String,
     item_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct KeyValueSinglePairStats {
+    paired_rows: usize,
+    section_rows: usize,
+    raw_left_only_rows: usize,
+    raw_right_only_rows: usize,
 }
 
 fn normalize_key_value_rows(rows: Vec<KeyValueRow>, header_inferred: bool) -> Vec<KeyValueRow> {
@@ -1066,16 +1076,13 @@ fn is_edgar_table_boundary_cell(cell: &str) -> bool {
 }
 
 fn key_value_single_pair_allowed(
+    stats: KeyValueSinglePairStats,
     rows: &[KeyValueRow],
-    paired_rows: usize,
-    section_rows: usize,
     header_inferred: bool,
     left_x: f32,
     right_x: f32,
-    raw_left_only_rows: usize,
-    raw_right_only_rows: usize,
 ) -> bool {
-    if header_inferred || paired_rows != 1 || section_rows != 0 || rows.len() != 1 {
+    if header_inferred || stats.paired_rows != 1 || stats.section_rows != 0 || rows.len() != 1 {
         return false;
     }
     if right_x - left_x < 60.0 {
@@ -1096,8 +1103,8 @@ fn key_value_single_pair_allowed(
     if key_value_cell_looks_like_sentence(&row.left) {
         return false;
     }
-    if raw_left_only_rows == 0
-        && raw_right_only_rows >= 2
+    if stats.raw_left_only_rows == 0
+        && stats.raw_right_only_rows >= 2
         && left_chars <= 70
         && right_chars <= 1_500
         && looks_like_key_value_label(&row.left)
