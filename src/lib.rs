@@ -599,24 +599,23 @@ pub fn extract_text_in_regions_mem(
         for rect in regions {
             let [rx1, ry1, rx2, ry2] = *rect;
 
-            let text = match items {
-                Some(items) => collect_text_in_region_with_options(
-                    items,
-                    rx1,
-                    ry1,
-                    rx2,
-                    ry2,
-                    page_h,
-                    coords,
-                    adaptive_threshold,
-                ),
-                None => String::new(),
+            let bounds = region_bounds(rx1, ry1, rx2, ry2, page_h, coords);
+            let matched: Vec<TextItem> = match items {
+                Some(items) => items
+                    .iter()
+                    .filter(|item| region_overlaps_item(item, bounds))
+                    .cloned()
+                    .collect(),
+                None => Vec::new(),
             };
+            let has_text_quality_issue = region_items_have_decoding_issue(&matched);
+            let text = collect_text_from_matched_items(matched, adaptive_threshold);
 
             // Check per-region text quality instead of blanket page-level
             // GID rejection. A GID font in a logo elsewhere on the page
             // shouldn't force GPU OCR for clean text regions.
-            let needs_ocr = text.trim().is_empty()
+            let needs_ocr = has_text_quality_issue
+                || text.trim().is_empty()
                 || is_garbage_text(&text)
                 || is_cid_garbage(&text)
                 || detect_encoding_issues(&text);
@@ -729,6 +728,14 @@ pub fn extract_tables_in_regions_mem(
             };
 
             if matched.is_empty() {
+                page_results.push(RegionText {
+                    text: String::new(),
+                    needs_ocr: true,
+                });
+                continue;
+            }
+
+            if region_items_have_decoding_issue(&matched) {
                 page_results.push(RegionText {
                     text: String::new(),
                     needs_ocr: true,
@@ -3655,6 +3662,13 @@ fn analyze_text_quality(items: &[TextItem]) -> TextQualityReport {
     }
 }
 
+fn region_items_have_decoding_issue(items: &[TextItem]) -> bool {
+    items.iter().any(|item| {
+        matches!(item.item_type, crate::types::ItemType::Text)
+            && text_span_has_decoding_issue(&item.text)
+    })
+}
+
 fn text_span_has_decoding_issue(text: &str) -> bool {
     let text = text.trim();
     if text.is_empty() {
@@ -5749,6 +5763,21 @@ mod tests {
 
         assert!(!quality.has_encoding_issues);
         assert!(quality.pages_needing_ocr.is_empty());
+    }
+
+    #[test]
+    fn test_region_text_quality_is_scoped_to_matched_items() {
+        let clean_region = vec![
+            test_text_item_on_page(1, "Clean native text"),
+            test_text_item_on_page(1, "Résumé déjà vu"),
+        ];
+        let garbled_region = vec![
+            test_text_item_on_page(1, "Clean prefix"),
+            test_text_item_on_page(1, "DÂB\u{009B}A4gÉ9¶0ÅDÂB\u{009B}Ê(D>öBÑ9¯"),
+        ];
+
+        assert!(!region_items_have_decoding_issue(&clean_region));
+        assert!(region_items_have_decoding_issue(&garbled_region));
     }
 
     #[test]
