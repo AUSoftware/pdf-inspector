@@ -26,6 +26,8 @@ The unscoped `firecrawl-pdf-inspector` package is deprecated in favor of `@firec
 
 The npm publish workflow publishes the compatibility wrapper in `napi/legacy` whenever `napi/legacy/package.json` has a version bump on `main`. The wrapper keeps older installs working while its README points users to the scoped package.
 
+Keep `napi/legacy/package.json` on the same version as `napi/package.json`, and pin its `@firecrawl/pdf-inspector` dependency to that same version. The publish workflow fails fast if the package versions drift.
+
 Configure npm trusted publishing for both packages against `.github/workflows/publish.yml`:
 
 - `@firecrawl/pdf-inspector`

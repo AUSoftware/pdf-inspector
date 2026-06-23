@@ -47,6 +47,12 @@ jobs:
 
           echo "scoped old=$SCOPED_OLD new=$SCOPED_NEW"
           echo "legacy old=$LEGACY_OLD new=$LEGACY_NEW"
+
+          if [ "$LEGACY_NEW" != "$SCOPED_NEW" ]; then
+            echo "Legacy package version ($LEGACY_NEW) must match scoped package version ($SCOPED_NEW)." >&2
+            exit 1
+          fi
+
           echo "scoped_version=$SCOPED_NEW" >> "$GITHUB_OUTPUT"
           echo "legacy_version=$LEGACY_NEW" >> "$GITHUB_OUTPUT"
 
