@@ -441,6 +441,7 @@ pub(crate) fn extract_page_text_items(
                                 page: page_num,
                                 is_bold: is_bold_font(base_font),
                                 is_italic: is_italic_font(base_font),
+                                is_underline: false,
                                 item_type: ItemType::Text,
                                 mcid: current_mcid(&marked_content_stack),
                             });
@@ -606,6 +607,7 @@ pub(crate) fn extract_page_text_items(
                                     page: page_num,
                                     is_bold: is_bold_font(base_font),
                                     is_italic: is_italic_font(base_font),
+                                    is_underline: false,
                                     item_type: ItemType::Text,
                                     mcid: current_mcid(&marked_content_stack),
                                 });
@@ -669,6 +671,7 @@ pub(crate) fn extract_page_text_items(
                                 page: page_num,
                                 is_bold: is_bold_font(base_font),
                                 is_italic: is_italic_font(base_font),
+                                is_underline: false,
                                 item_type: ItemType::Text,
                                 mcid: current_mcid(&marked_content_stack),
                             });
@@ -705,6 +708,7 @@ pub(crate) fn extract_page_text_items(
                                         page: page_num,
                                         is_bold: false,
                                         is_italic: false,
+                                        is_underline: false,
                                         item_type: ItemType::Image,
                                         mcid: current_mcid(&marked_content_stack),
                                     });
@@ -801,6 +805,7 @@ pub(crate) fn extract_page_text_items(
                                     page: page_num,
                                     is_bold: is_bold_font(base_font),
                                     is_italic: is_italic_font(base_font),
+                                    is_underline: false,
                                     item_type: ItemType::Text,
                                     mcid: entry
                                         .mcid

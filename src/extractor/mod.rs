@@ -6,6 +6,7 @@ pub(crate) mod content_stream;
 mod fonts;
 mod layout;
 mod links;
+mod underline;
 mod xobjects;
 
 use crate::text_utils::is_rtl_text;
@@ -176,6 +177,7 @@ fn extract_positioned_text_impl(
         if has_gid_fonts {
             gid_encoded_pages.insert(*page_num);
         }
+        underline::mark_underlined_items(&mut items, &rects, &lines, *page_num);
         let threshold = crate::text_utils::fix_letterspaced_items(&mut items);
         if threshold > 0.10 {
             page_thresholds.insert(*page_num, threshold);
@@ -591,6 +593,7 @@ pub(crate) fn merge_text_items(items: Vec<TextItem>) -> Vec<TextItem> {
                 page: first.page,
                 is_bold: first.is_bold,
                 is_italic: first.is_italic,
+                is_underline: first.is_underline,
                 item_type: first.item_type.clone(),
                 mcid: first.mcid,
             });
@@ -716,6 +719,7 @@ mod tests {
             page: 1,
             is_bold: false,
             is_italic: false,
+            is_underline: false,
             item_type: ItemType::Text,
             mcid: None,
         }
@@ -865,6 +869,7 @@ mod tests {
                 page: 1,
                 is_bold: false,
                 is_italic: false,
+                is_underline: false,
                 item_type: ItemType::Text,
                 mcid: None,
             },
@@ -879,6 +884,7 @@ mod tests {
                 page: 1,
                 is_bold: false,
                 is_italic: false,
+                is_underline: false,
                 item_type: ItemType::Text,
                 mcid: None,
             },
@@ -893,6 +899,7 @@ mod tests {
                 page: 1,
                 is_bold: false,
                 is_italic: false,
+                is_underline: false,
                 item_type: ItemType::Text,
                 mcid: None,
             },
@@ -947,6 +954,7 @@ mod tests {
                 page: 1,
                 is_bold: false,
                 is_italic: false,
+                is_underline: false,
                 item_type: ItemType::Text,
                 mcid: None,
             },
@@ -961,6 +969,7 @@ mod tests {
                 page: 1,
                 is_bold: false,
                 is_italic: false,
+                is_underline: false,
                 item_type: ItemType::Text,
                 mcid: None,
             },
@@ -975,6 +984,7 @@ mod tests {
                 page: 1,
                 is_bold: false,
                 is_italic: false,
+                is_underline: false,
                 item_type: ItemType::Text,
                 mcid: None,
             },
@@ -1000,6 +1010,7 @@ mod tests {
                 page: 1,
                 is_bold: false,
                 is_italic: false,
+                is_underline: false,
                 item_type: ItemType::Text,
                 mcid: None,
             },
@@ -1014,6 +1025,7 @@ mod tests {
                 page: 1,
                 is_bold: false,
                 is_italic: false,
+                is_underline: false,
                 item_type: ItemType::Text,
                 mcid: None,
             },
@@ -1028,6 +1040,7 @@ mod tests {
                 page: 1,
                 is_bold: false,
                 is_italic: false,
+                is_underline: false,
                 item_type: ItemType::Text,
                 mcid: None,
             },
@@ -1055,6 +1068,7 @@ mod tests {
                 page: 1,
                 is_bold: true,
                 is_italic: false,
+                is_underline: false,
                 item_type: ItemType::Text,
                 mcid: None,
             }
@@ -1089,6 +1103,7 @@ mod tests {
                 page: 1,
                 is_bold: false,
                 is_italic: false,
+                is_underline: false,
                 item_type: ItemType::Text,
                 mcid: None,
             }
@@ -1124,6 +1139,7 @@ mod tests {
                 page: 1,
                 is_bold: false,
                 is_italic: false,
+                is_underline: false,
                 item_type: ItemType::Text,
                 mcid: None,
             },
@@ -1138,6 +1154,7 @@ mod tests {
                 page: 1,
                 is_bold: false,
                 is_italic: false,
+                is_underline: false,
                 item_type: ItemType::Text,
                 mcid: None,
             },
@@ -1152,6 +1169,7 @@ mod tests {
                 page: 1,
                 is_bold: false,
                 is_italic: false,
+                is_underline: false,
                 item_type: ItemType::Text,
                 mcid: None,
             },
@@ -1174,6 +1192,7 @@ mod tests {
             page: 1,
             is_bold: false,
             is_italic: false,
+            is_underline: false,
             item_type: ItemType::Text,
             mcid: None,
         }
@@ -1286,6 +1305,7 @@ mod tests {
                 page: 1,
                 is_bold: false,
                 is_italic: false,
+                is_underline: false,
                 item_type: ItemType::Text,
                 mcid: None,
             },
@@ -1300,6 +1320,7 @@ mod tests {
                 page: 1,
                 is_bold: false,
                 is_italic: false,
+                is_underline: false,
                 item_type: ItemType::Text,
                 mcid: None,
             },
@@ -1324,6 +1345,7 @@ mod tests {
                 page: 1,
                 is_bold: false,
                 is_italic: false,
+                is_underline: false,
                 item_type: ItemType::Text,
                 mcid: None,
             },
@@ -1338,6 +1360,7 @@ mod tests {
                 page: 1,
                 is_bold: false,
                 is_italic: false,
+                is_underline: false,
                 item_type: ItemType::Text,
                 mcid: None,
             },
@@ -1378,6 +1401,7 @@ mod tests {
                 page,
                 is_bold: false,
                 is_italic: false,
+                is_underline: false,
                 item_type: ItemType::Text,
                 mcid: None,
             }],
@@ -1422,6 +1446,7 @@ mod tests {
                 page,
                 is_bold: false,
                 is_italic: false,
+                is_underline: false,
                 item_type: ItemType::Text,
                 mcid: None,
             }],
@@ -1466,6 +1491,7 @@ mod tests {
                 page,
                 is_bold: false,
                 is_italic: false,
+                is_underline: false,
                 item_type: ItemType::Text,
                 mcid: None,
             }],
@@ -1503,6 +1529,7 @@ mod tests {
             page: 1,
             is_bold: false,
             is_italic: false,
+            is_underline: false,
             item_type: ItemType::Text,
             mcid: None,
         }
