@@ -568,6 +568,13 @@ pub(crate) fn merge_text_items(items: Vec<TextItem>) -> Vec<TextItem> {
                 if (next.font_size - first.font_size).abs() > first.font_size * 0.20 {
                     break;
                 }
+                // Never merge across bold/italic boundaries: the merged item
+                // carries `first`'s flags, so absorbing a styled run into a
+                // plain neighbor (or vice versa) silently erases the styling
+                // that markdown emission and downstream inline-styling need.
+                if next.is_bold != first.is_bold || next.is_italic != first.is_italic {
+                    break;
+                }
                 let gap = next.x - end_x;
                 let x_gap_max = if *preserve_stream_order && is_standalone_bullet_text(&text) {
                     first.font_size * 1.2
@@ -710,7 +717,17 @@ pub(crate) fn merge_subscript_items(items: Vec<TextItem>) -> Vec<TextItem> {
                         let gap = item.x - parent_right;
                         // Subscripts must be tightly adjacent (within ~1pt)
                         if gap < parent.font_size * 0.2 && gap > -parent.font_size * 0.3 {
-                            parent.text.push_str(&item.text);
+                            // Preserve the script when absorbing it: map the
+                            // digits to Unicode sub/superscript forms so the
+                            // raised/lowered rendering survives in extracted
+                            // text ("H"+"2" → "H₂", "word"+"2" → "word²").
+                            // NFKC/NFKD normalization folds these back to
+                            // plain digits, so text matching downstream is
+                            // unaffected. Direction from the baseline offset
+                            // (y-up here): raised → superscript (footnote
+                            // refs), lowered/level → subscript (chemistry).
+                            let raised = item.y > parent.y + parent.font_size * 0.1;
+                            parent.text.push_str(&map_script_digits(&item.text, raised));
                             parent.width = (item.x + item.width) - parent.x;
                             continue;
                         }
@@ -723,6 +740,21 @@ pub(crate) fn merge_subscript_items(items: Vec<TextItem>) -> Vec<TextItem> {
     }
 
     result
+}
+
+/// Map ASCII digits to their Unicode superscript (`raised`) or subscript
+/// forms. Callers guarantee digit-only input (see `merge_subscript_items`);
+/// anything else passes through unchanged.
+fn map_script_digits(text: &str, raised: bool) -> String {
+    const SUP: [char; 10] = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+    const SUB: [char; 10] = ['₀', '₁', '₂', '₃', '₄', '₅', '₆', '₇', '₈', '₉'];
+    text.chars()
+        .map(|c| match c.to_digit(10) {
+            Some(d) if raised => SUP[d as usize],
+            Some(d) => SUB[d as usize],
+            None => c,
+        })
+        .collect()
 }
 
 /// Helper to get f32 from Object
@@ -1633,7 +1665,8 @@ mod tests {
         ];
         let merged = merge_subscript_items(items);
         assert_eq!(merged.len(), 2);
-        assert_eq!(merged[0].text, "NH3");
+        // Lowered baseline → Unicode subscript form (NFKC folds back to "NH3")
+        assert_eq!(merged[0].text, "NH₃");
         assert_eq!(merged[1].text, "Cl");
     }
 
@@ -1647,8 +1680,19 @@ mod tests {
         ];
         let merged = merge_subscript_items(items);
         assert_eq!(merged.len(), 2);
-        assert_eq!(merged[0].text, "H2");
+        assert_eq!(merged[0].text, "H₂");
         assert_eq!(merged[1].text, "O");
+    }
+
+    #[test]
+    fn test_merge_subscript_items_raised_marker_becomes_superscript() {
+        // Footnote reference: "word" followed by a RAISED small "2" → word²
+        let mut marker = make_item_fs("2", 90.0, 502.5, 2.3, 4.7);
+        marker.y = 502.5; // raised above the 499.0 parent baseline
+        let items = vec![make_item_fs("word", 78.0, 499.0, 12.0, 8.0), marker];
+        let merged = merge_subscript_items(items);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "word²");
     }
 
     #[test]
