@@ -559,7 +559,6 @@ pub(crate) fn merge_text_items(items: Vec<TextItem>) -> Vec<TextItem> {
             let first = group[i];
             let mut text = first.text.clone();
             let mut end_x = first.x + effective_merge_width(first);
-            let mut is_underline = first.is_underline;
 
             let mut j = i + 1;
             while j < group.len() {
@@ -568,11 +567,16 @@ pub(crate) fn merge_text_items(items: Vec<TextItem>) -> Vec<TextItem> {
                 if (next.font_size - first.font_size).abs() > first.font_size * 0.20 {
                     break;
                 }
-                // Never merge across bold/italic boundaries: the merged item
+                // Never merge across style boundaries: the merged item
                 // carries `first`'s flags, so absorbing a styled run into a
                 // plain neighbor (or vice versa) silently erases the styling
-                // that markdown emission and downstream inline-styling need.
-                if next.is_bold != first.is_bold || next.is_italic != first.is_italic {
+                // that markdown emission and downstream inline-styling need —
+                // and OR-ing underline instead would stretch `<u>` spans over
+                // neighboring plain text.
+                if next.is_bold != first.is_bold
+                    || next.is_italic != first.is_italic
+                    || next.is_underline != first.is_underline
+                {
                     break;
                 }
                 let gap = next.x - end_x;
@@ -613,7 +617,6 @@ pub(crate) fn merge_text_items(items: Vec<TextItem>) -> Vec<TextItem> {
                     text.push(' ');
                 }
                 text.push_str(&next.text);
-                is_underline |= next.is_underline;
                 let next_end = next.x + effective_merge_width(next);
                 end_x = if *preserve_stream_order {
                     end_x.max(next_end)
@@ -634,7 +637,7 @@ pub(crate) fn merge_text_items(items: Vec<TextItem>) -> Vec<TextItem> {
                 page: first.page,
                 is_bold: first.is_bold,
                 is_italic: first.is_italic,
-                is_underline,
+                is_underline: first.is_underline,
                 item_type: first.item_type.clone(),
                 mcid: first.mcid,
             });
@@ -817,6 +820,28 @@ mod tests {
     }
 
     #[test]
+    fn merge_items_breaks_at_style_boundaries() {
+        // A styled run adjacent to plain text must stay a separate item —
+        // merging would erase the flags (italic) or stretch the span
+        // (underline) before markdown emission sees them.
+        let mut italic = make_merge_item("emphasis", 150.0, 40.0);
+        italic.is_italic = true;
+        let mut underlined = make_merge_item("term", 195.0, 20.0);
+        underlined.is_underline = true;
+        let items = vec![
+            make_merge_item("plain lead", 100.0, 48.0),
+            italic,
+            underlined,
+            make_merge_item("plain tail", 218.0, 45.0),
+        ];
+        let merged = merge_text_items(items);
+        assert_eq!(merged.len(), 4);
+        assert!(merged[1].is_italic && !merged[1].is_underline);
+        assert!(merged[2].is_underline && !merged[2].is_italic);
+        assert!(!merged[3].is_underline && !merged[3].is_italic);
+    }
+
+    #[test]
     fn merge_items_no_space_before_period() {
         // Simulate Tc/Tw-adjusted width: "date" width is smaller than the gap
         // to "." due to negative Tc, but period should still join without space.
@@ -856,6 +881,10 @@ mod tests {
 
     #[test]
     fn merge_items_preserves_underline_from_later_fragment() {
+        // Fragments with differing underline stay separate items — OR-merging
+        // would stretch the eventual `<u>` span over the plain fragment.
+        // Line-level text assembly still joins them without a space (tight
+        // gap), so the rendered word is unchanged: `pre<u>fix</u>`.
         let mut items = vec![
             make_merge_item("pre", 100.0, 18.0),
             make_merge_item("fix", 119.0, 18.0),
@@ -864,9 +893,11 @@ mod tests {
 
         let merged = merge_text_items(items);
 
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].text, "prefix");
-        assert!(merged[0].is_underline);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].text, "pre");
+        assert!(!merged[0].is_underline);
+        assert_eq!(merged[1].text, "fix");
+        assert!(merged[1].is_underline);
     }
 
     #[test]
