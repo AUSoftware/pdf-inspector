@@ -6,7 +6,7 @@ pub(crate) mod content_stream;
 mod fonts;
 mod layout;
 mod links;
-mod underline;
+pub(crate) mod underline;
 mod xobjects;
 
 use crate::text_utils::is_rtl_text;
@@ -177,7 +177,6 @@ fn extract_positioned_text_impl(
         if has_gid_fonts {
             gid_encoded_pages.insert(*page_num);
         }
-        underline::mark_underlined_items(&mut items, &rects, &lines, *page_num);
         let threshold = crate::text_utils::fix_letterspaced_items(&mut items);
         if threshold > 0.10 {
             page_thresholds.insert(*page_num, threshold);

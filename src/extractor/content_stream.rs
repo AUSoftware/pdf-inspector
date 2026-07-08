@@ -97,6 +97,12 @@ pub(crate) fn extract_page_text_items(
     // Completed subpaths (each a vec of line segments) for f/f* rect extraction
     let mut pending_subpaths: Vec<Vec<(f32, f32, f32, f32)>> = Vec::new();
     let mut fill_rects: Vec<PdfRect> = Vec::new();
+    // `re` rects awaiting a paint operator. Underline detection must only
+    // see painted rects: a `re W n` clip path or `re n` no-op draws nothing
+    // on the page, so treating every `re` as ink would underline text that
+    // merely sits near an invisible clip boundary.
+    let mut pending_re_rects: Vec<PdfRect> = Vec::new();
+    let mut painted_rects: Vec<PdfRect> = Vec::new();
 
     // Get fonts for encoding
     let fonts = doc.get_page_fonts(page_id).unwrap_or_default();
@@ -830,13 +836,19 @@ pub(crate) fn extract_page_text_items(
                     let y_dev = rx * ctm[1] + ry * ctm[3] + ctm[5];
                     let w_dev = rw * ctm[0];
                     let h_dev = rh * ctm[3];
-                    rects.push(PdfRect {
+                    let rect = PdfRect {
                         x: x_dev,
                         y: y_dev,
                         width: w_dev,
                         height: h_dev,
                         page: page_num,
-                    });
+                    };
+                    // Underline detection must only see rects that are
+                    // actually painted — a `re` used purely as a clip path
+                    // (`re W n`) or discarded (`re n`) draws nothing. Hold
+                    // the rect as pending until a paint operator confirms it.
+                    pending_re_rects.push(rect.clone());
+                    rects.push(rect);
                 }
             }
             // ── Path construction operators ──────────────────────
@@ -898,6 +910,7 @@ pub(crate) fn extract_page_text_items(
                         page: page_num,
                     });
                 }
+                painted_rects.append(&mut pending_re_rects);
                 pending_subpaths.clear();
                 path_subpath_start = None;
                 path_current = None;
@@ -925,6 +938,7 @@ pub(crate) fn extract_page_text_items(
                         page: page_num,
                     });
                 }
+                painted_rects.append(&mut pending_re_rects);
                 pending_subpaths.clear();
                 path_subpath_start = None;
                 path_current = None;
@@ -982,6 +996,7 @@ pub(crate) fn extract_page_text_items(
                         }
                     }
                 }
+                painted_rects.append(&mut pending_re_rects);
                 pending_lines.clear();
                 path_subpath_start = None;
                 path_current = None;
@@ -1047,7 +1062,10 @@ pub(crate) fn extract_page_text_items(
                 // Do NOT clear pending_lines — the following `n` does that
             }
             "n" => {
-                // end path (no-op): discard
+                // end path (no-op): discard — including any `re` rects that
+                // were only ever part of a clip path (`re W n`), which draw
+                // no ink and must not feed underline detection.
+                pending_re_rects.clear();
                 pending_lines.clear();
                 pending_subpaths.clear();
                 path_subpath_start = None;
@@ -1055,6 +1073,16 @@ pub(crate) fn extract_page_text_items(
             }
             _ => {}
         }
+    }
+
+    // Underline detection reads only painted ink: `re` rects confirmed by
+    // a paint operator plus filled-subpath rects — never clip-only rects,
+    // which draw nothing. Runs pre-rotation: items, lines, and rules are
+    // all still in the same device space here.
+    {
+        let mut underline_rects = painted_rects;
+        underline_rects.extend(fill_rects.iter().cloned());
+        super::underline::mark_underlined_items(&mut items, &underline_rects, &lines, page_num);
     }
 
     // Only use clip/fill rects when no `re` rects exist on this page.

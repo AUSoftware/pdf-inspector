@@ -55,11 +55,20 @@ fn rules_from_graphics(rects: &[PdfRect], lines: &[PdfLine], page: u32) -> Vec<R
         if r.page != page {
             continue;
         }
-        // Thin filled rect used as an underline rule.
-        if r.height <= MAX_RULE_THICKNESS && r.width > 1.0 {
+        // Thin filled rect used as an underline rule. Extents are
+        // normalized first: `re` operands pass through the CTM, so
+        // width/height can be negative (flipped axes / negative scale) —
+        // without normalization negative-width rules are missed and
+        // negative-height bands sneak past the thickness check.
+        let (x1, x2) = if r.width >= 0.0 {
+            (r.x, r.x + r.width)
+        } else {
+            (r.x + r.width, r.x)
+        };
+        if r.height.abs() <= MAX_RULE_THICKNESS && x2 - x1 > 1.0 {
             rules.push(Rule {
-                x1: r.x,
-                x2: r.x + r.width,
+                x1,
+                x2,
                 y: r.y + r.height / 2.0,
             });
         }
@@ -211,6 +220,38 @@ mod tests {
         let mut items = vec![item("wide text item", 100.0, 500.0, 100.0, 10.0)];
         let lines = vec![hline(100.0, 125.0, 498.5)];
         mark_underlined_items(&mut items, &[], &lines, 1);
+        assert!(!items[0].is_underline);
+    }
+
+    #[test]
+    fn negative_width_rect_is_normalized_and_marks_underline() {
+        // A CTM with negative x-scale (or negative `re` operands) produces
+        // rects whose width is negative; the rule extents must normalize.
+        let mut items = vec![item("underlined", 100.0, 500.0, 60.0, 10.0)];
+        let rects = vec![PdfRect {
+            x: 160.0,
+            y: 497.8,
+            width: -60.0,
+            height: 0.8,
+            page: 1,
+        }];
+        mark_underlined_items(&mut items, &rects, &[], 1);
+        assert!(items[0].is_underline);
+    }
+
+    #[test]
+    fn negative_height_band_is_not_an_underline() {
+        // A 14pt band expressed with negative height must not pass the
+        // thickness check via sign trickery.
+        let mut items = vec![item("text", 100.0, 500.0, 60.0, 10.0)];
+        let rects = vec![PdfRect {
+            x: 95.0,
+            y: 509.0,
+            width: 80.0,
+            height: -14.0,
+            page: 1,
+        }];
+        mark_underlined_items(&mut items, &rects, &[], 1);
         assert!(!items[0].is_underline);
     }
 
