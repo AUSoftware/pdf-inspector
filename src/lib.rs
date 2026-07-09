@@ -3748,8 +3748,6 @@ struct CipherGarbleStats {
     letter_counts: [u32; 26],
     ascii_letters: usize,
     ascii_vowels: usize,
-    ascii_uppercase: usize,
-    ascii_lowercase: usize,
     /// Accented Latin letters (Latin-1 Supplement through Latin Extended-B,
     /// plus Latin Extended Additional). Count toward Latin dominance only.
     latin_ext_letters: usize,
@@ -3770,11 +3768,6 @@ impl CipherGarbleStats {
                 self.ascii_letters += 1;
                 if matches!(ch.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u') {
                     self.ascii_vowels += 1;
-                }
-                if ch.is_ascii_uppercase() {
-                    self.ascii_uppercase += 1;
-                } else {
-                    self.ascii_lowercase += 1;
                 }
                 if let Some(p) = prev {
                     self.letter_bigrams += 1;
@@ -3819,6 +3812,29 @@ impl CipherGarbleStats {
         dot / (norm_obs.sqrt() * norm_en)
     }
 
+    /// Cosine similarity between the observed histogram and English
+    /// frequencies after sorting BOTH descending — i.e. comparing the *shape*
+    /// of the frequency profile, ignoring which letter sits where. A
+    /// substitution cipher is a bijection, so it preserves this shape exactly
+    /// (att10k 0.97, arbitrary shifts 0.99) regardless of case or offset.
+    /// Non-linguistic ASCII has a different profile: a small alphabet is far
+    /// steeper (random DNA 0.74, hex dumps 0.81), so the shape diverges.
+    fn english_shape_cosine(&self) -> f64 {
+        if self.ascii_letters == 0 {
+            return 1.0;
+        }
+        let n = self.ascii_letters as f64;
+        let mut obs: [f64; 26] = std::array::from_fn(|i| self.letter_counts[i] as f64 / n);
+        obs.sort_unstable_by(|a, b| b.total_cmp(a));
+        let mut en = ENGLISH_LETTER_FREQ;
+        en.sort_unstable_by(|a, b| b.total_cmp(a));
+
+        let dot: f64 = obs.iter().zip(en).map(|(o, e)| o * e).sum();
+        let norm_obs = obs.iter().map(|o| o * o).sum::<f64>().sqrt();
+        let norm_en = en.iter().map(|e| e * e).sum::<f64>().sqrt();
+        dot / (norm_obs * norm_en)
+    }
+
     /// Thresholds validated against the 380-document pdf-evals snapshot
     /// corpus (0 false positives) and the garbled ParseBench `att10k` page
     /// (vowel ratio 0.245, case-shift rate 0.225, cosine 0.532). Closest
@@ -3829,19 +3845,6 @@ impl CipherGarbleStats {
         if self.ascii_letters < 200
             || self.non_latin_letters > self.ascii_letters + self.latin_ext_letters
         {
-            return false;
-        }
-
-        // Require mixed case. Garbled English is a permutation of natural
-        // language, which carries sentence capitalization: block-straddling
-        // shifts invert the case ratio (att10k: 60% upper) and in-case shifts
-        // preserve it (~3% upper), but both keep some of each case. Genuinely
-        // non-linguistic ASCII that is merely "unlike English" — DNA/protein
-        // sequences, ticker symbols, hex dumps, code — is uniform case (all
-        // upper or all lower), so exempting single-case text keeps that
-        // structured content out of OCR while still catching cipher garble.
-        let minority_case = self.ascii_uppercase.min(self.ascii_lowercase);
-        if minority_case * 100 < self.ascii_letters {
             return false;
         }
 
@@ -3859,9 +3862,19 @@ impl CipherGarbleStats {
         let case_shifts = self.letter_bigrams >= 100
             && self.case_shift_bigrams as f64 >= self.letter_bigrams as f64 * 0.10;
 
-        // Signal 2: the letter histogram no longer resembles natural language
-        // (catches shift amounts that do not straddle the case blocks).
-        case_shifts || self.english_cosine() < 0.60
+        // Signal 2: the histogram is a permutation of natural language — an
+        // English-like frequency SHAPE (sorted cosine high) but with letters
+        // in the wrong POSITIONS (unsorted cosine low). This is the signature
+        // of a substitution cipher and is case-independent, so it catches
+        // all-lowercase and all-uppercase shifts as well as case-straddling
+        // ones. Genuinely non-linguistic ASCII that is merely "unlike English"
+        // fails one of the two halves: DNA/hex dumps have too steep a profile
+        // (shape cosine < 0.90), while protein sequences, ticker symbols and
+        // base64 are not sufficiently unlike English in position (unsorted
+        // cosine ≥ 0.60) — so none of them are routed to OCR.
+        let permuted_language = self.english_cosine() < 0.60 && self.english_shape_cosine() >= 0.90;
+
+        case_shifts || permuted_language
     }
 }
 
@@ -6177,23 +6190,55 @@ mod tests {
         assert!(!detect_encoding_issues(caps));
     }
 
+    // A Caesar shift of prose that stays within a single case block does not
+    // trigger the case-shift signal, but it permutes the letter histogram: the
+    // frequency SHAPE stays English-like while letter POSITIONS scramble, so
+    // the permutation signal catches it regardless of case.
+    const CAESAR_PROSE: &str =
+        "The registrant hereby agrees to furnish a copy of any such instrument to the \
+        Commission upon request. This certificate of designations was filed February with \
+        respect to Series Preferred Stock and incorporated herein by reference to the annual \
+        report on form for the period ended December as amended and restated thereafter.";
+
+    fn caesar_shift(text: &str, k: u8) -> String {
+        text.chars()
+            .map(|c| match c {
+                'a'..='z' => (((c as u8 - b'a' + k) % 26) + b'a') as char,
+                'A'..='Z' => (((c as u8 - b'A' + k) % 26) + b'A') as char,
+                _ => c,
+            })
+            .collect()
+    }
+
     #[test]
-    fn test_in_case_caesar_shift_flagged() {
-        // A Caesar shift that stays within the lowercase block does not
-        // trigger the case-shift signal, but permutes the letter histogram so
-        // the frequency signal catches it. It is still mixed case (sentence
-        // capitals survive the shift), so the mixed-case guard lets it through.
-        let shifted = "Wkh uhjlvwudqw khuhec djuhhv wr ixuqlvk d frsc ri dqc vxfk lqvwuxphqw \
-            wr wkh Frpplvvlrq xsrq uhtxhvw. Wklv fhuwlilfdwh ri ghvljqdwlrqv zdv ilohg \
-            Iheuxduc zlwk uhvshfw wr Vhulhv Suhihuuhg Vwrfn dqg lqfrusrudwhg khuhlq ec \
-            uhihuhqfh wr wkh dqqxdo uhsruw rq irup iru wkh shulrg hqghg Ghfhpehu dv dphqghg.";
-        assert!(detect_encoding_issues(shifted));
+    fn test_mixed_case_caesar_shift_flagged() {
+        assert!(detect_encoding_issues(&caesar_shift(CAESAR_PROSE, 3)));
+    }
+
+    #[test]
+    fn test_all_lowercase_caesar_shift_flagged() {
+        // Uniform all-lowercase garbled prose: the earlier mixed-case guard
+        // would have exempted this, so it must be caught by the case-agnostic
+        // permutation signal instead.
+        assert!(detect_encoding_issues(&caesar_shift(
+            &CAESAR_PROSE.to_lowercase(),
+            5
+        )));
+    }
+
+    #[test]
+    fn test_all_uppercase_caesar_shift_flagged() {
+        assert!(detect_encoding_issues(&caesar_shift(
+            &CAESAR_PROSE.to_uppercase(),
+            7
+        )));
     }
 
     #[test]
     fn test_dna_sequence_not_flagged_as_cipher() {
-        // Uniform-case, non-linguistic ASCII: unlike English (low vowel ratio,
-        // low cosine) but not garbled text. The mixed-case guard exempts it.
+        // Non-linguistic ASCII: unlike English (low vowel ratio, low cosine)
+        // but not garbled. Its 4-letter alphabet makes the frequency profile
+        // too steep, so the shape cosine falls below the permutation threshold.
         let dna = "ACGT".repeat(120);
         assert!(!detect_encoding_issues(&dna));
     }
