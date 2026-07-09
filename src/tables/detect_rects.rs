@@ -1473,6 +1473,10 @@ fn detect_row_stripe_table(
         (col_edges, cells)
     };
     let num_cols = col_edges.len() - 1;
+    if row_stripe_is_sparse_prose_outline(&cells) {
+        debug!("  row-stripe rejected: sparse outline/prose continuation shape");
+        return None;
+    }
 
     let column_centers: Vec<f32> = (0..num_cols)
         .map(|c| (col_edges[c] + col_edges[c + 1]) / 2.0)
@@ -1489,6 +1493,57 @@ fn detect_row_stripe_table(
     );
 
     Some(Table::new(column_centers, row_centers, cells, item_indices))
+}
+
+fn row_stripe_is_sparse_prose_outline(cells: &[Vec<String>]) -> bool {
+    let Some(num_cols) = cells.first().map(|row| row.len()) else {
+        return false;
+    };
+    if num_cols != 2 || cells.len() < 4 {
+        return false;
+    }
+
+    let non_empty_rows = cells
+        .iter()
+        .filter(|row| row.iter().any(|cell| !cell.trim().is_empty()))
+        .count();
+    if non_empty_rows < 4 {
+        return false;
+    }
+
+    let mut col_counts = [0usize; 2];
+    for row in cells {
+        for (idx, cell) in row.iter().enumerate() {
+            if !cell.trim().is_empty() {
+                col_counts[idx] += 1;
+            }
+        }
+    }
+
+    let (sparse_col, dense_col) = if col_counts[0] <= col_counts[1] {
+        (0usize, 1usize)
+    } else {
+        (1usize, 0usize)
+    };
+    let sparse_count = col_counts[sparse_col];
+    let dense_count = col_counts[dense_col];
+    if sparse_count * 2 >= non_empty_rows || dense_count * 3 < non_empty_rows * 2 {
+        return false;
+    }
+
+    let blank_sparse_dense_rows = cells
+        .iter()
+        .filter(|row| row[sparse_col].trim().is_empty() && !row[dense_col].trim().is_empty())
+        .count();
+    if blank_sparse_dense_rows * 2 < non_empty_rows {
+        return false;
+    }
+
+    let long_dense_cells = cells
+        .iter()
+        .filter(|row| row[dense_col].split_whitespace().count() >= 6)
+        .count();
+    long_dense_cells * 2 >= dense_count
 }
 
 /// Detect a table from cell-background rects that failed grid detection.
