@@ -3748,6 +3748,8 @@ struct CipherGarbleStats {
     letter_counts: [u32; 26],
     ascii_letters: usize,
     ascii_vowels: usize,
+    ascii_uppercase: usize,
+    ascii_lowercase: usize,
     /// Accented Latin letters (Latin-1 Supplement through Latin Extended-B,
     /// plus Latin Extended Additional). Count toward Latin dominance only.
     latin_ext_letters: usize,
@@ -3768,6 +3770,11 @@ impl CipherGarbleStats {
                 self.ascii_letters += 1;
                 if matches!(ch.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u') {
                     self.ascii_vowels += 1;
+                }
+                if ch.is_ascii_uppercase() {
+                    self.ascii_uppercase += 1;
+                } else {
+                    self.ascii_lowercase += 1;
                 }
                 if let Some(p) = prev {
                     self.letter_bigrams += 1;
@@ -3822,6 +3829,19 @@ impl CipherGarbleStats {
         if self.ascii_letters < 200
             || self.non_latin_letters > self.ascii_letters + self.latin_ext_letters
         {
+            return false;
+        }
+
+        // Require mixed case. Garbled English is a permutation of natural
+        // language, which carries sentence capitalization: block-straddling
+        // shifts invert the case ratio (att10k: 60% upper) and in-case shifts
+        // preserve it (~3% upper), but both keep some of each case. Genuinely
+        // non-linguistic ASCII that is merely "unlike English" — DNA/protein
+        // sequences, ticker symbols, hex dumps, code — is uniform case (all
+        // upper or all lower), so exempting single-case text keeps that
+        // structured content out of OCR while still catching cipher garble.
+        let minority_case = self.ascii_uppercase.min(self.ascii_lowercase);
+        if minority_case * 100 < self.ascii_letters {
             return false;
         }
 
@@ -6155,6 +6175,43 @@ mod tests {
             TWENTY TWENTY AND INCORPORATED HEREIN BY REFERENCE TO THE ANNUAL REPORT ON FORM \
             TENK FOR THE PERIOD ENDED DECEMBER THIRTYFIRST TWENTY NINETEEN AS AMENDED";
         assert!(!detect_encoding_issues(caps));
+    }
+
+    #[test]
+    fn test_in_case_caesar_shift_flagged() {
+        // A Caesar shift that stays within the lowercase block does not
+        // trigger the case-shift signal, but permutes the letter histogram so
+        // the frequency signal catches it. It is still mixed case (sentence
+        // capitals survive the shift), so the mixed-case guard lets it through.
+        let shifted = "Wkh uhjlvwudqw khuhec djuhhv wr ixuqlvk d frsc ri dqc vxfk lqvwuxphqw \
+            wr wkh Frpplvvlrq xsrq uhtxhvw. Wklv fhuwlilfdwh ri ghvljqdwlrqv zdv ilohg \
+            Iheuxduc zlwk uhvshfw wr Vhulhv Suhihuuhg Vwrfn dqg lqfrusrudwhg khuhlq ec \
+            uhihuhqfh wr wkh dqqxdo uhsruw rq irup iru wkh shulrg hqghg Ghfhpehu dv dphqghg.";
+        assert!(detect_encoding_issues(shifted));
+    }
+
+    #[test]
+    fn test_dna_sequence_not_flagged_as_cipher() {
+        // Uniform-case, non-linguistic ASCII: unlike English (low vowel ratio,
+        // low cosine) but not garbled text. The mixed-case guard exempts it.
+        let dna = "ACGT".repeat(120);
+        assert!(!detect_encoding_issues(&dna));
+    }
+
+    #[test]
+    fn test_protein_sequence_not_flagged_as_cipher() {
+        let protein =
+            "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKR"
+                .repeat(6);
+        assert!(!detect_encoding_issues(&protein));
+    }
+
+    #[test]
+    fn test_ticker_list_not_flagged_as_cipher() {
+        let tickers = "AAPL MSFT GOOG TSLA NVDA AMZN META NFLX AMD INTC CSCO ORCL CRM ADBE QCOM \
+            TXN AVGO MU LRCX KLAC ASML SNPS CDNS FTNT PANW "
+            .repeat(4);
+        assert!(!detect_encoding_issues(&tickers));
     }
 
     #[test]
