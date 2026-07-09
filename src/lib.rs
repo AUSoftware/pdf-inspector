@@ -3734,6 +3734,10 @@ struct PageTextQualityEvidence {
     replacement_chars: usize,
     replacement_spans: usize,
     longest_replacement_run: usize,
+    ascii_letters: usize,
+    ascii_vowels: usize,
+    ascii_word_tokens: usize,
+    ascii_common_word_hits: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3753,6 +3757,7 @@ fn analyze_text_quality(items: &[TextItem]) -> TextQualityReport {
 
         let evidence = evidence_by_page.entry(item.page).or_default();
         evidence.chars += item.text.chars().filter(|ch| !ch.is_whitespace()).count();
+        record_ascii_language_evidence(evidence, &item.text);
 
         match text_span_decoding_issue_kind(&item.text) {
             Some(TextSpanIssueKind::Strong) => {
@@ -3776,7 +3781,9 @@ fn analyze_text_quality(items: &[TextItem]) -> TextQualityReport {
         if reasons_by_page.contains_key(&page) {
             continue;
         }
-        if page_replacement_evidence_needs_ocr(&evidence) {
+        if page_replacement_evidence_needs_ocr(&evidence)
+            || printable_ascii_mojibake_needs_ocr(&evidence)
+        {
             add_ocr_reason(
                 &mut reasons_by_page,
                 page,
@@ -3877,6 +3884,102 @@ fn replacement_text_stats(text: &str) -> (usize, usize) {
     }
 
     (replacement, longest_run)
+}
+
+fn record_ascii_language_evidence(evidence: &mut PageTextQualityEvidence, text: &str) {
+    let mut word = String::new();
+
+    for ch in text.chars() {
+        if ch.is_ascii_alphabetic() {
+            evidence.ascii_letters += 1;
+            if matches!(ch.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u') {
+                evidence.ascii_vowels += 1;
+            }
+            word.push(ch.to_ascii_lowercase());
+        } else {
+            flush_ascii_word_evidence(evidence, &mut word);
+        }
+    }
+
+    flush_ascii_word_evidence(evidence, &mut word);
+}
+
+fn flush_ascii_word_evidence(evidence: &mut PageTextQualityEvidence, word: &mut String) {
+    const COMMON_WORDS: [&str; 46] = [
+        "the",
+        "and",
+        "that",
+        "for",
+        "with",
+        "from",
+        "this",
+        "are",
+        "not",
+        "our",
+        "was",
+        "were",
+        "which",
+        "will",
+        "shall",
+        "has",
+        "have",
+        "had",
+        "its",
+        "their",
+        "these",
+        "those",
+        "into",
+        "over",
+        "under",
+        "between",
+        "during",
+        "page",
+        "exhibit",
+        "certificate",
+        "company",
+        "agreement",
+        "securities",
+        "dated",
+        "period",
+        "ending",
+        "december",
+        "february",
+        "registered",
+        "holders",
+        "obligations",
+        "guarantee",
+        "deferred",
+        "compensation",
+        "telephone",
+        "pursuant",
+    ];
+
+    if word.len() >= 3 {
+        evidence.ascii_word_tokens += 1;
+        if COMMON_WORDS.contains(&word.as_str()) {
+            evidence.ascii_common_word_hits += 1;
+        }
+    }
+    word.clear();
+}
+
+fn printable_ascii_mojibake_needs_ocr(evidence: &PageTextQualityEvidence) -> bool {
+    // A broken ToUnicode bfrange can still produce entirely printable ASCII,
+    // so character-validity checks alone cannot catch it. Require a large,
+    // prose-sized sample and combine two independent language signals to keep
+    // short labels, identifiers, formulas, and non-Latin pages out of scope.
+    if evidence.ascii_letters < 600 || evidence.ascii_word_tokens < 80 {
+        return false;
+    }
+
+    if evidence.ascii_letters * 2 < evidence.chars {
+        return false;
+    }
+
+    let vowel_ratio_bps = evidence.ascii_vowels * 10_000 / evidence.ascii_letters;
+    let common_word_hit_bps = evidence.ascii_common_word_hits * 10_000 / evidence.ascii_word_tokens;
+
+    vowel_ratio_bps <= 3_000 && common_word_hit_bps <= 300
 }
 
 fn page_replacement_evidence_needs_ocr(evidence: &PageTextQualityEvidence) -> bool {
@@ -6008,6 +6111,31 @@ mod tests {
             quality.reasons_by_page.get(&3).cloned(),
             Some(vec![OCR_REASON_SUSPECTED_GARBLED_TEXT.to_string()])
         );
+    }
+
+    #[test]
+    fn test_text_quality_flags_printable_ascii_mojibake() {
+        let shifted = "8VceZWZTReVW9VdZXReZdhZeYcVdaVTeeHVcZVd8EcVWVccVUHeT:iYZSZe VScfRcj CZdecfVehYZTYUVWZVdeYVcZXYedWY]UVcdW]X'eVcUVSeYVcVXZdecReRUR]]ed";
+        let items = vec![test_text_item_on_page(1, &shifted.repeat(12))];
+
+        let quality = analyze_text_quality(&items);
+
+        assert_eq!(quality.pages_needing_ocr, vec![1]);
+        assert_eq!(
+            quality.reasons_by_page.get(&1).cloned(),
+            Some(vec![OCR_REASON_SUSPECTED_GARBLED_TEXT.to_string()])
+        );
+    }
+
+    #[test]
+    fn test_text_quality_allows_large_printable_ascii_prose() {
+        let prose = "The company has entered into an agreement with registered holders during the period ending in December. ";
+        let items = vec![test_text_item_on_page(1, &prose.repeat(20))];
+
+        let quality = analyze_text_quality(&items);
+
+        assert!(!quality.has_encoding_issues);
+        assert!(quality.pages_needing_ocr.is_empty());
     }
 
     #[test]

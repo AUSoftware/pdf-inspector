@@ -9,7 +9,7 @@ use pdf_inspector::{
     extract_pages_markdown_mem, extract_tables_in_regions_mem, extract_text,
     extract_text_in_regions_mem, extract_text_with_positions, extract_text_with_positions_mem,
     process_pdf_mem, process_pdf_with_options, to_markdown, MarkdownOptions, PdfError, PdfOptions,
-    PdfType, TextItem,
+    PdfType, TextItem, OCR_REASON_SUSPECTED_GARBLED_TEXT,
 };
 use std::collections::HashSet;
 
@@ -2940,6 +2940,41 @@ fn test_extract_pages_markdown_gid_pages_need_ocr() {
     assert_eq!(result.pages.len(), 1);
     assert!(result.pages[0].needs_ocr);
     assert!(result.pages_needing_ocr.contains(&1)); // 1-indexed
+}
+
+#[test]
+fn test_extract_pages_markdown_flags_printable_ascii_mojibake() {
+    let buf = std::fs::read("tests/fixtures/text_simple__att10k.pdf").unwrap();
+
+    let result = extract_pages_markdown_mem(&buf, Some(&[0])).unwrap();
+
+    assert_eq!(result.pages.len(), 1);
+    assert!(result.pages[0].needs_ocr);
+    assert_eq!(
+        result.pages[0].ocr_reason.as_deref(),
+        Some(OCR_REASON_SUSPECTED_GARBLED_TEXT)
+    );
+    assert!(
+        result.pages[0].markdown.is_empty(),
+        "garbled direct text should be suppressed when OCR is needed"
+    );
+    assert_eq!(result.pages_needing_ocr, vec![1]);
+    assert_eq!(result.ocr_reasons_by_page.len(), 1);
+    assert_eq!(result.ocr_reasons_by_page[0].page, 1);
+    assert_eq!(
+        result.ocr_reasons_by_page[0].reasons,
+        vec![OCR_REASON_SUSPECTED_GARBLED_TEXT.to_string()]
+    );
+
+    let full = process_pdf_mem(&buf).unwrap();
+    assert_eq!(full.pages_needing_ocr, vec![1]);
+    assert!(full.has_encoding_issues);
+    assert_eq!(full.ocr_reasons_by_page.len(), 1);
+    assert_eq!(full.ocr_reasons_by_page[0].page, 1);
+    assert_eq!(
+        full.ocr_reasons_by_page[0].reasons,
+        vec![OCR_REASON_SUSPECTED_GARBLED_TEXT.to_string()]
+    );
 }
 
 #[test]
