@@ -24,6 +24,7 @@ use links::{extract_form_fields, extract_page_links};
 // Re-export public types so existing `crate::extractor::X` paths keep working.
 pub use crate::text_utils::{is_bold_font, is_italic_font};
 pub use crate::types::{ItemType, TextLine};
+pub(crate) use fonts::FontStyleCache;
 pub(crate) use layout::detect_columns;
 pub use layout::group_into_lines;
 pub(crate) use layout::group_into_lines_with_thresholds;
@@ -161,6 +162,9 @@ fn extract_positioned_text_impl(
     let mut all_lines = Vec::new();
     let mut page_thresholds: PageThresholds = HashMap::new();
     let mut gid_encoded_pages: HashSet<u32> = HashSet::new();
+    // Embedded-font style flags are document-scoped: the same font program
+    // is shared across pages, so parse it once, not once per page.
+    let mut style_cache = FontStyleCache::new();
 
     // Build page ObjectId → page number map for form field extraction
     let page_id_to_num: HashMap<ObjectId, u32> =
@@ -172,8 +176,14 @@ fn extract_positioned_text_impl(
                 continue;
             }
         }
-        let ((mut items, rects, lines), has_gid_fonts, _coords_rotated) =
-            extract_page_text_items(doc, page_id, *page_num, font_cmaps, include_invisible)?;
+        let ((mut items, rects, lines), has_gid_fonts, _coords_rotated) = extract_page_text_items(
+            doc,
+            page_id,
+            *page_num,
+            font_cmaps,
+            include_invisible,
+            &mut style_cache,
+        )?;
         if has_gid_fonts {
             gid_encoded_pages.insert(*page_num);
         }

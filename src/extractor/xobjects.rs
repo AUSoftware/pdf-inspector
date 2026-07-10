@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use super::fonts::{
     build_font_encodings, build_font_widths, compute_string_width_ts, extract_text_from_operand,
-    get_font_file2_obj_num, get_operand_bytes, CMapDecisionCache,
+    get_font_file2_obj_num, get_operand_bytes, CMapDecisionCache, FontStyleCache,
 };
 use super::{get_number, image_bbox_from_ctm, multiply_matrices};
 
@@ -115,6 +115,7 @@ pub(crate) fn extract_form_xobject_text(
     font_cmaps: &FontCMaps,
     parent_ctm: &[f32; 6],
     cmap_decisions: &mut CMapDecisionCache,
+    style_cache: &mut FontStyleCache,
 ) -> Vec<TextItem> {
     extract_form_xobject_text_inner(
         doc,
@@ -123,10 +124,12 @@ pub(crate) fn extract_form_xobject_text(
         font_cmaps,
         parent_ctm,
         cmap_decisions,
+        style_cache,
         0,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extract_form_xobject_text_inner(
     doc: &Document,
     form_id: ObjectId,
@@ -134,6 +137,7 @@ fn extract_form_xobject_text_inner(
     font_cmaps: &FontCMaps,
     parent_ctm: &[f32; 6],
     cmap_decisions: &mut CMapDecisionCache,
+    style_cache: &mut FontStyleCache,
     depth: u8,
 ) -> Vec<TextItem> {
     use lopdf::content::Content;
@@ -177,7 +181,7 @@ fn extract_form_xobject_text_inner(
                 font_base_names.insert(resource_name.clone(), base_name);
             }
         }
-        let style = descriptor_style_flags(doc, font_dict);
+        let style = descriptor_style_flags(doc, font_dict, style_cache);
         if style != (false, false) {
             font_style_flags.insert(resource_name.clone(), style);
         }
@@ -278,6 +282,7 @@ fn extract_form_xobject_text_inner(
                                         font_cmaps,
                                         &ctm,
                                         cmap_decisions,
+                                        style_cache,
                                         depth + 1,
                                     );
                                     items.extend(nested_items);

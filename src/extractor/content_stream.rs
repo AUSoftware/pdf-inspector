@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use super::fonts::{
     build_font_encodings, build_font_widths, compute_string_width_ts, descriptor_style_flags,
     extract_text_from_operand, get_font_file2_obj_num, get_operand_bytes, CMapDecisionCache,
+    FontStyleCache,
 };
 use super::underline::UnderlineLine;
 use super::xobjects::{extract_form_xobject_text, get_page_xobjects, XObjectType};
@@ -106,6 +107,25 @@ fn transformed_stroke_width(
     user_width * (ndx * ndx + ndy * ndy).sqrt()
 }
 
+/// Text rise (Ts) displaces the glyph origin by (0, rise) in unscaled text
+/// space — per the rendering-matrix definition it sits left of Tm, so the
+/// offset maps through the text matrix's y column. Rise never contributes
+/// to the advance, so callers apply it only to the rendering position and
+/// keep advancing the unshifted text matrix.
+fn rise_adjusted(tm: &[f32; 6], rise: f32) -> [f32; 6] {
+    if rise == 0.0 {
+        return *tm;
+    }
+    [
+        tm[0],
+        tm[1],
+        tm[2],
+        tm[3],
+        tm[4] + rise * tm[2],
+        tm[5] + rise * tm[3],
+    ]
+}
+
 /// Returns `(page_extraction, has_gid_fonts)` where `has_gid_fonts` indicates
 /// the page uses fonts with unresolvable gid-encoded glyphs.
 pub(crate) fn extract_page_text_items(
@@ -114,6 +134,7 @@ pub(crate) fn extract_page_text_items(
     page_num: u32,
     font_cmaps: &FontCMaps,
     include_invisible: bool,
+    style_cache: &mut FontStyleCache,
 ) -> Result<(PageExtraction, bool, bool), PdfError> {
     use lopdf::content::Content;
 
@@ -165,7 +186,7 @@ pub(crate) fn extract_page_text_items(
         }
         // Descriptor style flags rescue subset fonts whose BaseFont names
         // are opaque tags the name heuristics can't read.
-        let style = descriptor_style_flags(doc, font_dict);
+        let style = descriptor_style_flags(doc, font_dict, style_cache);
         if style != (false, false) {
             font_style_flags.insert(resource_name.clone(), style);
         }
@@ -243,6 +264,7 @@ pub(crate) fn extract_page_text_items(
         line_width: f32,
         char_spacing: f32,
         word_spacing: f32,
+        text_rise: f32,
         text_leading: f32,
         current_font: String,
         current_font_size: f32,
@@ -255,6 +277,7 @@ pub(crate) fn extract_page_text_items(
     let mut text_leading: f32 = 0.0; // TL parameter (in text-space units)
     let mut char_spacing: f32 = 0.0; // Tc parameter (extra spacing per character, unscaled)
     let mut word_spacing: f32 = 0.0; // Tw parameter (extra spacing per space char, unscaled)
+    let mut text_rise: f32 = 0.0; // Ts parameter (baseline shift for super/subscripts, unscaled)
     let mut text_matrix = [1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0];
     let mut line_matrix = [1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0];
     let mut in_text_block = false;
@@ -292,6 +315,7 @@ pub(crate) fn extract_page_text_items(
                     line_width,
                     char_spacing,
                     word_spacing,
+                    text_rise,
                     text_leading,
                     current_font: current_font.clone(),
                     current_font_size,
@@ -305,6 +329,7 @@ pub(crate) fn extract_page_text_items(
                     line_width = saved.line_width;
                     char_spacing = saved.char_spacing;
                     word_spacing = saved.word_spacing;
+                    text_rise = saved.text_rise;
                     text_leading = saved.text_leading;
                     current_font = saved.current_font;
                     current_font_size = saved.current_font_size;
@@ -375,6 +400,12 @@ pub(crate) fn extract_page_text_items(
                 // Set word spacing (extra space added for each space character)
                 if let Some(tw) = op.operands.first().and_then(get_number) {
                     word_spacing = tw;
+                }
+            }
+            "Ts" => {
+                // Set text rise (baseline shift for superscripts/subscripts)
+                if let Some(ts) = op.operands.first().and_then(get_number) {
+                    text_rise = ts;
                 }
             }
             "Td" | "TD" => {
@@ -464,7 +495,8 @@ pub(crate) fn extract_page_text_items(
                         &mut cmap_decisions,
                         &font_widths,
                     ) {
-                        let combined = multiply_matrices(&text_matrix, &ctm);
+                        let combined =
+                            multiply_matrices(&rise_adjusted(&text_matrix, text_rise), &ctm);
                         let rendered_size = effective_font_size(current_font_size, &combined);
                         let (x, y) = (combined[4], combined[5]);
                         if combined[0].abs() >= combined[1].abs() {
@@ -654,7 +686,8 @@ pub(crate) fn extract_page_text_items(
                                     text_matrix[4] + start_w * text_matrix[0],
                                     text_matrix[5] + start_w * text_matrix[1],
                                 ];
-                                let combined = multiply_matrices(&offset_tm, &ctm);
+                                let combined =
+                                    multiply_matrices(&rise_adjusted(&offset_tm, text_rise), &ctm);
                                 let (x, y) = (combined[4], combined[5]);
                                 let width = if font_info.is_some() {
                                     ((end_w - start_w) * scale_x).abs()
@@ -697,6 +730,20 @@ pub(crate) fn extract_page_text_items(
                 line_matrix[4] += (-tl) * line_matrix[2];
                 line_matrix[5] += (-tl) * line_matrix[3];
                 text_matrix = line_matrix;
+                // Advance width, as for Tj — without it the item stays
+                // zero-width and geometric underline/strikeout detection
+                // rejects it (`is_underline_candidate` needs width > 0).
+                let w_ts_opt = font_widths.get(&current_font).and_then(|fi| {
+                    op.operands.first().and_then(get_operand_bytes).map(|raw| {
+                        compute_string_width_ts(
+                            raw,
+                            fi,
+                            current_font_size,
+                            char_spacing,
+                            word_spacing,
+                        )
+                    })
+                });
                 if !((text_rendering_mode == 3 && !include_invisible)
                     || suppress_glyph_extraction
                     || op.operands.is_empty())
@@ -714,7 +761,8 @@ pub(crate) fn extract_page_text_items(
                         &font_widths,
                     ) {
                         if !text.trim().is_empty() {
-                            let combined = multiply_matrices(&text_matrix, &ctm);
+                            let combined =
+                                multiply_matrices(&rise_adjusted(&text_matrix, text_rise), &ctm);
                             if combined[0].abs() >= combined[1].abs() {
                                 rotation_votes.horizontal += 1;
                             } else {
@@ -722,6 +770,12 @@ pub(crate) fn extract_page_text_items(
                             }
                             let rendered_size = effective_font_size(current_font_size, &combined);
                             let (x, y) = (combined[4], combined[5]);
+                            let width = w_ts_opt
+                                .map(|w_ts| {
+                                    (w_ts * (text_matrix[0] * ctm[0] + text_matrix[1] * ctm[2]))
+                                        .abs()
+                                })
+                                .unwrap_or(0.0);
                             let base_font = font_base_names
                                 .get(&current_font)
                                 .map(|s| s.as_str())
@@ -734,7 +788,7 @@ pub(crate) fn extract_page_text_items(
                                 text: expand_ligatures(&text),
                                 x,
                                 y,
-                                width: 0.0,
+                                width,
                                 height: rendered_size,
                                 font: current_font.clone(),
                                 font_size: rendered_size,
@@ -748,6 +802,12 @@ pub(crate) fn extract_page_text_items(
                             });
                         }
                     }
+                }
+                // Advance regardless of visibility so later show-text
+                // operators on the same line stay positioned (as for Tj).
+                if let Some(w_ts) = w_ts_opt {
+                    text_matrix[4] += w_ts * text_matrix[0];
+                    text_matrix[5] += w_ts * text_matrix[1];
                 }
             }
             "Do" => {
@@ -794,6 +854,7 @@ pub(crate) fn extract_page_text_items(
                                         font_cmaps,
                                         &ctm,
                                         &mut cmap_decisions,
+                                        style_cache,
                                     );
                                     items.extend(form_items);
                                 }
@@ -1405,8 +1466,15 @@ mod tests {
 
         let (doc, page_id) = simple_doc_with_content(content);
         let font_cmaps = FontCMaps::from_doc(&doc);
-        let ((items, _, _), _, _) =
-            extract_page_text_items(&doc, page_id, 1, &font_cmaps, false).unwrap();
+        let ((items, _, _), _, _) = extract_page_text_items(
+            &doc,
+            page_id,
+            1,
+            &font_cmaps,
+            false,
+            &mut FontStyleCache::new(),
+        )
+        .unwrap();
         items
     }
 
@@ -1492,6 +1560,76 @@ BT /F1 12 Tf 0 1 -1 0 240 100 Tm (WORLD) Tj ET
     }
 
     #[test]
+    fn quote_operator_text_carries_advance_width() {
+        // `'` (move-to-next-line-and-show-text) must retain the string's
+        // advance width like Tj — zero-width items are invisible to
+        // geometric underline/strikeout detection.
+        let content = b"BT /F1 12 Tf 12 TL 1 0 0 1 100 512 Tm (first) Tj (struck) ' ET
+1 w
+99 503 m 145 503 l S";
+
+        let items = extract_simple_items(content);
+        let struck = items.iter().find(|item| item.text == "struck").unwrap();
+
+        // 6 glyphs x 600/1000 x 12pt = 43.2pt, drawn one leading below Tm.
+        assert!((struck.width - 43.2).abs() < 0.1);
+        assert!((struck.y - 500.0).abs() < 0.1);
+        assert!(struck.is_strikeout);
+        assert!(!struck.is_underline);
+    }
+
+    #[test]
+    fn quote_operator_advances_text_matrix() {
+        // Text shown after `'` on the same line must start past the shown
+        // string: "CD" lands at x=114.4 (2 glyphs x 600/1000 x 12pt after
+        // x=100), flush against "AB", so the merge pass joins them. Without
+        // the advance "CD" overlaps "AB" at x=100 and the items stay apart.
+        let content = b"BT /F1 12 Tf 12 TL 1 0 0 1 100 512 Tm (AB) ' (CD) Tj ET";
+
+        let items = extract_simple_items(content);
+        let merged = items.iter().find(|item| item.text == "ABCD").unwrap();
+
+        assert!((merged.x - 100.0).abs() < 0.1);
+        assert!((merged.width - 28.8).abs() < 0.1);
+        assert!((merged.y - 500.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn text_rise_shifts_item_baseline() {
+        // Ts displaces the glyph origin vertically without touching the
+        // advance; the next run at rise 0 must return to the original
+        // baseline and follow the raised run horizontally.
+        let content =
+            b"BT /F1 12 Tf 1 0 0 1 100 500 Tm (base) Tj 5 Ts (super) Tj 0 Ts (after) Tj ET";
+
+        let items = extract_simple_items(content);
+        let base = items.iter().find(|item| item.text == "base").unwrap();
+        let raised = items.iter().find(|item| item.text == "super").unwrap();
+        let after = items.iter().find(|item| item.text == "after").unwrap();
+
+        assert!((base.y - 500.0).abs() < 0.1);
+        assert!((raised.y - 505.0).abs() < 0.1);
+        assert!((after.y - 500.0).abs() < 0.1);
+        assert!(after.x > raised.x);
+    }
+
+    #[test]
+    fn strikeout_detected_on_risen_text() {
+        // The rule crosses the glyphs at their risen position; without the
+        // rise in item.y the strike window sits 4pt too low and misses.
+        let content = b"BT /F1 12 Tf 1 0 0 1 100 500 Tm 4 Ts (struck) Tj ET
+1 w
+99 507 m 145 507 l S";
+
+        let items = extract_simple_items(content);
+        let struck = items.iter().find(|item| item.text == "struck").unwrap();
+
+        assert!((struck.y - 504.0).abs() < 0.1);
+        assert!(struck.is_strikeout);
+        assert!(!struck.is_underline);
+    }
+
+    #[test]
     fn test_skip_excessive_operations() {
         use crate::tounicode::FontCMaps;
         use lopdf::{dictionary, Object, Stream};
@@ -1525,7 +1663,15 @@ BT /F1 12 Tf 0 1 -1 0 240 100 Tm (WORLD) Tj ET
         doc.add_object(catalog);
 
         let font_cmaps = FontCMaps::from_doc(&doc);
-        let result = extract_page_text_items(&doc, page_id, 1, &font_cmaps, false).unwrap();
+        let result = extract_page_text_items(
+            &doc,
+            page_id,
+            1,
+            &font_cmaps,
+            false,
+            &mut FontStyleCache::new(),
+        )
+        .unwrap();
         let ((items, rects, lines), _has_gid, _coords_rotated) = result;
         assert!(items.is_empty());
         assert!(rects.is_empty());
@@ -1607,8 +1753,15 @@ BT 30 700 Tm <41> Tj ET";
         doc.trailer.set("Root", Object::Reference(catalog_id));
 
         let font_cmaps = FontCMaps::from_doc(&doc);
-        let ((items, _, _), _, _) =
-            extract_page_text_items(&doc, page_id, 1, &font_cmaps, false).unwrap();
+        let ((items, _, _), _, _) = extract_page_text_items(
+            &doc,
+            page_id,
+            1,
+            &font_cmaps,
+            false,
+            &mut FontStyleCache::new(),
+        )
+        .unwrap();
         let text = items
             .iter()
             .map(|item| item.text.as_str())
