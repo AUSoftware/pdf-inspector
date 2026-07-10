@@ -14,8 +14,8 @@ use lopdf::{Document, Encoding, Object, ObjectId};
 use std::collections::HashMap;
 
 use super::fonts::{
-    build_font_encodings, build_font_widths, compute_string_width_ts, extract_text_from_operand,
-    get_font_file2_obj_num, get_operand_bytes, CMapDecisionCache,
+    build_font_encodings, build_font_widths, compute_string_width_ts, descriptor_style_flags,
+    extract_text_from_operand, get_font_file2_obj_num, get_operand_bytes, CMapDecisionCache,
 };
 use super::underline::UnderlineLine;
 use super::xobjects::{extract_form_xobject_text, get_page_xobjects, XObjectType};
@@ -153,6 +153,8 @@ pub(crate) fn extract_page_text_items(
         std::collections::HashMap::new();
     let mut inline_cmaps: std::collections::HashMap<String, crate::tounicode::CMapEntry> =
         std::collections::HashMap::new();
+    let mut font_style_flags: std::collections::HashMap<String, (bool, bool)> =
+        std::collections::HashMap::new();
     for (font_name, font_dict) in &fonts {
         let resource_name = String::from_utf8_lossy(font_name).to_string();
         if let Ok(base_font) = font_dict.get(b"BaseFont") {
@@ -160,6 +162,12 @@ pub(crate) fn extract_page_text_items(
                 let base_name = String::from_utf8_lossy(name).to_string();
                 font_base_names.insert(resource_name.clone(), base_name);
             }
+        }
+        // Descriptor style flags rescue subset fonts whose BaseFont names
+        // are opaque tags the name heuristics can't read.
+        let style = descriptor_style_flags(doc, font_dict);
+        if style != (false, false) {
+            font_style_flags.insert(resource_name.clone(), style);
         }
         // Track ToUnicode object reference, with FontFile2 fallback for Identity-H/V.
         // Also handle inline ToUnicode streams.
@@ -478,6 +486,10 @@ pub(crate) fn extract_page_text_items(
                                 .get(&current_font)
                                 .map(|s| s.as_str())
                                 .unwrap_or(&current_font);
+                            let (desc_italic, desc_bold) = font_style_flags
+                                .get(&current_font)
+                                .copied()
+                                .unwrap_or((false, false));
                             items.push(TextItem {
                                 text: expand_ligatures(&text),
                                 x,
@@ -487,9 +499,10 @@ pub(crate) fn extract_page_text_items(
                                 font: current_font.clone(),
                                 font_size: rendered_size,
                                 page: page_num,
-                                is_bold: is_bold_font(base_font),
-                                is_italic: is_italic_font(base_font),
+                                is_bold: is_bold_font(base_font) || desc_bold,
+                                is_italic: is_italic_font(base_font) || desc_italic,
                                 is_underline: false,
+                                is_strikeout: false,
                                 item_type: ItemType::Text,
                                 mcid: current_mcid(&marked_content_stack),
                             });
@@ -627,6 +640,10 @@ pub(crate) fn extract_page_text_items(
                                 .get(&current_font)
                                 .map(|s| s.as_str())
                                 .unwrap_or(&current_font);
+                            let (desc_italic, desc_bold) = font_style_flags
+                                .get(&current_font)
+                                .copied()
+                                .unwrap_or((false, false));
                             let scale_x = text_matrix[0] * ctm[0] + text_matrix[1] * ctm[2];
                             for (text, start_w, end_w) in &sub_items {
                                 let offset_tm = [
@@ -653,9 +670,10 @@ pub(crate) fn extract_page_text_items(
                                     font: current_font.clone(),
                                     font_size: rendered_size,
                                     page: page_num,
-                                    is_bold: is_bold_font(base_font),
-                                    is_italic: is_italic_font(base_font),
+                                    is_bold: is_bold_font(base_font) || desc_bold,
+                                    is_italic: is_italic_font(base_font) || desc_italic,
                                     is_underline: false,
+                                    is_strikeout: false,
                                     item_type: ItemType::Text,
                                     mcid: current_mcid(&marked_content_stack),
                                 });
@@ -708,6 +726,10 @@ pub(crate) fn extract_page_text_items(
                                 .get(&current_font)
                                 .map(|s| s.as_str())
                                 .unwrap_or(&current_font);
+                            let (desc_italic, desc_bold) = font_style_flags
+                                .get(&current_font)
+                                .copied()
+                                .unwrap_or((false, false));
                             items.push(TextItem {
                                 text: expand_ligatures(&text),
                                 x,
@@ -717,9 +739,10 @@ pub(crate) fn extract_page_text_items(
                                 font: current_font.clone(),
                                 font_size: rendered_size,
                                 page: page_num,
-                                is_bold: is_bold_font(base_font),
-                                is_italic: is_italic_font(base_font),
+                                is_bold: is_bold_font(base_font) || desc_bold,
+                                is_italic: is_italic_font(base_font) || desc_italic,
                                 is_underline: false,
+                                is_strikeout: false,
                                 item_type: ItemType::Text,
                                 mcid: current_mcid(&marked_content_stack),
                             });
@@ -757,6 +780,7 @@ pub(crate) fn extract_page_text_items(
                                         is_bold: false,
                                         is_italic: false,
                                         is_underline: false,
+                                        is_strikeout: false,
                                         item_type: ItemType::Image,
                                         mcid: current_mcid(&marked_content_stack),
                                     });
@@ -842,6 +866,10 @@ pub(crate) fn extract_page_text_items(
                                     .get(&current_font)
                                     .map(|s| s.as_str())
                                     .unwrap_or(&current_font);
+                                let (desc_italic, desc_bold) = font_style_flags
+                                    .get(&current_font)
+                                    .copied()
+                                    .unwrap_or((false, false));
                                 items.push(TextItem {
                                     text: expand_ligatures(&at),
                                     x,
@@ -851,9 +879,10 @@ pub(crate) fn extract_page_text_items(
                                     font: current_font.clone(),
                                     font_size: rendered_size,
                                     page: page_num,
-                                    is_bold: is_bold_font(base_font),
-                                    is_italic: is_italic_font(base_font),
+                                    is_bold: is_bold_font(base_font) || desc_bold,
+                                    is_italic: is_italic_font(base_font) || desc_italic,
                                     is_underline: false,
+                                    is_strikeout: false,
                                     item_type: ItemType::Text,
                                     mcid: entry
                                         .mcid

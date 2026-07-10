@@ -1,5 +1,6 @@
 //! Form XObject and image XObject extraction.
 
+use super::fonts::descriptor_style_flags;
 use crate::text_utils::{effective_font_size, expand_ligatures, is_bold_font, is_italic_font};
 use crate::tounicode::FontCMaps;
 use crate::types::{ItemType, TextItem};
@@ -167,6 +168,7 @@ fn extract_form_xobject_text_inner(
     let mut font_tounicode_refs: HashMap<String, u32> = HashMap::new();
     let mut inline_cmaps: HashMap<String, crate::tounicode::CMapEntry> = HashMap::new();
 
+    let mut font_style_flags: HashMap<String, (bool, bool)> = HashMap::new();
     for (font_name, font_dict) in &form_fonts {
         let resource_name = String::from_utf8_lossy(font_name).to_string();
         if let Ok(base_font) = font_dict.get(b"BaseFont") {
@@ -174,6 +176,10 @@ fn extract_form_xobject_text_inner(
                 let base_name = String::from_utf8_lossy(name).to_string();
                 font_base_names.insert(resource_name.clone(), base_name);
             }
+        }
+        let style = descriptor_style_flags(doc, font_dict);
+        if style != (false, false) {
+            font_style_flags.insert(resource_name.clone(), style);
         }
         match font_dict.get(b"ToUnicode") {
             Ok(tounicode) => {
@@ -295,6 +301,7 @@ fn extract_form_xobject_text_inner(
                                     is_bold: false,
                                     is_italic: false,
                                     is_underline: false,
+                                    is_strikeout: false,
                                     item_type: ItemType::Image,
                                     mcid: None,
                                 });
@@ -428,6 +435,10 @@ fn extract_form_xobject_text_inner(
                                 .get(&current_font)
                                 .map(|s| s.as_str())
                                 .unwrap_or(&current_font);
+                            let (desc_italic, desc_bold) = font_style_flags
+                                .get(&current_font)
+                                .copied()
+                                .unwrap_or((false, false));
                             items.push(TextItem {
                                 text: expand_ligatures(&text),
                                 x,
@@ -437,9 +448,10 @@ fn extract_form_xobject_text_inner(
                                 font: current_font.clone(),
                                 font_size: rendered_size,
                                 page: page_num,
-                                is_bold: is_bold_font(base_font),
-                                is_italic: is_italic_font(base_font),
+                                is_bold: is_bold_font(base_font) || desc_bold,
+                                is_italic: is_italic_font(base_font) || desc_italic,
                                 is_underline: false,
+                                is_strikeout: false,
                                 item_type: ItemType::Text,
                                 mcid: None,
                             });
@@ -560,6 +572,10 @@ fn extract_form_xobject_text_inner(
                                 .get(&current_font)
                                 .map(|s| s.as_str())
                                 .unwrap_or(&current_font);
+                            let (desc_italic, desc_bold) = font_style_flags
+                                .get(&current_font)
+                                .copied()
+                                .unwrap_or((false, false));
                             let scale_x = text_matrix[0] * ctm[0] + text_matrix[1] * ctm[2];
                             for (text, start_w, end_w) in &sub_items {
                                 let offset_tm = [
@@ -586,9 +602,10 @@ fn extract_form_xobject_text_inner(
                                     font: current_font.clone(),
                                     font_size: rendered_size,
                                     page: page_num,
-                                    is_bold: is_bold_font(base_font),
-                                    is_italic: is_italic_font(base_font),
+                                    is_bold: is_bold_font(base_font) || desc_bold,
+                                    is_italic: is_italic_font(base_font) || desc_italic,
                                     is_underline: false,
+                                    is_strikeout: false,
                                     item_type: ItemType::Text,
                                     mcid: None,
                                 });
