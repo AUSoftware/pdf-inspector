@@ -736,6 +736,12 @@ pub(crate) fn extract_page_text_items(
                 line_matrix[4] += (-tl) * line_matrix[2];
                 line_matrix[5] += (-tl) * line_matrix[3];
                 text_matrix = line_matrix;
+                // Capture first-glyph position for ActualText AFTER the
+                // line move — the BDC-entry matrix is on the previous line.
+                if suppress_glyph_extraction && actual_text_glyph_tm.is_none() {
+                    actual_text_glyph_tm = Some(text_matrix);
+                    actual_text_glyph_rise = Some(text_rise);
+                }
                 // Advance width, as for Tj — without it the item stays
                 // zero-width and geometric underline/strikeout detection
                 // rejects it (`is_underline_candidate` needs width > 0).
@@ -1637,6 +1643,22 @@ BT /F1 12 Tf 0 1 -1 0 240 100 Tm (WORLD) Tj ET
 
         assert!((sup.y - 505.0).abs() < 0.1);
         assert!((after.y - 500.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn actual_text_shown_with_quote_op_uses_moved_risen_baseline() {
+        // When the tagged span's show op is `'`, the glyph position is
+        // only known AFTER its line move — falling back to the BDC-entry
+        // matrix would place the item on the previous line, unrisen.
+        let content = b"BT /F1 12 Tf 14 TL 1 0 0 1 100 500 Tm \
+/Span <</ActualText (replaced) >> BDC 3 Ts (raw) ' 0 Ts EMC ET";
+
+        let items = extract_simple_items(content);
+        let item = items.iter().find(|item| item.text == "replaced").unwrap();
+
+        // Line move: 500 - 14 = 486; rise: +3 -> 489.
+        assert!((item.y - 489.0).abs() < 0.1);
+        assert!(item.width > 0.0);
     }
 
     #[test]
