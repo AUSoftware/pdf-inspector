@@ -299,6 +299,10 @@ pub(crate) fn extract_page_text_items(
     let mut suppress_glyph_extraction = false;
     let mut actual_text_start_tm: Option<[f32; 6]> = None; // text matrix at BDC entry
     let mut actual_text_glyph_tm: Option<[f32; 6]> = None; // text matrix at first glyph inside BDC
+                                                           // Text rise in effect at each captured matrix — the item must render at
+                                                           // the rise of its GLYPHS, not whatever rise is set by EMC time.
+    let mut actual_text_start_rise: f32 = 0.0;
+    let mut actual_text_glyph_rise: Option<f32> = None;
     /// Get the innermost MCID from the marked content stack.
     fn current_mcid(stack: &[MarkedContentEntry]) -> Option<i64> {
         stack.iter().rev().find_map(|e| e.mcid)
@@ -466,6 +470,7 @@ pub(crate) fn extract_page_text_items(
                     if suppress_glyph_extraction {
                         if actual_text_glyph_tm.is_none() {
                             actual_text_glyph_tm = Some(text_matrix);
+                            actual_text_glyph_rise = Some(text_rise);
                         }
                         if let Some(w_ts) = w_ts_opt {
                             text_matrix[4] += w_ts * text_matrix[0];
@@ -552,6 +557,7 @@ pub(crate) fn extract_page_text_items(
                         // Capture first-glyph position for ActualText
                         if suppress_glyph_extraction && actual_text_glyph_tm.is_none() {
                             actual_text_glyph_tm = Some(text_matrix);
+                            actual_text_glyph_rise = Some(text_rise);
                         }
 
                         // Compute space threshold based on font metrics when available
@@ -895,7 +901,9 @@ pub(crate) fn extract_page_text_items(
                 if actual_text.is_some() {
                     suppress_glyph_extraction = true;
                     actual_text_start_tm = Some(text_matrix);
+                    actual_text_start_rise = text_rise;
                     actual_text_glyph_tm = None; // reset — will be captured at first Tj/TJ
+                    actual_text_glyph_rise = None;
                 }
                 marked_content_stack.push(MarkedContentEntry { actual_text, mcid });
             }
@@ -908,9 +916,11 @@ pub(crate) fn extract_page_text_items(
                         // Tj may have moved the text position to the correct line —
                         // the BDC-entry position can be on the previous line.
                         let glyph_tm = actual_text_glyph_tm.take();
+                        let glyph_rise = actual_text_glyph_rise.take();
                         let entry_tm = actual_text_start_tm.take();
                         if let Some(start_tm) = glyph_tm.or(entry_tm) {
-                            let combined = multiply_matrices(&start_tm, &ctm);
+                            let rise = glyph_rise.unwrap_or(actual_text_start_rise);
+                            let combined = multiply_matrices(&rise_adjusted(&start_tm, rise), &ctm);
                             if combined[0].abs() >= combined[1].abs() {
                                 rotation_votes.horizontal += 1;
                             } else {
@@ -1611,6 +1621,22 @@ BT /F1 12 Tf 0 1 -1 0 240 100 Tm (WORLD) Tj ET
         assert!((raised.y - 505.0).abs() < 0.1);
         assert!((after.y - 500.0).abs() < 0.1);
         assert!(after.x > raised.x);
+    }
+
+    #[test]
+    fn actual_text_item_uses_glyph_rise() {
+        // The ActualText replacement item must render at the rise in
+        // effect when its glyphs were drawn — not the unshifted BDC
+        // baseline, and not whatever rise is set by EMC time.
+        let content = b"BT /F1 12 Tf 1 0 0 1 100 500 Tm \
+/Span <</ActualText (super) >> BDC 5 Ts (sup) Tj 0 Ts EMC (after) Tj ET";
+
+        let items = extract_simple_items(content);
+        let sup = items.iter().find(|item| item.text == "super").unwrap();
+        let after = items.iter().find(|item| item.text == "after").unwrap();
+
+        assert!((sup.y - 505.0).abs() < 0.1);
+        assert!((after.y - 500.0).abs() < 0.1);
     }
 
     #[test]
