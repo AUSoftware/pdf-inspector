@@ -2319,6 +2319,12 @@ fn detect_merged_cluster_table(
         );
         return None;
     }
+    if has_dominant_prose_cell(&cells) {
+        debug!(
+            "  merged-cluster rejected: dominant prose cell (chart/figure region over body text)"
+        );
+        return None;
+    }
 
     // No empty columns
     for col in 0..num_cols {
@@ -2460,6 +2466,28 @@ mod tests {
     fn dominant_prose_cell_allows_short_tables() {
         let cells = cells_of(&[&["Name", "Value"], &["Total", "42"]]);
         assert!(!has_dominant_prose_cell(&cells));
+    }
+
+    #[test]
+    fn dominant_prose_cell_allows_data_table_with_long_note() {
+        // A real 4+ row table with one verbose remark cell: the note is ≥60
+        // words but the table's other content carries more than 2× its word
+        // count, so concentration stays below the 1/3 threshold. The
+        // denominator scales with table size — this is what keeps large
+        // legitimate tables safe where a bare length cap would not.
+        let note = ["word"; 60].join(" ");
+        let row_text = ["data"; 12].join(" ");
+        let mut rows: Vec<Vec<String>> = (0..11)
+            .map(|i| {
+                vec![
+                    format!("Item {i}"),
+                    row_text.clone(),
+                    format!("{}", i * 100),
+                ]
+            })
+            .collect();
+        rows.push(vec!["Note".into(), note, String::new()]);
+        assert!(!has_dominant_prose_cell(&rows));
     }
 
     // --- rects_overlap ---
