@@ -731,7 +731,9 @@ pub(crate) fn merge_subscript_items(items: Vec<TextItem>) -> Vec<TextItem> {
                         .chars()
                         .last()
                         .is_some_and(|c| c.is_alphabetic());
-                    if parent.font_size >= sub_threshold && ends_with_letter {
+                    let same_marks = parent.is_underline == item.is_underline
+                        && parent.is_strikeout == item.is_strikeout;
+                    if parent.font_size >= sub_threshold && ends_with_letter && same_marks {
                         let parent_right = parent.x + parent.width;
                         let gap = item.x - parent_right;
                         // Subscripts must be tightly adjacent (within ~1pt)
@@ -1008,6 +1010,7 @@ mod tests {
         items[3].y = 470.0;
         for item in &mut items {
             item.is_underline = true;
+            item.is_strikeout = true;
         }
         let lines = vec![
             make_line(100.0, 500.0, 300.0, 500.0),
@@ -1021,6 +1024,30 @@ mod tests {
         suppress_table_underlines(&mut items, &[], &lines, 1);
 
         assert!(items.iter().all(|item| !item.is_underline));
+        assert!(items.iter().all(|item| !item.is_strikeout));
+    }
+
+    #[test]
+    fn subscript_digit_with_different_marks_is_not_absorbed() {
+        // A struck-out word followed by an unmarked footnote digit: merging
+        // would widen the parent's strikeout claim over the digit (and the
+        // reverse would drop the digit's own mark). Style boundaries break
+        // the merge, as in merge_text_items.
+        let mut word = make_merge_item("word", 100.0, 24.0);
+        word.font_size = 10.0;
+        word.is_strikeout = true;
+        let mut digit = make_merge_item("2", 124.5, 4.0);
+        digit.font_size = 6.0;
+        digit.y = word.y + 3.0;
+
+        let merged = merge_subscript_items(vec![word.clone(), digit.clone()]);
+        assert_eq!(merged.len(), 2);
+
+        // Same marks still merge (footnote ref inside the strike).
+        digit.is_strikeout = true;
+        let merged = merge_subscript_items(vec![word, digit]);
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].text.starts_with("word"));
     }
 
     #[test]
