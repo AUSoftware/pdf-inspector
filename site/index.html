@@ -208,6 +208,9 @@
   .btn-pro:hover { background: var(--accent-deep); border-color: var(--accent-deep); }
   .btn-ghost { color: var(--paper); border-color: rgba(255,255,255,0.3); }
   .btn-ghost:hover { border-color: var(--paper); background: rgba(255,255,255,0.08); }
+  .fc-mark { height: 34px; width: auto; display: block; margin-bottom: 20px; }
+  .fc-wordmark { height: 15px; width: auto; vertical-align: -2px; transition: opacity .15s; }
+  .fc-wordmark:hover { opacity: 0.65; }
   footer { border-top: 1px solid var(--line); padding: 34px 0; font-size: 14px; color: var(--muted); }
   .foot-in { display: flex; justify-content: space-between; align-items: center; gap: 18px; flex-wrap: wrap; }
   .foot-in a { color: var(--ink-soft); }
@@ -396,6 +399,7 @@ cargo <span class="fn">install</span> pdf-inspector
         </div>
       </div>
       <div class="path path-pro">
+        <img class="fc-mark" src="assets/firecrawl-mark.svg" alt="Firecrawl" width="24" height="34">
         <div class="ptag"><b>Firecrawl Parse</b> · hosted API</div>
         <h3>Or let Firecrawl handle the hard ones</h3>
         <p>Scanned documents, OCR, DOCX / XLSX / HTML, and parsing at scale — clean, LLM-ready Markdown from one API call. The downstream route for everything local parsing can't reach.</p>
@@ -410,7 +414,7 @@ cargo <span class="fn">install</span> pdf-inspector
 
 <footer>
   <div class="wrap foot-in">
-    <div>Built by <a href="https://firecrawl.dev">Firecrawl</a> · MIT licensed</div>
+    <div style="display:flex;align-items:center;gap:7px">Built by <a href="https://firecrawl.dev"><img class="fc-wordmark" src="assets/firecrawl-wordmark.svg" alt="Firecrawl"></a> · MIT licensed</div>
     <div class="foot-links">
       <a href="https://github.com/firecrawl/pdf-inspector">GitHub</a>
       <a href="https://crates.io/crates/pdf-inspector">crates.io</a>
