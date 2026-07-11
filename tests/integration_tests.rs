@@ -3629,9 +3629,22 @@ fn encrypted_pdf_decrypts_with_correct_password() {
     let ok = process_pdf_with_options(path, PdfOptions::new().password("secret123"))
         .expect("correct password should decrypt");
     let md = ok.markdown.unwrap_or_default();
+    // Assert a stable fixture token so a garbled-but-long extraction (the
+    // encrypted-stream regression this guards) still fails the test.
     assert!(
-        md.contains("Procurement") || md.len() > 200,
-        "decrypted markdown should contain real text, got {} chars",
+        md.contains("Procurement"),
+        "decrypted markdown should contain the fixture's real text, got {} chars",
         md.len()
     );
+}
+
+#[test]
+fn pdf_options_debug_redacts_password() {
+    let opts = PdfOptions::new().password("secret123");
+    let dbg = format!("{opts:?}");
+    assert!(
+        !dbg.contains("secret123"),
+        "password leaked in Debug: {dbg}"
+    );
+    assert!(dbg.contains("REDACTED"), "expected redaction marker: {dbg}");
 }

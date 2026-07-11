@@ -125,7 +125,7 @@ pub struct PdfProcessResult {
 ///     .mode(ProcessMode::Analyze)
 ///     .pages([1, 3, 5]);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PdfOptions {
     /// How far the pipeline should run (default: [`ProcessMode::Full`]).
     pub mode: ProcessMode,
@@ -138,6 +138,20 @@ pub struct PdfOptions {
     /// Password for decrypting an encrypted PDF. `None` falls back to the
     /// empty password (owner-only encryption).
     pub password: Option<String>,
+}
+
+// Manual `Debug` so the password is never leaked through debug logging or a
+// panic that formats the options; it renders as `Some("[REDACTED]")`.
+impl std::fmt::Debug for PdfOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PdfOptions")
+            .field("mode", &self.mode)
+            .field("detection", &self.detection)
+            .field("markdown", &self.markdown)
+            .field("page_filter", &self.page_filter)
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 impl Default for PdfOptions {
