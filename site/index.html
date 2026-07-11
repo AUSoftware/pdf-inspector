@@ -187,15 +187,27 @@
   #t-cli:checked ~ .panels #p-cli { display: block; }
   .code a.ref { color: #ff9f7a; border-bottom: 1px dotted #ff9f7a; }
 
-  /* ── cta / footer ── */
-  .cta { text-align: center; padding: 84px 0; border-top: 1px solid var(--line); }
-  .cta h2 { font-family: var(--display); font-weight: 800; font-size: clamp(2rem, 6vw, 3.4rem); letter-spacing: -0.03em; line-height: 1; }
-  .cta p { color: var(--ink-soft); margin: 18px auto 32px; max-width: 44ch; }
-  .btns { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
-  .btn { font-family: var(--mono); font-size: 14px; font-weight: 500; padding: 13px 26px; border-radius: 999px; transition: all .15s; border: 1px solid var(--ink); }
+  /* ── closing split (OSS vs hosted) ── */
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 780px) { .split { grid-template-columns: 1fr; } }
+  .path { border: 1px solid var(--line); border-radius: 16px; padding: 32px 30px; background: var(--card); display: flex; flex-direction: column; }
+  .path .ptag { font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-bottom: 15px; }
+  .path h3 { font-family: var(--display); font-weight: 600; font-size: 1.5rem; letter-spacing: -0.02em; line-height: 1.05; margin-bottom: 12px; }
+  .path p { color: var(--ink-soft); font-size: 15px; line-height: 1.5; flex: 1; margin-bottom: 24px; }
+  .pbtns { display: flex; gap: 12px; flex-wrap: wrap; }
+  .path-pro { background: var(--ink); border-color: var(--ink); box-shadow: 14px 14px 0 rgba(27,23,18,0.09); }
+  .path-pro .ptag { color: #b8ad98; }
+  .path-pro .ptag b { color: var(--accent); font-weight: 700; }
+  .path-pro h3 { color: var(--paper); }
+  .path-pro p { color: #cfc6b3; }
+  .btn { font-family: var(--mono); font-size: 14px; font-weight: 500; padding: 13px 24px; border-radius: 999px; transition: all .15s; border: 1px solid var(--ink); }
   .btn-p { background: var(--accent); border-color: var(--accent); color: var(--paper); }
   .btn-p:hover { background: var(--accent-deep); border-color: var(--accent-deep); }
   .btn-s:hover { background: var(--ink); color: var(--paper); }
+  .btn-pro { background: var(--accent); border-color: var(--accent); color: var(--paper); }
+  .btn-pro:hover { background: var(--accent-deep); border-color: var(--accent-deep); }
+  .btn-ghost { color: var(--paper); border-color: rgba(255,255,255,0.3); }
+  .btn-ghost:hover { border-color: var(--paper); background: rgba(255,255,255,0.08); }
   footer { border-top: 1px solid var(--line); padding: 34px 0; font-size: 14px; color: var(--muted); }
   .foot-in { display: flex; justify-content: space-between; align-items: center; gap: 18px; flex-wrap: wrap; }
   .foot-in a { color: var(--ink-soft); }
@@ -366,16 +378,35 @@ cargo <span class="fn">install</span> pdf-inspector
   </div>
 </section>
 
-<div class="cta">
+<section class="close">
   <div class="wrap">
-    <h2>Stop paying OCR for text.</h2>
-    <p>Route the easy PDFs locally in milliseconds, and send only the ones that truly need it downstream.</p>
-    <div class="btns">
-      <a class="btn btn-p" href="https://github.com/firecrawl/pdf-inspector">Get started on GitHub</a>
-      <a class="btn btn-s" href="https://crates.io/crates/pdf-inspector">View on crates.io</a>
+    <div class="sec-head">
+      <span class="sec-num">04</span>
+      <h2 class="sec-title">Two ways to parse</h2>
+      <p class="sec-sub">Run the classifier locally for text-based PDFs; hand the scanned, OCR, and at-scale work to Firecrawl.</p>
+    </div>
+    <div class="split">
+      <div class="path">
+        <div class="ptag">Open source · runs local</div>
+        <h3>Use pdf-inspector yourself</h3>
+        <p>Pure-Rust library and CLI. Classify and extract text-based PDFs on your own machine in milliseconds — no external calls, no OCR bill, MIT licensed.</p>
+        <div class="pbtns">
+          <a class="btn btn-p" href="https://github.com/firecrawl/pdf-inspector">Get started</a>
+          <a class="btn btn-s" href="https://crates.io/crates/pdf-inspector">crates.io</a>
+        </div>
+      </div>
+      <div class="path path-pro">
+        <div class="ptag"><b>Firecrawl Parse</b> · hosted API</div>
+        <h3>Or let Firecrawl handle the hard ones</h3>
+        <p>Scanned documents, OCR, DOCX / XLSX / HTML, and parsing at scale — clean, LLM-ready Markdown from one API call. The downstream route for everything local parsing can't reach.</p>
+        <div class="pbtns">
+          <a class="btn btn-pro" href="https://docs.firecrawl.dev/api-reference/endpoint/parse">Firecrawl Parse ↗</a>
+          <a class="btn btn-ghost" href="https://firecrawl.dev">firecrawl.dev</a>
+        </div>
+      </div>
     </div>
   </div>
-</div>
+</section>
 
 <footer>
   <div class="wrap foot-in">
