@@ -153,6 +153,42 @@ pub(crate) fn is_toc_entry_line(text: &str) -> bool {
     dots >= 3
 }
 
+/// A heading that announces a table of contents ("Contents", "Table of
+/// Contents"). Lines after it on the same page are ToC entries — section
+/// titles that look exactly like headings but must not be promoted.
+pub(crate) fn is_toc_marker_heading(text: &str) -> bool {
+    let t = text.trim().trim_end_matches(':').trim().to_lowercase();
+    matches!(t.as_str(), "contents" | "table of contents")
+}
+
+/// Lines that resemble headings structurally but are display-math fragments:
+/// equations ending in an equation number ("S = kB ln W, (2)") or equation
+/// lead-ins ("Rearranging Equation (8) gives:"). Both carry an "(N)" equation
+/// reference — that's the discriminator. A bare trailing colon is NOT a
+/// fragment signal: real headings frequently end with colons ("Procedure:",
+/// "Steps for Using the Microscope:").
+pub(crate) fn is_heading_fragment(text: &str) -> bool {
+    let t = text.trim_end();
+
+    fn is_equation_number(s: &str) -> bool {
+        s.strip_prefix('(')
+            .and_then(|r| r.strip_suffix(')'))
+            .is_some_and(|inner| {
+                !inner.is_empty() && inner.len() <= 3 && inner.chars().all(|c| c.is_ascii_digit())
+            })
+    }
+
+    // Equation-number suffix: "... (12)"
+    if is_equation_number(t.rsplit(' ').next().unwrap_or("")) {
+        return true;
+    }
+    // Lead-in: ends with a colon AND references an equation number inline
+    if t.ends_with(':') && t.split_whitespace().any(is_equation_number) {
+        return true;
+    }
+    false
+}
+
 /// Compute the Y-gap threshold for paragraph break detection.
 ///
 /// Instead of using a fixed multiple of base_size (which fails for double-spaced
@@ -366,5 +402,31 @@ mod tests {
         assert!(!is_toc_entry_line("and so it goes ..."));
         // Long numbers are data, not page refs
         assert!(!is_toc_entry_line("ISBN ... 97814"));
+    }
+
+    #[test]
+    fn toc_marker_headings() {
+        assert!(is_toc_marker_heading("Contents"));
+        assert!(is_toc_marker_heading("CONTENTS"));
+        assert!(is_toc_marker_heading("Table of Contents"));
+        assert!(is_toc_marker_heading("Table of contents:"));
+        assert!(!is_toc_marker_heading("Contents of the Shipment"));
+        assert!(!is_toc_marker_heading("Introduction"));
+    }
+
+    #[test]
+    fn heading_fragments() {
+        // Equation lead-ins: colon ending + inline equation reference
+        assert!(is_heading_fragment("Rearranging Equation (8) gives:"));
+        // Display-equation neighbours ending in an equation number
+        assert!(is_heading_fragment("S = kB ln W, (2)"));
+        assert!(is_heading_fragment("E = mc2 (12)"));
+        // Real headings pass — including colon-ended ones
+        assert!(!is_heading_fragment("4. Entropy"));
+        assert!(!is_heading_fragment("Procedure:"));
+        assert!(!is_heading_fragment("Steps for Using the Microscope:"));
+        assert!(!is_heading_fragment("Changing objectives:"));
+        assert!(!is_heading_fragment("Sales by Region (2024)"));
+        assert!(!is_heading_fragment("Results (preliminary)"));
     }
 }
