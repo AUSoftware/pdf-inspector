@@ -604,11 +604,11 @@ fn tracked_run_space_floor(group: &[&TextItem], start: usize) -> Option<(usize, 
     let mut sorted = gaps.clone();
     sorted.sort_by(|a, b| a.total_cmp(b));
     let median = sorted[sorted.len() / 2];
-    // Typographic convention gate, both tiers: display tracking is a
-    // caps (or title-case single word) convention, and Han/Kana never
-    // space between glyphs. A spaced run of lowercase singles ("x y z"
-    // variables, "a b c" lists) has the same gap shape as tracking at
-    // ANY length, so lowercase sequences always keep their boundaries.
+    // Typographic convention gate, both tiers: display tracking is an
+    // all-caps convention, and Han/Kana never space between glyphs. Mixed-
+    // or lowercase Latin runs keep their boundaries because geometry alone
+    // cannot distinguish spaced singles ("A b c d e") from a tracked
+    // title-case word ("B u f f a l o").
     let run_chars = || {
         group[start..=end]
             .iter()
@@ -617,11 +617,7 @@ fn tracked_run_space_floor(group: &[&TextItem], start: usize) -> Option<(usize, 
     let spaceless_cjk = run_chars().all(|c| is_spaceless_cjk(c) || !c.is_alphanumeric())
         && run_chars().any(is_spaceless_cjk);
     let all_caps = run_chars().all(|c| c.is_uppercase() || is_cjk_char(c) || !c.is_alphabetic());
-    let title_case = {
-        let alpha: Vec<char> = run_chars().filter(|c| c.is_alphabetic()).collect();
-        alpha.len() >= 2 && alpha[0].is_uppercase() && alpha[1..].iter().all(|c| c.is_lowercase())
-    };
-    if !(spaceless_cjk || all_caps || title_case) {
+    if !(spaceless_cjk || all_caps) {
         return None;
     }
 
@@ -1022,12 +1018,13 @@ mod tests {
     }
 
     #[test]
-    fn title_case_tracked_word_collapses() {
-        // "B u f f a l o" — one title-case word set with tracking.
-        let items = glyph_run("Buffalo", 100.0, 7.0, 2.3);
+    fn uppercase_leading_spaced_singles_keep_boundaries() {
+        // "A b c d e" is indistinguishable from a title-case tracked word
+        // without reliable tracking metadata, so preserve its boundaries.
+        let items = glyph_run("Abcde", 100.0, 7.0, 2.3);
         let merged = merge_text_items(items);
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].text, "Buffalo");
+        assert_eq!(merged[0].text, "A b c d e");
     }
 
     #[test]
