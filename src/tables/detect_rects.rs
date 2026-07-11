@@ -1504,9 +1504,16 @@ fn detect_row_stripe_table(
 /// Charts (bar graphs, axis gridlines) emit fields of drawing rects that can
 /// pass the row-stripe shape test; the resulting "table" then captures the
 /// page's prose. The signature: one cell holds an entire paragraph — ≥60 words
-/// AND at least a third of all words in the table. Real tables never
-/// concentrate that much text in a single cell, even with a description
-/// column.
+/// AND at least a third of all words in the table.
+///
+/// There is deliberately no row-count exemption. A small table whose single
+/// long cell dominates its word count is indistinguishable by content from a
+/// phantom grid over body text, and across the regression corpora every such
+/// grid observed has been swallowed prose, never a real note table. The costs
+/// are also asymmetric: rejecting a real table degrades it to readable prose,
+/// while accepting a phantom scrambles the page into Y-interleaved cells.
+/// Larger legitimate tables are safe because the one-third-of-total threshold
+/// scales with table size.
 fn has_dominant_prose_cell(cells: &[Vec<String>]) -> bool {
     let mut total_words = 0usize;
     let mut max_cell_words = 0usize;
@@ -2439,12 +2446,34 @@ mod tests {
 
     #[test]
     fn dominant_prose_cell_rejects_swallowed_paragraph() {
-        // One cell holds a 70-word paragraph, rest are chart labels
+        // Two cells hold paragraphs (the shape every observed phantom grid
+        // has: swallowed body text spans multiple cells), rest are chart labels
         let para = ["word"; 70].join(" ");
+        let para2 = ["word"; 35].join(" ");
         let cells = cells_of(&[
             &[para.as_str(), "81", "76"],
-            &["21", "56", "9"],
+            &[para2.as_str(), "56", "9"],
             &["2019", "2020", ""],
+        ]);
+        assert!(has_dominant_prose_cell(&cells));
+    }
+
+    #[test]
+    fn dominant_prose_cell_rejects_small_table_dominated_by_one_cell() {
+        // Boundary case, documented as INTENDED: a small grid whose single
+        // long cell dominates the word count is rejected even at 4+ rows.
+        // By content alone this shape is indistinguishable from a phantom
+        // grid over body text, and every observed instance in the regression
+        // corpora was swallowed prose (chart/figure regions), not a real
+        // note table. Rejection degrades gracefully — the text is still
+        // extracted as prose — while accepting a phantom scrambles reading
+        // order.
+        let note = ["word"; 70].join(" ");
+        let cells = cells_of(&[
+            &["Purpose", note.as_str()],
+            &["Owner", "Facilities team"],
+            &["Date", "2024-06-01"],
+            &["Status", "Active"],
         ]);
         assert!(has_dominant_prose_cell(&cells));
     }
