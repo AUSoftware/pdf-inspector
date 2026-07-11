@@ -88,6 +88,11 @@ impl StructRole {
     /// tag the document title inside a Figure (alongside a seal or logo), and
     /// that title is a real heading. `Formula` and `Form` stay — a line
     /// explicitly tagged as an equation or form field is never a heading.
+    ///
+    /// Table roles (Table/TR/TH/TD/THead/TBody/TFoot) are included so that
+    /// when table reconstruction falls back and cells reach the line loop as
+    /// plain text, a short isolated cell — a `TH` column header especially —
+    /// is not promoted to a heading.
     pub(crate) fn is_non_heading_content(&self) -> bool {
         matches!(
             self,
@@ -107,6 +112,13 @@ impl StructRole {
                 | Self::Code
                 | Self::Formula
                 | Self::Form
+                | Self::Table
+                | Self::TR
+                | Self::TH
+                | Self::TD
+                | Self::THead
+                | Self::TBody
+                | Self::TFoot
         )
     }
 
@@ -907,6 +919,13 @@ mod tests {
             StructRole::Code,
             StructRole::Formula,
             StructRole::Form,
+            StructRole::Table,
+            StructRole::TR,
+            StructRole::TH,
+            StructRole::TD,
+            StructRole::THead,
+            StructRole::TBody,
+            StructRole::TFoot,
         ] {
             assert!(
                 r.is_non_heading_content(),
