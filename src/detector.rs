@@ -386,7 +386,12 @@ pub(crate) fn detect_from_document(
                 let analysis = if let Some(cached) = analysis_cache.get(&page_num) {
                     cached.clone()
                 } else if let Some(&page_id) = pages.get(&page_num) {
-                    analyze_page_content(doc, page_id)
+                    // Cache the fresh analysis so the reason-classification pass
+                    // below sees the real signals (vector_text, etc.) instead of
+                    // defaulting to "scanned".
+                    let a = analyze_page_content(doc, page_id);
+                    analysis_cache.insert(page_num, a.clone());
+                    a
                 } else {
                     continue;
                 };
@@ -433,6 +438,9 @@ pub(crate) fn detect_from_document(
                 let analysis = analyze_page_content(doc, page_id);
                 if analysis.has_identity_h_no_tounicode || analysis.has_only_type3_fonts {
                     pages_needing_ocr.push(page_num);
+                    // Cache so the reason pass reports suspected_garbled_text
+                    // rather than defaulting to "scanned".
+                    analysis_cache.insert(page_num, analysis);
                 }
             }
         }
