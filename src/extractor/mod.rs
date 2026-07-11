@@ -539,6 +539,20 @@ fn should_preserve_overlapping_stream_order(group: &[&TextItem]) -> bool {
 /// then inserted only at gaps above the floor (infinity = single word).
 /// Normal text (multi-char items, or single-char runs with sub-threshold
 /// gaps) returns None and keeps the existing behavior.
+/// Han/Kana scripts write without inter-word spaces. Hangul (Korean) DOES
+/// space between words and deliberately stays out of this set — a Korean
+/// tracked run keeps normal word-boundary handling.
+fn is_spaceless_cjk(c: char) -> bool {
+    matches!(c,
+        '\u{3000}'..='\u{303F}'   // CJK Symbols and Punctuation
+        | '\u{3040}'..='\u{309F}' // Hiragana
+        | '\u{30A0}'..='\u{30FF}' // Katakana
+        | '\u{4E00}'..='\u{9FFF}' // CJK Unified Ideographs
+        | '\u{F900}'..='\u{FAFF}' // CJK Compatibility Ideographs
+        | '\u{FF00}'..='\u{FFEF}' // Halfwidth and Fullwidth Forms
+    )
+}
+
 fn tracked_run_space_floor(group: &[&TextItem], start: usize) -> Option<(usize, f32)> {
     const MIN_GAPS: usize = 4;
     let first = group[start];
@@ -590,22 +604,43 @@ fn tracked_run_space_floor(group: &[&TextItem], start: usize) -> Option<(usize, 
     let mut sorted = gaps.clone();
     sorted.sort_by(|a, b| a.total_cmp(b));
     let median = sorted[sorted.len() / 2];
+    // Typographic convention gate, both tiers: display tracking is a
+    // caps (or title-case single word) convention, and Han/Kana never
+    // space between glyphs. A spaced run of lowercase singles ("x y z"
+    // variables, "a b c" lists) has the same gap shape as tracking at
+    // ANY length, so lowercase sequences always keep their boundaries.
+    let run_chars = || {
+        group[start..=end]
+            .iter()
+            .flat_map(|it| it.text.trim().chars())
+    };
+    let spaceless_cjk = run_chars().all(|c| is_spaceless_cjk(c) || !c.is_alphanumeric())
+        && run_chars().any(is_spaceless_cjk);
+    let all_caps = run_chars().all(|c| c.is_uppercase() || is_cjk_char(c) || !c.is_alphabetic());
+    let title_case = {
+        let alpha: Vec<char> = run_chars().filter(|c| c.is_alphabetic()).collect();
+        alpha.len() >= 2 && alpha[0].is_uppercase() && alpha[1..].iter().all(|c| c.is_lowercase())
+    };
+    if !(spaceless_cjk || all_caps || title_case) {
+        return None;
+    }
+
     if gaps.len() >= MIN_GAPS {
         if median <= 0.075 {
             return None;
         }
     } else {
         let uniform = sorted[sorted.len() - 1] <= sorted[0].max(0.01) * 1.4;
-        // Caps convention — or CJK, which never uses inter-glyph spaces.
-        let all_caps = group[start..=end].iter().all(|it| {
-            it.text
-                .trim()
-                .chars()
-                .all(|c| c.is_uppercase() || is_cjk_char(c) || !c.is_alphabetic())
-        });
-        if median < 0.09 || !uniform || !all_caps {
+        if median < 0.09 || !uniform {
             return None;
         }
+    }
+
+    // Han/Kana: no inter-glyph spaces, period — a nonuniform gap
+    // distribution (punctuation spacing, justification) must not
+    // manufacture word boundaries.
+    if spaceless_cjk {
+        return Some((end, f32::INFINITY));
     }
 
     // Word gaps, if present, form a second mode above the letter-gap
@@ -960,6 +995,39 @@ mod tests {
         let merged = merge_text_items(items);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].text, "WORD");
+    }
+
+    #[test]
+    fn long_lowercase_spaced_singles_keep_boundaries() {
+        // Review: a 5+ single-letter lowercase list has the tracked gap
+        // shape at any length — the convention gate must protect it in
+        // the >=4-gap tier too.
+        let items = glyph_run("abcde", 100.0, 6.0, 2.3);
+        let merged = merge_text_items(items);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "a b c d e");
+    }
+
+    #[test]
+    fn han_run_with_nonuniform_gaps_never_gains_spaces() {
+        // Review: a bimodal gap distribution (justification, punctuation
+        // spacing) must not manufacture word boundaries in Han text.
+        let mut items = glyph_run("北京时事快报", 100.0, 12.0, 1.4);
+        for item in items.iter_mut().skip(3) {
+            item.x += 3.0; // wide gap after the third glyph
+        }
+        let merged = merge_text_items(items);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "北京时事快报");
+    }
+
+    #[test]
+    fn title_case_tracked_word_collapses() {
+        // "B u f f a l o" — one title-case word set with tracking.
+        let items = glyph_run("Buffalo", 100.0, 7.0, 2.3);
+        let merged = merge_text_items(items);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "Buffalo");
     }
 
     #[test]
