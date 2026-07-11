@@ -706,20 +706,9 @@ pub(super) fn to_markdown_from_lines_with_tables_and_images(
         // Lines explicitly tagged with a non-heading content role must never
         // be promoted by the visual heuristic — a tagged list item, quote, or
         // code line can look exactly like a heading (short, isolated).
-        let non_heading_role = struct_role.as_ref().is_some_and(|r| {
-            matches!(
-                r,
-                StructRole::L
-                    | StructRole::LI
-                    | StructRole::Lbl
-                    | StructRole::LBody
-                    | StructRole::BlockQuote
-                    | StructRole::Code
-                    | StructRole::Caption
-                    | StructRole::TOC
-                    | StructRole::TOCI
-            )
-        });
+        let non_heading_role = struct_role
+            .as_ref()
+            .is_some_and(StructRole::is_non_heading_content);
         let heuristic_heading = if options.detect_headers
             && !non_heading_role
             && !is_code_line
