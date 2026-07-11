@@ -164,9 +164,13 @@ pub(crate) fn is_toc_marker_heading(text: &str) -> bool {
 /// Lines that resemble headings structurally but are display-math fragments:
 /// equations ending in an equation number ("S = kB ln W, (2)") or equation
 /// lead-ins ("Rearranging Equation (8) gives:"). Both carry an "(N)" equation
-/// reference — that's the discriminator. A bare trailing colon is NOT a
-/// fragment signal: real headings frequently end with colons ("Procedure:",
-/// "Steps for Using the Microscope:").
+/// reference — but a trailing "(N)" alone is not enough: real headings end
+/// with parenthesized numbers too ("Nicaea (325)", appendix numbering), so
+/// the suffix form additionally requires math evidence — an "=" in the line
+/// or a comma immediately before the number, both present in every display
+/// equation and absent from name-plus-number headings. A bare trailing colon
+/// is NOT a fragment signal either: real headings frequently end with colons
+/// ("Procedure:", "Steps for Using the Microscope:").
 pub(crate) fn is_heading_fragment(text: &str) -> bool {
     let t = text.trim_end();
 
@@ -178,9 +182,48 @@ pub(crate) fn is_heading_fragment(text: &str) -> bool {
             })
     }
 
-    // Equation-number suffix: "... (12)"
-    if is_equation_number(t.rsplit(' ').next().unwrap_or("")) {
-        return true;
+    // Equation-number suffix with math evidence: "S = kB ln W, (2)"
+    let mut rev = t.rsplit(' ');
+    let last = rev.next().unwrap_or("");
+    if is_equation_number(last) {
+        // Page-of-total running headers: "LIVSMEDELSVERKET PM 2 (10)"
+        if let Some(prev_word) = t.rsplit(' ').nth(1) {
+            if let (Ok(page), Some(total)) = (
+                prev_word.parse::<u32>(),
+                last.trim_start_matches('(')
+                    .trim_end_matches(')')
+                    .parse::<u32>()
+                    .ok(),
+            ) {
+                if page <= total {
+                    return true;
+                }
+            }
+        }
+        let punct_before = rev
+            .next()
+            .is_some_and(|w| w.ends_with(',') || w.ends_with(':'));
+        let has_math_op = t.chars().any(|c| {
+            matches!(
+                c,
+                '=' | '<'
+                    | '>'
+                    | '≤'
+                    | '≥'
+                    | '≪'
+                    | '≫'
+                    | '≈'
+                    | '≠'
+                    | '±'
+                    | '∑'
+                    | '∫'
+                    | '√'
+                    | '∝'
+            )
+        });
+        if punct_before || has_math_op {
+            return true;
+        }
     }
     // Lead-in: ends with a colon AND references an equation number inline
     if t.ends_with(':') && t.split_whitespace().any(is_equation_number) {
@@ -421,7 +464,18 @@ mod tests {
         // Display-equation neighbours ending in an equation number
         assert!(is_heading_fragment("S = kB ln W, (2)"));
         assert!(is_heading_fragment("E = mc2 (12)"));
-        // Real headings pass — including colon-ended ones
+        assert!(is_heading_fragment("x + y = z, (3)"));
+        // Page-of-total running headers
+        assert!(is_heading_fragment("LIVSMEDELSVERKET PM 2 (10)"));
+        // Comparison-operator evidence and colon-before-number
+        assert!(is_heading_fragment(
+            "PLL\u{fe} PHH\u{226a} PLH\u{fe} PHL: (12)"
+        ));
+        // Real headings pass — including name-plus-number and colon-ended ones
+        assert!(!is_heading_fragment("Nicaea (325)"));
+        assert!(!is_heading_fragment(
+            "\u{627}\u{644}\u{645}\u{644}\u{62d}\u{642} \u{631}\u{642}\u{645} (1)"
+        ));
         assert!(!is_heading_fragment("4. Entropy"));
         assert!(!is_heading_fragment("Procedure:"));
         assert!(!is_heading_fragment("Steps for Using the Microscope:"));

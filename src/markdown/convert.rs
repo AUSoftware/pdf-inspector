@@ -706,13 +706,11 @@ pub(super) fn to_markdown_from_lines_with_tables_and_images(
             && plain_trimmed.split_whitespace().count() <= 15
             && !starts_with_bullet_marker(plain_trimmed)
             && !is_toc_entry_line(plain_trimmed)
+            && !is_heading_fragment(plain_trimmed)
             && toc_suppress_page != Some(line.page)
         {
             let line_font_size = line.items.first().map(|i| i.font_size).unwrap_or(base_size);
             detect_header_level(line_font_size, base_size, &heading_tiers).or_else(|| {
-                if is_heading_fragment(plain_trimmed) {
-                    return None;
-                }
                 // Rarity-based heading detection (inspired by opendataloader).
                 // Heading probability scoring with lookahead context.
                 // Score = rarity * 0.5 + bold * 0.3 + standalone * 0.2
@@ -1053,14 +1051,12 @@ pub fn to_markdown_from_lines(lines: Vec<TextLine>, options: MarkdownOptions) ->
             && plain_trimmed.len() > 3
             && plain_trimmed.split_whitespace().count() <= 15
             && !is_toc_entry_line(plain_trimmed)
+            && !is_heading_fragment(plain_trimmed)
             && toc_suppress_page != Some(line.page)
         {
             let line_font_size = line.items.first().map(|i| i.font_size).unwrap_or(base_size);
             if let Some(header_level) =
                 detect_header_level(line_font_size, base_size, &heading_tiers).or_else(|| {
-                    if is_heading_fragment(plain_trimmed) {
-                        return None;
-                    }
                     if line_font_size < base_size * 0.95 {
                         return None;
                     }

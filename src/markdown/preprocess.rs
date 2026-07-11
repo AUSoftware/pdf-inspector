@@ -104,7 +104,11 @@ pub(crate) fn merge_heading_lines(
                 let curr_text = line.text();
                 let curr_trim = curr_text.trim();
                 let y_gap = prev.y - line.y;
+                // Both lines must be tier-less: a tiered/tagged bold heading
+                // followed by bold body text must not absorb it.
                 line_level.is_none()
+                    && effective_heading_level(prev, base_size, heading_tiers, struct_roles)
+                        .is_none()
                     && prev.page == line.page
                     && all_bold(prev)
                     && all_bold(&line)
@@ -764,5 +768,20 @@ mod tests {
         ];
         let result = merge_heading_lines(lines, 12.0, &[], None);
         assert_eq!(result.len(), 2, "sentence-final bold line must not merge");
+    }
+
+    #[test]
+    fn tiered_bold_heading_does_not_absorb_bold_body() {
+        // Previous line is a tier-level bold heading (16pt vs 12pt body);
+        // a following lowercase bold body line must NOT merge into it.
+        let mut heading = make_bold_line("Section Title", 1, 700.0);
+        heading.items[0].font_size = 16.0;
+        heading.items[0].height = 16.0;
+        let lines = vec![
+            heading,
+            make_bold_line("emphasized body text continues here", 1, 686.0),
+        ];
+        let result = merge_heading_lines(lines, 12.0, &[16.0], None);
+        assert_eq!(result.len(), 2, "tiered heading must not absorb bold body");
     }
 }
