@@ -1477,6 +1477,10 @@ fn detect_row_stripe_table(
         debug!("  row-stripe rejected: sparse outline/prose continuation shape");
         return None;
     }
+    if has_dominant_prose_cell(&cells) {
+        debug!("  row-stripe rejected: dominant prose cell (chart/figure region over body text)");
+        return None;
+    }
 
     let column_centers: Vec<f32> = (0..num_cols)
         .map(|c| (col_edges[c] + col_edges[c + 1]) / 2.0)
@@ -1493,6 +1497,27 @@ fn detect_row_stripe_table(
     );
 
     Some(Table::new(column_centers, row_centers, cells, item_indices))
+}
+
+/// Detect a grid that swallowed body text instead of tabular data.
+///
+/// Charts (bar graphs, axis gridlines) emit fields of drawing rects that can
+/// pass the row-stripe shape test; the resulting "table" then captures the
+/// page's prose. The signature: one cell holds an entire paragraph — ≥60 words
+/// AND at least a third of all words in the table. Real tables never
+/// concentrate that much text in a single cell, even with a description
+/// column.
+fn has_dominant_prose_cell(cells: &[Vec<String>]) -> bool {
+    let mut total_words = 0usize;
+    let mut max_cell_words = 0usize;
+    for row in cells {
+        for cell in row {
+            let words = cell.split_whitespace().count();
+            total_words += words;
+            max_cell_words = max_cell_words.max(words);
+        }
+    }
+    max_cell_words >= 60 && max_cell_words * 3 >= total_words
 }
 
 fn row_stripe_is_sparse_prose_outline(cells: &[Vec<String>]) -> bool {
@@ -2396,6 +2421,45 @@ mod tests {
             item_type: ItemType::Text,
             mcid: None,
         }
+    }
+
+    // --- has_dominant_prose_cell ---
+
+    fn cells_of(rows: &[&[&str]]) -> Vec<Vec<String>> {
+        rows.iter()
+            .map(|r| r.iter().map(|c| c.to_string()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn dominant_prose_cell_rejects_swallowed_paragraph() {
+        // One cell holds a 70-word paragraph, rest are chart labels
+        let para = ["word"; 70].join(" ");
+        let cells = cells_of(&[
+            &[para.as_str(), "81", "76"],
+            &["21", "56", "9"],
+            &["2019", "2020", ""],
+        ]);
+        assert!(has_dominant_prose_cell(&cells));
+    }
+
+    #[test]
+    fn dominant_prose_cell_allows_description_column() {
+        // Long-ish description cells, but text is spread across the table
+        let desc = ["word"; 25].join(" ");
+        let cells = cells_of(&[
+            &["Item A", desc.as_str(), "100"],
+            &["Item B", desc.as_str(), "200"],
+            &["Item C", desc.as_str(), "300"],
+            &["Item D", desc.as_str(), "400"],
+        ]);
+        assert!(!has_dominant_prose_cell(&cells));
+    }
+
+    #[test]
+    fn dominant_prose_cell_allows_short_tables() {
+        let cells = cells_of(&[&["Name", "Value"], &["Total", "42"]]);
+        assert!(!has_dominant_prose_cell(&cells));
     }
 
     // --- rects_overlap ---
