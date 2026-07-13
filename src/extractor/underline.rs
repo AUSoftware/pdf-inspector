@@ -186,7 +186,7 @@ fn has_flanking_verticals(
     let page_rects: Vec<(f32, f32, f32, f32)> = rects
         .iter()
         .filter(|r| r.page == page && r.height.abs() > 6.0)
-        .map(|r| norm(r))
+        .map(norm)
         .collect();
     let rect_flank = page_rects.iter().any(|&(x_lo, x_hi, y_lo, y_hi)| {
         let contains = x_lo <= rule.x1 + 2.0
