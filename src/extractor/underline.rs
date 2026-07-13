@@ -165,18 +165,12 @@ fn has_flanking_verticals(
     lines: &[UnderlineLine],
     page: u32,
 ) -> bool {
-    // A tall drawn rect that CONTAINS the rule is a table cell / grid box:
-    // the rule is a row ruling inside it, not an underline. Genuine
-    // underlines can sit inside decorative callout boxes too, so require
-    // table-like proportions — the box is only a couple of text lines tall.
-    let rect_flank = rects.iter().any(|r| {
-        if r.page != page {
-            return false;
-        }
-        let h = r.height.abs();
-        if h <= 6.0 || h > 90.0 {
-            return false;
-        }
+    // A drawn rect that CONTAINS the rule vetoes rescue only with GRID
+    // EVIDENCE: another drawn rect abutting it vertically (cell rows tile).
+    // Height alone can't separate a table cell from a decorative callout
+    // panel — genuine underlines live inside isolated filled panels, and
+    // multiline table cells can be arbitrarily tall.
+    let norm = |r: &PdfRect| {
         let (x_lo, x_hi) = if r.width >= 0.0 {
             (r.x, r.x + r.width)
         } else {
@@ -187,10 +181,29 @@ fn has_flanking_verticals(
         } else {
             (r.y + r.height, r.y)
         };
-        x_lo <= rule.x1 + 2.0
+        (x_lo, x_hi, y_lo, y_hi)
+    };
+    let page_rects: Vec<(f32, f32, f32, f32)> = rects
+        .iter()
+        .filter(|r| r.page == page && r.height.abs() > 6.0)
+        .map(|r| norm(r))
+        .collect();
+    let rect_flank = page_rects.iter().any(|&(x_lo, x_hi, y_lo, y_hi)| {
+        let contains = x_lo <= rule.x1 + 2.0
             && x_hi >= rule.x2 - 2.0
             && y_lo <= rule.y + 2.0
-            && y_hi >= rule.y - 2.0
+            && y_hi >= rule.y - 2.0;
+        if !contains {
+            return false;
+        }
+        // Grid evidence: a vertically abutting neighbor box with x-overlap.
+        page_rects.iter().any(|&(nx_lo, nx_hi, ny_lo, ny_hi)| {
+            let x_overlap = nx_hi.min(x_hi) - nx_lo.max(x_lo);
+            if x_overlap <= 10.0 {
+                return false;
+            }
+            (ny_lo - y_hi).abs() <= 3.0 || (y_lo - ny_hi).abs() <= 3.0
+        })
     });
     if rect_flank {
         return true;
@@ -411,14 +424,15 @@ pub(crate) fn mark_underlined_items(
                     if !is_underline_candidate(item) {
                         return false;
                     }
-                    // A denominator hangs just below the bar AND is
-                    // bar-sized; a normal next text line under a tightly
-                    // leaded underline is far wider than the rule and must
-                    // not trip this guard.
+                    // A denominator HUGS the bar (fraction typesetting
+                    // leaves ~0.1-0.2em) and is bar-sized. Both bounds
+                    // matter: a short last-line of a paragraph at normal
+                    // leading sits further below, and a full next text
+                    // line is far wider than the rule.
                     let dy = rule.y - (item.y + item.height);
                     let overlap = rule.x2.min(item.x + item.width) - rule.x1.max(item.x);
                     dy > 0.0
-                        && dy <= item.font_size * 0.5
+                        && dy <= item.font_size * 0.3
                         && overlap > rule.width() * 0.5
                         && item.width <= rule.width() * 1.5
                 })
@@ -432,10 +446,13 @@ pub(crate) fn mark_underlined_items(
         }
 
         for (rule_idx, rule) in rules.iter().enumerate() {
-            if tabular_rules.contains(&rule_idx) || fraction_rules.contains(&rule_idx) {
+            if tabular_rules.contains(&rule_idx) {
                 continue;
             }
-            if rule_matches_item(rule, item) {
+            // The fraction guard only gates UNDERLINE marking — a rule that
+            // reads as a fraction bar from below can still legitimately
+            // strike through a line above it.
+            if !fraction_rules.contains(&rule_idx) && rule_matches_item(rule, item) {
                 item.is_underline = true;
             }
             if rule_strikes_item(rule, item) {
@@ -782,8 +799,10 @@ mod tests {
 
     #[test]
     fn snug_rescue_denied_inside_cell_box() {
-        // A rule snugly under one text line but enclosed by a drawn
-        // cell-sized box is a row ruling of a rect-grid table.
+        // A rule snugly under one text line but enclosed by a drawn cell
+        // box that TILES with vertical neighbors (grid evidence) is a row
+        // ruling of a rect-grid table. Isolated boxes (callout panels) do
+        // not veto — see repeated_snug_underlines_survive_ruling_filter.
         let mut items = vec![
             item("one wide cell row", 50.0, 700.0, 300.0, 11.0),
             item("second wide cell", 50.0, 650.0, 300.0, 11.0),
@@ -795,9 +814,9 @@ mod tests {
             hline(50.0, 350.0, 597.0),
         ];
         let boxes = vec![
-            cell_rect(45.0, 690.0, 320.0, 24.0),
-            cell_rect(45.0, 640.0, 320.0, 24.0),
-            cell_rect(45.0, 590.0, 320.0, 24.0),
+            cell_rect(45.0, 690.0, 320.0, 50.0),
+            cell_rect(45.0, 640.0, 320.0, 50.0),
+            cell_rect(45.0, 590.0, 320.0, 50.0),
         ];
 
         mark_underlined_items(&mut items, &boxes, &lines, 1);

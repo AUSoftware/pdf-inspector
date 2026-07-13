@@ -2380,9 +2380,11 @@ fn cluster_x_positions(items: &[(usize, &TextItem)], min_threshold: f32) -> Vec<
             // Style/underline splits leave runs that TOUCH (gap ~0); real
             // cell boundaries in even the tightest tables keep a visible
             // gap. 2pt separates the two without eating dense-table columns.
-            (prev.y - item.y).abs() <= 2.0
-                && (item.x - (prev.x + prev.width)) < 2.0
-                && item.x >= prev.x
+            // The negative side is bounded too: text overhanging from an
+            // adjacent cell overlaps by far more than italic kerning ever
+            // does, and must still start its own column.
+            let gap = item.x - (prev.x + prev.width);
+            (prev.y - item.y).abs() <= 2.0 && gap < 2.0 && gap > -4.0 && item.x >= prev.x
         };
         if !is_continuation {
             x_positions.push(item.x);
