@@ -903,9 +903,17 @@ pub(crate) fn merge_subscript_items(items: Vec<TextItem>) -> Vec<TextItem> {
                         .chars()
                         .last()
                         .is_some_and(|c| c.is_alphabetic());
-                    let same_marks = parent.is_underline == item.is_underline
-                        && parent.is_strikeout == item.is_strikeout;
-                    if parent.font_size >= sub_threshold && ends_with_letter && same_marks {
+                    // Strikeout boundaries block the merge (a struck word
+                    // must not extend its strike over a live footnote digit,
+                    // and a struck digit must not lose its own mark). An
+                    // underlined parent with an unmarked digit DOES merge:
+                    // the drawn rule easily misses the tiny digit's overlap
+                    // window, and refusing costs the whole subscript token
+                    // ("b"+"2" staying split). Visually the rule spans both.
+                    let marks_ok = parent.is_strikeout == item.is_strikeout
+                        && (parent.is_underline == item.is_underline
+                            || (parent.is_underline && !item.is_underline));
+                    if parent.font_size >= sub_threshold && ends_with_letter && marks_ok {
                         let parent_right = parent.x + parent.width;
                         let gap = item.x - parent_right;
                         // Subscripts must be tightly adjacent (within ~1pt)

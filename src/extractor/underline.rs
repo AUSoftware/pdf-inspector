@@ -397,13 +397,42 @@ pub(crate) fn mark_underlined_items(
     }
     let tabular_rules = tabular_row_separator_rule_indices(&rules, items);
 
+    // Math fraction bars are short horizontal lines with the numerator just
+    // above AND the denominator just below — underline geometry from above,
+    // but no underline has text hanging directly beneath it at fraction
+    // distance. Only narrow rules qualify: real underlines under short
+    // labels have their next text line a full line-pitch away.
+    let fraction_rules: HashSet<usize> = rules
+        .iter()
+        .enumerate()
+        .filter(|(_, rule)| {
+            rule.width() <= 60.0
+                && items.iter().any(|item| {
+                    if !is_underline_candidate(item) {
+                        return false;
+                    }
+                    // A denominator hangs just below the bar AND is
+                    // bar-sized; a normal next text line under a tightly
+                    // leaded underline is far wider than the rule and must
+                    // not trip this guard.
+                    let dy = rule.y - (item.y + item.height);
+                    let overlap = rule.x2.min(item.x + item.width) - rule.x1.max(item.x);
+                    dy > 0.0
+                        && dy <= item.font_size * 0.5
+                        && overlap > rule.width() * 0.5
+                        && item.width <= rule.width() * 1.5
+                })
+        })
+        .map(|(i, _)| i)
+        .collect();
+
     for item in items.iter_mut() {
         if !is_underline_candidate(item) {
             continue;
         }
 
         for (rule_idx, rule) in rules.iter().enumerate() {
-            if tabular_rules.contains(&rule_idx) {
+            if tabular_rules.contains(&rule_idx) || fraction_rules.contains(&rule_idx) {
                 continue;
             }
             if rule_matches_item(rule, item) {
