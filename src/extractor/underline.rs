@@ -115,7 +115,13 @@ fn rules_from_graphics(rects: &[PdfRect], lines: &[UnderlineLine], page: u32) ->
     rules
 }
 
-fn discard_repeated_ruling_rules(rules: Vec<Rule>) -> Vec<Rule> {
+fn discard_repeated_ruling_rules(
+    rules: Vec<Rule>,
+    items: &[TextItem],
+    rects: &[PdfRect],
+    lines: &[UnderlineLine],
+    page: u32,
+) -> Vec<Rule> {
     if rules.len() < MIN_REPEATED_RULE_LEVELS {
         return rules;
     }
@@ -123,10 +129,127 @@ fn discard_repeated_ruling_rules(rules: Vec<Rule>) -> Vec<Rule> {
     rules
         .iter()
         .filter(|rule| {
-            !is_repeated_ruling_rule(rule, &rules) && !is_segmented_row_ruling_rule(rule, &rules)
+            // A rule snugly owned by one text line is an underline even when
+            // span-similar rules repeat down the page — documents that
+            // underline many full-width lines (dense CJK business docs) look
+            // exactly like table rulings to the repetition check, which used
+            // to discard every one of them. Table rulings fail snugness:
+            // row separators extend past their cells' text (or have no text
+            // on the baseline above), and multi-column matches are still
+            // culled by the tabular filter afterwards.
+            // Same-row segmented rules (column-header separators) are
+            // always rulings — each segment snugly owns its column label,
+            // so snugness must not override that check.
+            !is_segmented_row_ruling_rule(rule, &rules)
+                && ((has_snug_text_owner(rule, items)
+                    && !has_flanking_verticals(rule, rects, lines, page))
+                    || !is_repeated_ruling_rule(rule, &rules))
         })
         .cloned()
         .collect()
+}
+
+/// True when a single text item both matches the rule vertically (baseline
+/// window) and horizontally contains it: the rule may not extend past the
+/// item's span by more than ~0.75em on either side. Underlines are drawn to
+/// the width of the text they decorate; table/form rulings span cells or
+/// full table width and overshoot any single item.
+/// A rule flanked by vertical strokes at its ends is a table/box border
+/// row edge, not an underline — underlined text lines have no vertical
+/// rules rising from their ends. Checked against raw stroked lines: a
+/// near-vertical segment whose x sits at either end of the rule and whose
+/// y-range covers the rule's row.
+fn has_flanking_verticals(
+    rule: &Rule,
+    rects: &[PdfRect],
+    lines: &[UnderlineLine],
+    page: u32,
+) -> bool {
+    // A tall drawn rect that CONTAINS the rule is a table cell / grid box:
+    // the rule is a row ruling inside it, not an underline. Genuine
+    // underlines can sit inside decorative callout boxes too, so require
+    // table-like proportions — the box is only a couple of text lines tall.
+    let rect_flank = rects.iter().any(|r| {
+        if r.page != page {
+            return false;
+        }
+        let h = r.height.abs();
+        if h <= 6.0 || h > 90.0 {
+            return false;
+        }
+        let (x_lo, x_hi) = if r.width >= 0.0 {
+            (r.x, r.x + r.width)
+        } else {
+            (r.x + r.width, r.x)
+        };
+        let (y_lo, y_hi) = if r.height >= 0.0 {
+            (r.y, r.y + r.height)
+        } else {
+            (r.y + r.height, r.y)
+        };
+        x_lo <= rule.x1 + 2.0
+            && x_hi >= rule.x2 - 2.0
+            && y_lo <= rule.y + 2.0
+            && y_hi >= rule.y - 2.0
+    });
+    if rect_flank {
+        return true;
+    }
+    lines.iter().any(|l| {
+        if l.page != page || (l.x1 - l.x2).abs() > 2.0 {
+            return false;
+        }
+        let x = (l.x1 + l.x2) / 2.0;
+        let near_end = (x - rule.x1).abs() <= 6.0 || (x - rule.x2).abs() <= 6.0;
+        if !near_end {
+            return false;
+        }
+        let (y_lo, y_hi) = if l.y1 <= l.y2 {
+            (l.y1, l.y2)
+        } else {
+            (l.y2, l.y1)
+        };
+        y_lo <= rule.y + 2.0 && y_hi >= rule.y - 2.0
+    })
+}
+
+fn has_snug_text_owner(rule: &Rule, items: &[TextItem]) -> bool {
+    // Underlines are drawn to the width of the text they decorate, but the
+    // text may be split into several runs (CJK lines mix scripts and font
+    // switches) — so ownership is judged against the UNION of the runs on
+    // the rule's baseline row. Table/form rulings overshoot their row's
+    // text (row separators span cell padding and empty columns), so they
+    // fail either containment or coverage.
+    let matched: Vec<&TextItem> = items
+        .iter()
+        .filter(|item| is_underline_candidate(item) && rule_matches_item(rule, item))
+        .collect();
+    if matched.is_empty() {
+        return false;
+    }
+    let x1 = matched.iter().map(|i| i.x).fold(f32::INFINITY, f32::min);
+    let x2 = matched
+        .iter()
+        .map(|i| i.x + i.width)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let max_fs = matched.iter().map(|i| i.font_size).fold(0.0, f32::max);
+    let pad = (max_fs * 0.75).max(4.0);
+    if rule.x1 < x1 - pad || rule.x2 > x2 + pad {
+        return false;
+    }
+    let covered: f32 = matched.iter().map(|i| i.width).sum();
+    if covered < rule.width() * 0.6 {
+        return false;
+    }
+    // A table row also unions to the rule's span — but its cells sit apart.
+    // An underlined text line is contiguous runs with word-sized gaps; any
+    // column-sized hole between matched runs means this is a row ruling.
+    let mut sorted = matched;
+    sorted.sort_by(|a, b| a.x.total_cmp(&b.x));
+    sorted.windows(2).all(|pair| {
+        let gap = pair[1].x - (pair[0].x + pair[0].width);
+        gap <= (max_fs * 2.0).max(12.0)
+    })
 }
 
 fn is_repeated_ruling_rule(rule: &Rule, rules: &[Rule]) -> bool {
@@ -215,9 +338,11 @@ fn is_underline_candidate(item: &TextItem) -> bool {
 
 fn rule_matches_item(rule: &Rule, item: &TextItem) -> bool {
     // Vertical window: underlines sit at or slightly below the baseline.
-    // Fonts draw them at roughly 5-15% of the em below; allow up to 35%
-    // (min 3pt) below and 1pt above for rounding.
-    let below = (item.font_size * 0.35).max(3.0);
+    // Latin fonts draw them at roughly 5-15% of the em below; CJK layouts
+    // put them under the full em box, measured up to ~0.67em below the
+    // baseline (text_dense__underline). Allow 0.72em (min 3pt) below and
+    // 1pt above for rounding.
+    let below = (item.font_size * 0.72).max(3.0);
     let y_min = item.y - below;
     let y_max = item.y + 1.0;
     if rule.y < y_min || rule.y > y_max {
@@ -260,7 +385,13 @@ pub(crate) fn mark_underlined_items(
     lines: &[UnderlineLine],
     page: u32,
 ) {
-    let rules = discard_repeated_ruling_rules(rules_from_graphics(rects, lines, page));
+    let rules = discard_repeated_ruling_rules(
+        rules_from_graphics(rects, lines, page),
+        items,
+        rects,
+        lines,
+        page,
+    );
     if rules.is_empty() {
         return;
     }
@@ -319,6 +450,16 @@ mod tests {
             x2,
             y2: y,
             stroke_width: 1.0,
+            page: 1,
+        }
+    }
+
+    fn cell_rect(x: f32, y: f32, width: f32, height: f32) -> PdfRect {
+        PdfRect {
+            x,
+            y,
+            width,
+            height,
             page: 1,
         }
     }
@@ -539,6 +680,98 @@ mod tests {
         let lines = vec![hline(90.0, 340.0, 498.0)];
 
         mark_underlined_items(&mut items, &[], &lines, 1);
+
+        assert!(items.iter().all(|item| !item.is_underline));
+    }
+
+    #[test]
+    fn repeated_snug_underlines_survive_ruling_filter() {
+        // Dense docs underline many full-width lines: span-similar rules at
+        // 3+ y-levels used to be discarded wholesale as table rulings.
+        // Each rule here snugly matches one text line, so all must mark.
+        let mut items = vec![
+            item("first underlined line of text", 50.0, 700.0, 300.0, 11.0),
+            item("second underlined line here", 50.0, 650.0, 300.0, 11.0),
+            item("third underlined line as well", 50.0, 600.0, 300.0, 11.0),
+        ];
+        let lines = vec![
+            hline(50.0, 350.0, 697.0),
+            hline(50.0, 350.0, 647.0),
+            hline(50.0, 350.0, 597.0),
+        ];
+
+        mark_underlined_items(&mut items, &[], &lines, 1);
+
+        assert!(items.iter().all(|item| item.is_underline));
+    }
+
+    #[test]
+    fn snug_rescue_spans_split_runs_on_one_line() {
+        // A single underlined line is often split into several runs (script
+        // or font switches). The union of touching runs owns the rule.
+        let mut items = vec![
+            item("run one", 50.0, 700.0, 100.0, 11.0),
+            item("run two", 150.5, 700.0, 100.0, 11.0),
+            item("run three", 251.0, 700.0, 99.0, 11.0),
+            item("other a", 50.0, 650.0, 300.0, 11.0),
+            item("other b", 50.0, 600.0, 300.0, 11.0),
+        ];
+        let lines = vec![
+            hline(50.0, 350.0, 697.0),
+            hline(50.0, 350.0, 647.0),
+            hline(50.0, 350.0, 597.0),
+        ];
+
+        mark_underlined_items(&mut items, &[], &lines, 1);
+
+        assert!(items[0].is_underline && items[1].is_underline && items[2].is_underline);
+    }
+
+    #[test]
+    fn snug_rescue_denied_for_row_with_cell_gaps() {
+        // A full-width rule whose baseline row is several items separated by
+        // column-sized gaps is a table row separator, not an underline —
+        // even when span-similar rules repeat down the page.
+        let mut items = vec![
+            item("cell a", 50.0, 700.0, 60.0, 11.0),
+            item("cell b", 190.0, 700.0, 60.0, 11.0),
+            item("cell c", 330.0, 700.0, 70.0, 11.0),
+            item("cell d", 50.0, 650.0, 60.0, 11.0),
+            item("cell e", 190.0, 650.0, 60.0, 11.0),
+            item("cell f", 330.0, 650.0, 70.0, 11.0),
+        ];
+        let lines = vec![
+            hline(50.0, 400.0, 697.0),
+            hline(50.0, 400.0, 647.0),
+            hline(50.0, 400.0, 597.0),
+        ];
+
+        mark_underlined_items(&mut items, &[], &lines, 1);
+
+        assert!(items.iter().all(|item| !item.is_underline));
+    }
+
+    #[test]
+    fn snug_rescue_denied_inside_cell_box() {
+        // A rule snugly under one text line but enclosed by a drawn
+        // cell-sized box is a row ruling of a rect-grid table.
+        let mut items = vec![
+            item("one wide cell row", 50.0, 700.0, 300.0, 11.0),
+            item("second wide cell", 50.0, 650.0, 300.0, 11.0),
+            item("third wide cell", 50.0, 600.0, 300.0, 11.0),
+        ];
+        let lines = vec![
+            hline(50.0, 350.0, 697.0),
+            hline(50.0, 350.0, 647.0),
+            hline(50.0, 350.0, 597.0),
+        ];
+        let boxes = vec![
+            cell_rect(45.0, 690.0, 320.0, 24.0),
+            cell_rect(45.0, 640.0, 320.0, 24.0),
+            cell_rect(45.0, 590.0, 320.0, 24.0),
+        ];
+
+        mark_underlined_items(&mut items, &boxes, &lines, 1);
 
         assert!(items.iter().all(|item| !item.is_underline));
     }

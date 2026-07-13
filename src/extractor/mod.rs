@@ -252,17 +252,47 @@ fn suppress_table_underlines(
     }
 
     let mut table_item_indices: HashSet<usize> = HashSet::new();
+    // A detected "table" that swallows nearly every text item on the page
+    // is a detection artifact (prose pages with boxed callouts or stacked
+    // underline rules read as one giant grid), not a real table — letting
+    // it through here erased every legitimate underline on the page
+    // (text_dense__underline: rect detection claimed 52/52 items). Real
+    // ruled tables share the page with headings, captions, and body text.
+    let plausible = |table: &crate::tables::Table| {
+        // Content sanity gate: prose pages with boxed callouts and stacked
+        // underline rules can detect as a structurally rich "table" that
+        // swallows every item on the page (text_dense__underline: a 4x8
+        // grid claiming 52/52 items, one "cell" holding 806 chars of body
+        // text) — suppressing there erased every legitimate underline on
+        // the page. Real data-table cells are short values; a cell with
+        // hundreds of characters means the grid captured flowing prose.
+        let lens: Vec<usize> = table
+            .cells
+            .iter()
+            .flatten()
+            .filter(|cell| !cell.trim().is_empty())
+            .map(|cell| cell.chars().count())
+            .collect();
+        if lens.is_empty() {
+            return false;
+        }
+        let long = lens.iter().filter(|&&n| n > 100).count();
+        (long as f32) < (lens.len() as f32) * 0.3
+    };
 
     if !rects.is_empty() {
         let (rect_tables, _) = crate::tables::detect_tables_from_rects(items, rects, page);
-        for table in rect_tables {
-            table_item_indices.extend(table.item_indices);
+        for table in rect_tables.iter().filter(|t| plausible(t)) {
+            table_item_indices.extend(table.item_indices.iter().copied());
         }
     }
 
     if !lines.is_empty() {
-        for table in crate::tables::detect_tables_from_lines(items, lines, page) {
-            table_item_indices.extend(table.item_indices);
+        for table in crate::tables::detect_tables_from_lines(items, lines, page)
+            .iter()
+            .filter(|t| plausible(t))
+        {
+            table_item_indices.extend(table.item_indices.iter().copied());
         }
     }
 
