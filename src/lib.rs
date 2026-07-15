@@ -673,18 +673,57 @@ pub fn extract_text_in_regions_mem(
 
         let mut page_results = Vec::with_capacity(regions.len());
 
-        for rect in regions {
+        // Exclusive item->region assignment: overlapping layout regions used
+        // to extract shared items into EVERY region they touched (the
+        // 1.5pt inclusion margin makes borders generous), duplicating whole
+        // lines in the final markdown on 21% of bench docs — and downstream
+        // duplicate-handling sometimes dropped the variant holding a
+        // sentence tail, turning duplication into content LOSS. Each item
+        // now belongs to the single region with the largest overlap area;
+        // items are partitioned, never suppressed, so no content can vanish.
+        let all_bounds: Vec<RegionBounds> = regions
+            .iter()
+            .map(|rect| {
+                let [rx1, ry1, rx2, ry2] = *rect;
+                region_bounds(rx1, ry1, rx2, ry2, page_h, coords)
+            })
+            .collect();
+        let assignment: Vec<Option<usize>> = match items {
+            Some(items) => items
+                .iter()
+                .map(|item| {
+                    let mut best: Option<usize> = None;
+                    let mut best_area = 0.0_f32;
+                    for (ri, b) in all_bounds.iter().enumerate() {
+                        if !region_overlaps_item(item, *b) {
+                            continue;
+                        }
+                        let area = region_item_overlap_area(item, *b);
+                        if area > best_area {
+                            best_area = area;
+                            best = Some(ri);
+                        }
+                    }
+                    best
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+
+        for (region_idx, rect) in regions.iter().enumerate() {
             let [rx1, ry1, rx2, ry2] = *rect;
 
             let bounds = region_bounds(rx1, ry1, rx2, ry2, page_h, coords);
             let matched: Vec<TextItem> = match items {
                 Some(items) => items
                     .iter()
-                    .filter(|item| region_overlaps_item(item, bounds))
-                    .cloned()
+                    .enumerate()
+                    .filter(|(i, _)| assignment.get(*i).copied().flatten() == Some(region_idx))
+                    .map(|(_, item)| item.clone())
                     .collect(),
                 None => Vec::new(),
             };
+            let _ = bounds;
             let has_text_quality_issue = region_items_have_decoding_issue(&matched);
             let text = collect_text_from_matched_items(matched, adaptive_threshold);
             let has_cid_issue = is_cid_garbage(&text);
@@ -3213,6 +3252,21 @@ fn region_bounds(
             y_max: -tx_min,
         },
     }
+}
+
+/// Overlap area between an item and region bounds (same margin as the
+/// boolean test) — the exclusive-assignment score.
+fn region_item_overlap_area(item: &TextItem, bounds: RegionBounds) -> f32 {
+    const REGION_MARGIN: f32 = 1.5;
+    let item_x_max = item.x + text_utils::effective_width(item);
+    let item_y_max = item.y + item.height;
+    let x_overlap = (item_x_max.min(bounds.x_max + REGION_MARGIN)
+        - item.x.max(bounds.x_min - REGION_MARGIN))
+    .max(0.0);
+    let y_overlap = (item_y_max.min(bounds.y_max + REGION_MARGIN)
+        - item.y.max(bounds.y_min - REGION_MARGIN))
+    .max(0.0);
+    x_overlap * y_overlap
 }
 
 fn region_overlaps_item(item: &TextItem, bounds: RegionBounds) -> bool {
