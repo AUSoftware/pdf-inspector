@@ -717,6 +717,7 @@ pub fn extract_text_in_regions_mem(
 
         for (region_idx, _rect) in regions.iter().enumerate() {
             let matched: Vec<TextItem> = std::mem::take(&mut region_items[region_idx]);
+            let assigned_count = matched.len();
             let has_text_quality_issue = region_items_have_decoding_issue(&matched);
             let text = collect_text_from_matched_items(matched, adaptive_threshold);
             let has_cid_issue = is_cid_garbage(&text);
@@ -736,8 +737,13 @@ pub fn extract_text_in_regions_mem(
             // would reintroduce the duplication exclusivity removed.
             // Before exclusive assignment these regions were non-empty
             // native (no OCR), so this preserves the old OCR load too.
-            let lost_to_neighbor =
-                text.trim().is_empty() && ocr_reason.is_none() && had_candidates[region_idx];
+            // Requires ZERO items assigned HERE: a region whose own
+            // assigned items materialize to empty text (whitespace-only,
+            // collector-filtered) keeps its OCR fallback.
+            let lost_to_neighbor = text.trim().is_empty()
+                && ocr_reason.is_none()
+                && assigned_count == 0
+                && had_candidates[region_idx];
             let needs_ocr = !lost_to_neighbor
                 && (ocr_reason.is_some() || text.trim().is_empty() || is_garbage_text(&text));
 
