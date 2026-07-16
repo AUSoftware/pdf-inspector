@@ -1,14 +1,18 @@
 import io
+import json
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bench_opendataloader import (
     _arguments,
     _print_report,
+    _run_engine,
     compare_evaluations,
     evaluate_gates,
 )
@@ -140,6 +144,59 @@ class ComparisonTests(unittest.TestCase):
             with self.subTest(option=option), redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     _arguments(required + [option, "-1"])
+
+    def test_arguments_reject_nonfinite_float_thresholds(self):
+        required = [
+            "--bench-dir",
+            ".",
+            "--baseline",
+            "baseline",
+            "--candidate",
+            "candidate",
+        ]
+        for option in ("--min-overall-delta", "--max-document-regression"):
+            for value in ("nan", "inf", "-inf"):
+                with self.subTest(option=option, value=value), redirect_stderr(
+                    io.StringIO()
+                ):
+                    with self.assertRaises(SystemExit):
+                        _arguments(required + [option, value])
+
+    def test_run_engine_clears_stale_predictions_before_parser(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bench_dir = root / "bench"
+            source = bench_dir / "prediction" / "pdf-inspector"
+            source.mkdir(parents=True)
+            (source / "stale.md").write_text("stale", encoding="utf-8")
+            scratch = root / "scratch"
+            scratch.mkdir()
+
+            def fake_run(command, *, cwd, env=None):
+                if any(part.endswith("pdf_parser.py") for part in command):
+                    self.assertFalse(source.exists())
+                    (source / "markdown").mkdir(parents=True)
+                    (source / "markdown" / "new.md").write_text(
+                        "new", encoding="utf-8"
+                    )
+                else:
+                    destination = scratch / "candidate"
+                    (destination / "evaluation.json").write_text(
+                        json.dumps(evaluation(0.82, {})), encoding="utf-8"
+                    )
+
+            with patch("bench_opendataloader._run", side_effect=fake_run):
+                result = _run_engine(
+                    bench_dir=bench_dir,
+                    python=Path("python"),
+                    binary=Path("pdf2md"),
+                    label="candidate",
+                    scratch_root=scratch,
+                )
+
+            self.assertEqual(result["metrics"]["score"]["overall_mean"], 0.82)
+            self.assertFalse((source / "stale.md").exists())
+            self.assertFalse((scratch / "candidate" / "stale.md").exists())
 
 
 if __name__ == "__main__":

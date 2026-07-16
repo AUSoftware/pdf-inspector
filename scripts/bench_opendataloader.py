@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -34,8 +35,15 @@ def _non_negative_int(value: str) -> int:
 
 def _non_negative_float(value: str) -> float:
     parsed = float(value)
-    if parsed < 0.0:
-        raise argparse.ArgumentTypeError("must be non-negative")
+    if not math.isfinite(parsed) or parsed < 0.0:
+        raise argparse.ArgumentTypeError("must be finite and non-negative")
+    return parsed
+
+
+def _finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise argparse.ArgumentTypeError("must be finite")
     return parsed
 
 
@@ -174,6 +182,12 @@ def _run_engine(
 ) -> dict[str, Any]:
     env = os.environ.copy()
     env["PDF_INSPECTOR_BINARY"] = str(binary)
+    source = bench_dir / "prediction" / "pdf-inspector"
+    if source.exists():
+        if source.is_dir():
+            shutil.rmtree(source)
+        else:
+            source.unlink()
     _run(
         [
             str(python),
@@ -187,7 +201,8 @@ def _run_engine(
         env=env,
     )
 
-    source = bench_dir / "prediction" / "pdf-inspector"
+    if not source.is_dir():
+        raise RuntimeError(f"parser did not produce predictions: {source}")
     destination = scratch_root / label
     shutil.copytree(source, destination)
     _run(
@@ -255,7 +270,7 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--reference-evaluation", type=Path)
     parser.add_argument("--json-output", type=Path)
     parser.add_argument("--top", type=_non_negative_int, default=10)
-    parser.add_argument("--min-overall-delta", type=float, default=0.0)
+    parser.add_argument("--min-overall-delta", type=_finite_float, default=0.0)
     parser.add_argument("--max-document-regression", type=_non_negative_float)
     parser.add_argument("--max-missing", type=_non_negative_int, default=0)
     parser.add_argument("--require-reference-lead", action="store_true")
