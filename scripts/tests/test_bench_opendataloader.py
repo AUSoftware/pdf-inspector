@@ -1,10 +1,12 @@
+import io
 import sys
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bench_opendataloader import compare_evaluations, evaluate_gates
+from bench_opendataloader import _print_report, compare_evaluations, evaluate_gates
 
 
 def evaluation(overall, documents, *, missing=0):
@@ -71,6 +73,37 @@ class ComparisonTests(unittest.TestCase):
         )
 
         self.assertEqual(len(failures), 4)
+
+    def test_regression_gate_is_independent_of_report_limit(self):
+        comparison = compare_evaluations(
+            evaluation(0.80, {"a": 0.8}),
+            evaluation(0.80, {"a": 0.7}),
+            top=0,
+        )
+
+        failures = evaluate_gates(
+            comparison,
+            min_overall_delta=0.0,
+            max_document_regression=0.05,
+            max_missing=0,
+            require_reference_lead=False,
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("largest document regression", failures[0])
+
+    def test_report_handles_reference_without_overall_score(self):
+        result = compare_evaluations(
+            evaluation(0.80, {}),
+            evaluation(0.82, {}),
+            {"metrics": {"score": {"nid_mean": 0.81}}},
+        )
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            _print_report(result)
+
+        self.assertIn("Reference overall: n/a; candidate delta: n/a", output.getvalue())
 
 
 if __name__ == "__main__":

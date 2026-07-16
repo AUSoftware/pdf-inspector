@@ -90,6 +90,9 @@ def compare_evaluations(
             "largest_regressions": [
                 item for item in regressions if item["delta"] < -epsilon
             ][:top],
+            "worst_regression": next(
+                (item for item in regressions if item["delta"] < -epsilon), None
+            ),
         },
     }
     if reference is not None:
@@ -124,11 +127,11 @@ def evaluate_gates(
             f"candidate has {candidate_missing} missing predictions (maximum {max_missing})"
         )
     if max_document_regression is not None:
-        regressions = comparison["documents"]["largest_regressions"]
-        if regressions and regressions[0]["delta"] < -max_document_regression:
+        regression = comparison["documents"].get("worst_regression")
+        if regression is not None and regression["delta"] < -max_document_regression:
             failures.append(
                 "largest document regression "
-                f"{regressions[0]['document_id']}={regressions[0]['delta']:+.6f} "
+                f"{regression['document_id']}={regression['delta']:+.6f} "
                 f"exceeds {-max_document_regression:+.6f}"
             )
     if require_reference_lead:
@@ -201,10 +204,10 @@ def _print_report(comparison: dict[str, Any]) -> None:
         )
     if "reference" in comparison:
         delta = comparison["candidate_vs_reference"].get("overall_mean")
-        print(
-            f"\nReference overall: {comparison['reference'].get('overall_mean', float('nan')):.6f}; "
-            f"candidate delta: {delta:+.6f}"
-        )
+        reference = comparison["reference"].get("overall_mean")
+        reference_display = f"{reference:.6f}" if reference is not None else "n/a"
+        delta_display = f"{delta:+.6f}" if delta is not None else "n/a"
+        print(f"\nReference overall: {reference_display}; candidate delta: {delta_display}")
 
     documents = comparison["documents"]
     print(
