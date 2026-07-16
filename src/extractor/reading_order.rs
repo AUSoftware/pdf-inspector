@@ -7,7 +7,7 @@
 //! deliberately evidence-gated; ordinary pages keep the established layout
 //! path.
 
-use crate::text_utils::effective_width;
+use crate::text_utils::{effective_width, is_rtl_text};
 use crate::types::TextItem;
 
 const MIN_IMAGE_WIDTH: f32 = 60.0;
@@ -217,10 +217,9 @@ fn local_flow_below_full_width_image(
     if !(60.0..=120.0).contains(&image_gap) {
         return None;
     }
-    let y_bottom = items
+    let y_bottom = dominant
         .iter()
-        .filter(|item| item.y <= y_top)
-        .map(|item| item.y)
+        .map(|entry| entry.1)
         .fold(f32::INFINITY, f32::min)
         - 3.0;
     if y_top - y_bottom > 130.0 {
@@ -290,12 +289,21 @@ fn paired_column_images(
         .map(|region| region.1.max(region.3))
         .fold(f32::NEG_INFINITY, f32::max)
         + 3.0;
+    // Only column-confined text proves the lower extent of the flow. A
+    // spanning heading or caption below the columns must become the trailing
+    // full-width node rather than stretching the column band to the page foot.
     let y_bottom = items
         .iter()
-        .filter(|item| item.y <= y_top)
+        .filter(|item| {
+            let item_right = item.x + effective_width(item);
+            item.y <= y_top && (item_right <= split_x || item.x >= split_x)
+        })
         .map(|item| item.y)
         .fold(f32::INFINITY, f32::min)
         - 3.0;
+    if !y_bottom.is_finite() {
+        return None;
+    }
     let distinct_rows = |right: bool| {
         let mut ys: Vec<f32> = items
             .iter()
@@ -365,15 +373,20 @@ pub(crate) fn build_region_graph(items: Vec<TextItem>, band: ColumnFlowBand) -> 
             right.push(item);
         }
     }
-    [
-        (RegionKind::FullWidth, above),
-        (RegionKind::Column, left),
-        (RegionKind::Column, right),
-        (RegionKind::FullWidth, below),
-    ]
-    .into_iter()
-    .filter_map(|(kind, items)| (!items.is_empty()).then_some(RegionNode { kind, items }))
-    .collect()
+    let rtl = is_rtl_text(left.iter().chain(right.iter()).map(|item| &item.text));
+    let mut ordered = vec![(RegionKind::FullWidth, above)];
+    if rtl {
+        ordered.push((RegionKind::Column, right));
+        ordered.push((RegionKind::Column, left));
+    } else {
+        ordered.push((RegionKind::Column, left));
+        ordered.push((RegionKind::Column, right));
+    }
+    ordered.push((RegionKind::FullWidth, below));
+    ordered
+        .into_iter()
+        .filter_map(|(kind, items)| (!items.is_empty()).then_some(RegionNode { kind, items }))
+        .collect()
 }
 
 #[cfg(test)]
@@ -402,7 +415,10 @@ mod tests {
 
     #[test]
     fn full_width_image_anchors_local_two_column_flow() {
-        let mut items = vec![item("A full width caption", 55.0, 230.0, 430.0)];
+        let mut items = vec![
+            item("A full width caption", 55.0, 230.0, 430.0),
+            item("A trailing full width heading", 55.0, 80.0, 430.0),
+        ];
         for index in 0..5 {
             let y = 170.0 - index as f32 * 14.0;
             items.push(item("left column prose words", 55.0, y, 210.0));
@@ -412,15 +428,20 @@ mod tests {
         let band = infer_image_anchored_flow(&items, &images, None).unwrap();
         assert!((band.split_x - 272.5).abs() < 2.0);
         let graph = build_region_graph(items, band);
-        assert_eq!(graph.len(), 3);
+        assert_eq!(graph.len(), 4);
         assert_eq!(graph[0].kind, RegionKind::FullWidth);
         assert_eq!(graph[1].kind, RegionKind::Column);
         assert_eq!(graph[2].kind, RegionKind::Column);
+        assert_eq!(graph[3].kind, RegionKind::FullWidth);
+        assert_eq!(graph[3].items[0].text, "A trailing full width heading");
     }
 
     #[test]
     fn paired_images_anchor_unbalanced_column_flows() {
-        let mut items = vec![item("running header", 55.0, 700.0, 430.0)];
+        let mut items = vec![
+            item("running header", 55.0, 700.0, 430.0),
+            item("trailing full width caption", 55.0, 300.0, 430.0),
+        ];
         for index in 0..5 {
             items.push(item(
                 "left prose words",
@@ -453,6 +474,29 @@ mod tests {
         assert_eq!(graph[0].kind, RegionKind::FullWidth);
         assert_eq!(graph[1].kind, RegionKind::Column);
         assert_eq!(graph[2].kind, RegionKind::Column);
+        assert_eq!(graph[3].kind, RegionKind::FullWidth);
+        assert_eq!(graph[3].items[0].text, "trailing full width caption");
+    }
+
+    #[test]
+    fn rtl_region_graph_reads_right_column_first() {
+        let items = vec![
+            item("A long English report header", 55.0, 250.0, 430.0),
+            item("نص العمود الأيسر", 55.0, 150.0, 180.0),
+            item("نص العمود الأيمن", 300.0, 150.0, 180.0),
+        ];
+        let graph = build_region_graph(
+            items,
+            ColumnFlowBand {
+                split_x: 270.0,
+                y_bottom: 100.0,
+                y_top: 200.0,
+            },
+        );
+
+        assert_eq!(graph.len(), 3);
+        assert_eq!(graph[0].kind, RegionKind::FullWidth);
+        assert!(graph[1].items[0].x > graph[2].items[0].x);
     }
 
     #[test]
