@@ -877,18 +877,13 @@ fn build_dense_row_anchor_table(
 /// Recover grids whose horizontal rules provide the outer x bounds while
 /// vertical strokes draw only the internal column dividers. A header may sit
 /// immediately above the top rule, as is common in presentation tables.
-fn build_open_edge_grid_table(
+fn build_open_edge_grid_table_for_rules(
     items: &[TextItem],
-    horizontals: &[HorizontalRule],
+    logical_rules: &[HorizontalRule],
+    rules: &[HorizontalRule],
     verticals: &[(f32, f32, f32)],
     page: u32,
 ) -> Option<Table> {
-    let logical_rules = merge_horizontal_segments(horizontals);
-    let rules = group_rules_by_span(&logical_rules)
-        .into_iter()
-        .filter(|group| group.len() >= 3)
-        .max_by_key(Vec::len)?;
-
     let x_min = rules
         .iter()
         .map(|rule| rule.1)
@@ -972,8 +967,15 @@ fn build_open_edge_grid_table(
             header_indices.push(*item_index);
         }
     }
+    let mixed_rule_span_in_band = logical_rules.iter().any(|rule| {
+        rule.0 >= y_bottom - RULE_Y_TOLERANCE
+            && rule.0 <= y_top + RULE_Y_TOLERANCE
+            && rule.2 >= x_min - RULE_JOIN_GAP
+            && rule.1 <= x_max + RULE_JOIN_GAP
+            && !rules.contains(rule)
+    });
     if header_cells[1..].iter().any(String::is_empty)
-        || (!header_cells[0].is_empty() && rules.len() != logical_rules.len())
+        || (!header_cells[0].is_empty() && mixed_rule_span_in_band)
     {
         // The first column may be either an unlabeled row-header stub or a
         // normal labeled column. A fully populated header is less distinctive,
@@ -994,6 +996,23 @@ fn build_open_edge_grid_table(
     rows.push(header_y);
     rows.extend_from_slice(&row_edges[..row_edges.len() - 1]);
     Some(Table::new(col_edges, rows, cells, item_indices))
+}
+
+fn build_open_edge_grid_tables(
+    items: &[TextItem],
+    horizontals: &[HorizontalRule],
+    verticals: &[(f32, f32, f32)],
+    page: u32,
+) -> Vec<Table> {
+    let logical_rules = merge_horizontal_segments(horizontals);
+    group_rules_by_span(&logical_rules)
+        .into_iter()
+        .flat_map(|span_group| split_independent_rule_runs(&span_group, items, page))
+        .filter(|rules| rules.len() >= 3)
+        .filter_map(|rules| {
+            build_open_edge_grid_table_for_rules(items, &logical_rules, &rules, verticals, page)
+        })
+        .collect()
 }
 
 fn table_evidence_score(table: &Table) -> usize {
@@ -1073,39 +1092,30 @@ fn overlaps_multiple_tables(candidate: &Table, tables: &[Table]) -> bool {
 }
 
 fn select_table_hypothesis(legacy: Vec<Table>, alternatives: Vec<Table>, page: u32) -> Vec<Table> {
-    let Some(alternative) = alternatives.into_iter().max_by_key(table_evidence_score) else {
+    if alternatives.is_empty() {
         return legacy;
-    };
-    let Some(legacy_table) = legacy.first() else {
+    }
+    if legacy.is_empty() {
+        let selected = select_non_overlapping_hypotheses(alternatives);
         log::debug!(
-            "detect_lines p{}: accepted alternative {}x{} (no legacy candidate)",
+            "detect_lines p{}: accepted {} alternative table(s) (no legacy candidate)",
             page,
-            alternative.cells.len(),
-            alternative.cells.first().map_or(0, Vec::len)
+            selected.len()
         );
-        return vec![alternative];
-    };
-    if legacy.len() > 1 {
-        return legacy;
+        return selected;
     }
 
-    let legacy_score = table_evidence_score(legacy_table);
-    let alternative_score = table_evidence_score(&alternative);
-    if alternative_score > legacy_score {
-        log::debug!(
-            "detect_lines p{}: alternative {}x{} beat legacy {}x{} ({} > {})",
-            page,
-            alternative.cells.len(),
-            alternative.cells.first().map_or(0, Vec::len),
-            legacy_table.cells.len(),
-            legacy_table.cells.first().map_or(0, Vec::len),
-            alternative_score,
-            legacy_score
-        );
-        vec![alternative]
-    } else {
-        legacy
-    }
+    let legacy_count = legacy.len();
+    let mut candidates = legacy;
+    candidates.extend(alternatives);
+    let selected = select_non_overlapping_hypotheses(candidates);
+    log::debug!(
+        "detect_lines p{}: selected {} table(s) from {} legacy and alternative hypotheses",
+        page,
+        selected.len(),
+        legacy_count
+    );
+    selected
 }
 
 /// Derive column edges from the x-endpoints of horizontal-rule
@@ -1242,9 +1252,12 @@ fn detect_tables_from_lines_inner(
         if let Some(table) = build_dense_row_anchor_table(items, &horizontals, &verticals, page) {
             alternatives.push(table);
         }
-        if let Some(table) = build_open_edge_grid_table(items, &horizontals, &verticals, page) {
-            alternatives.push(table);
-        }
+        alternatives.extend(build_open_edge_grid_tables(
+            items,
+            &horizontals,
+            &verticals,
+            page,
+        ));
     }
     // Booktabs and response-form tables commonly draw horizontal rules only.
     // Their rules describe table bands, not row/cell boundaries, so infer
@@ -2557,6 +2570,39 @@ mod tests {
     }
 
     #[test]
+    fn test_multiple_open_edge_bands_on_one_page_are_preserved() {
+        let lines = vec![
+            make_hline(700.0, 30.0, 630.0, 1),
+            make_hline(615.0, 30.0, 630.0, 1),
+            make_hline(510.0, 30.0, 630.0, 1),
+            make_vline(330.0, 508.0, 702.0, 1),
+            make_hline(360.0, 80.0, 780.0, 1),
+            make_hline(275.0, 80.0, 780.0, 1),
+            make_hline(170.0, 80.0, 780.0, 1),
+            make_vline(430.0, 168.0, 362.0, 1),
+        ];
+        let items = vec![
+            make_item("Category", 60.0, 715.0, 1),
+            make_item("Value", 360.0, 715.0, 1),
+            make_item("Pack", 60.0, 660.0, 1),
+            make_item("42", 360.0, 660.0, 1),
+            make_item("Application", 60.0, 560.0, 1),
+            make_item("84", 360.0, 560.0, 1),
+            make_item("Region", 110.0, 375.0, 1),
+            make_item("Count", 460.0, 375.0, 1),
+            make_item("North", 110.0, 320.0, 1),
+            make_item("12", 460.0, 320.0, 1),
+            make_item("South", 110.0, 220.0, 1),
+            make_item("18", 460.0, 220.0, 1),
+        ];
+
+        let tables = detect_tables_from_lines(&items, &lines, 1);
+        assert_eq!(tables.len(), 2);
+        assert_eq!(tables[0].cells[0], vec!["Category", "Value"]);
+        assert_eq!(tables[1].cells[0], vec!["Region", "Count"]);
+    }
+
+    #[test]
     fn test_open_edge_grid_merges_multi_line_headers_by_column() {
         let lines = vec![
             make_hline(360.0, 30.0, 930.0, 1),
@@ -2595,7 +2641,7 @@ mod tests {
             (360.0, 30.0, 930.0),
             (275.0, 30.0, 930.0),
             (170.0, 30.0, 930.0),
-            (120.0, 200.0, 700.0),
+            (250.0, 200.0, 700.0),
         ];
         let verticals = vec![(330.0, 168.0, 362.0), (630.0, 168.0, 362.0)];
         let items = vec![
@@ -2610,7 +2656,7 @@ mod tests {
             make_item("84", 660.0, 220.0, 1),
         ];
 
-        assert!(build_open_edge_grid_table(&items, &horizontals, &verticals, 1).is_none());
+        assert!(build_open_edge_grid_tables(&items, &horizontals, &verticals, 1).is_empty());
     }
 
     #[test]
