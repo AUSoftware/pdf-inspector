@@ -17,11 +17,11 @@ python3 scripts/bench_opendataloader.py \
   --json-output /tmp/pdf-inspector-benchmark.json
 ```
 
-The harness automatically reports the candidate delta against
-`prediction/liteparse/evaluation.json` when that file exists. Add
-`--require-reference-lead` to make trailing LiteParse fail the run. By default,
-the candidate must not regress the baseline overall score or introduce missing
-predictions. Use `--min-overall-delta` to require a specific aggregate gain.
+Pass `--reference-evaluation path/to/evaluation.json` to report the candidate
+delta against another evaluation, and add `--require-reference-lead` to make a
+negative reference delta fail the run. By default, the candidate must not
+regress the baseline overall score or introduce missing predictions. Use
+`--min-overall-delta` to require a specific aggregate gain.
 
 The OpenDataLoader repository is external and keeps its normal
 `prediction/pdf-inspector` output. Paired evaluation copies each run into a

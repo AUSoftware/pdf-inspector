@@ -279,13 +279,9 @@ def main(argv: list[str] | None = None) -> int:
             scratch_root=scratch_root,
         )
 
-        reference_evaluation = args.reference_evaluation
-        if reference_evaluation is None:
-            default_reference = bench_dir / "prediction" / "liteparse" / "evaluation.json"
-            reference_evaluation = default_reference if default_reference.exists() else None
         reference = None
-        if reference_evaluation is not None:
-            with reference_evaluation.resolve().open(encoding="utf-8") as handle:
+        if args.reference_evaluation is not None:
+            with args.reference_evaluation.resolve().open(encoding="utf-8") as handle:
                 reference = json.load(handle)
 
         comparison = compare_evaluations(
