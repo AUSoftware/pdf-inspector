@@ -27,16 +27,19 @@ Evaluated on the [opendataloader-bench](https://github.com/opendataloader-projec
 
 | Engine | Overall | Reading Order (NID) | Tables (TEDS) | Headings (MHS) | Speed (200 docs) |
 |---|---|---|---|---|---|
-| pdf-inspector | 0.83 | 0.89 | 0.66 | 0.74 | 4s |
-| opendataloader | 0.84 | 0.91 | 0.49 | 0.74 | 11s |
+| pdf-inspector | **0.875** | **0.915** | **0.814** | 0.788 | 3.3s |
+| liteparse | 0.870 | 0.908 | 0.693 | **0.811** | 0.9s |
+| opendataloader | 0.831 | 0.902 | 0.489 | 0.739 | 3.0s |
 | pymupdf4llm | 0.73 | 0.89 | 0.40 | 0.41 | 18s |
-| markitdown | 0.58 | 0.88 | 0.00 | 0.00 | 8s |
+| markitdown | 0.59 | 0.84 | 0.27 | 0.00 | 23s |
 
-For context, engines that use OCR/ML (docling, marker, mineru) score 0.83-0.88 overall but take 2-180 minutes on the same corpus — pdf-inspector reaches the low end of that range without any OCR, in 4 seconds.
+For context, engines that use OCR/ML (docling, marker, mineru) score 0.83-0.88 overall but take 2-180 minutes on the same corpus — pdf-inspector reaches the top of that range without any OCR, in 3.3 seconds.
 
-**Where we do well:** Speed (fastest of all engines), the best table detection of any engine shown, and heading detection now on par with opendataloader. Overall lands within 0.01 of opendataloader at roughly 2.5× the speed.
+**Where we do well:** The best overall, reading-order, and table scores among the direct extraction engines shown. In the same evaluator run, pdf-inspector leads LiteParse by 0.0056 overall and 0.1212 on TEDS.
 
-**Where we lag:** Reading order still trails opendataloader slightly, and table structure trails OCR-based engines that can see visual layout.
+**Where we lag:** LiteParse remains faster and leads heading structure by 0.0230. OCR-based engines can still recover text that has no usable PDF text layer.
+
+Use the [paired benchmark harness](docs/benchmarking.md) to compare two local builds against the exact same corpus and evaluator revision.
 
 ## Quick start
 
