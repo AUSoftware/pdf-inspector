@@ -105,6 +105,22 @@ class ComparisonTests(unittest.TestCase):
 
         self.assertIn("Reference overall: n/a; candidate delta: n/a", output.getvalue())
 
+    def test_reference_gate_reports_missing_score_as_unavailable(self):
+        comparison = compare_evaluations(
+            evaluation(0.80, {}),
+            evaluation(0.82, {}),
+        )
+
+        failures = evaluate_gates(
+            comparison,
+            min_overall_delta=0.0,
+            max_document_regression=None,
+            max_missing=0,
+            require_reference_lead=True,
+        )
+
+        self.assertEqual(failures, ["reference overall score is unavailable"])
+
 
 if __name__ == "__main__":
     unittest.main()

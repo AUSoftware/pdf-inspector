@@ -136,7 +136,9 @@ def evaluate_gates(
             )
     if require_reference_lead:
         reference_delta = comparison.get("candidate_vs_reference", {}).get("overall_mean")
-        if reference_delta is None or reference_delta < 0.0:
+        if reference_delta is None:
+            failures.append("reference overall score is unavailable")
+        elif reference_delta < 0.0:
             failures.append(
                 f"candidate trails reference overall by {reference_delta!r}"
             )
