@@ -957,18 +957,20 @@ fn build_open_edge_grid_table(
         (y_top + RULE_Y_TOLERANCE, x_min, x_max),
     ];
     let header_rows = collect_anchored_rows(items, &header_band, page);
-    let (_, header_items) = header_rows.last()?;
+    let header_y = header_rows.first()?.0;
     let mut header_cells = vec![String::new(); column_count];
     let mut header_indices = Vec::new();
-    for (item_index, item) in header_items {
-        let center_x = item.x + item.width / 2.0;
-        let column = (0..column_count)
-            .find(|&index| center_x >= col_edges[index] && center_x <= col_edges[index + 1])?;
-        if !header_cells[column].is_empty() {
-            header_cells[column].push(' ');
+    for (_, header_items) in &header_rows {
+        for (item_index, item) in header_items {
+            let center_x = item.x + item.width / 2.0;
+            let column = (0..column_count)
+                .find(|&index| center_x >= col_edges[index] && center_x <= col_edges[index + 1])?;
+            if !header_cells[column].is_empty() {
+                header_cells[column].push(' ');
+            }
+            header_cells[column].push_str(item.text.trim());
+            header_indices.push(*item_index);
         }
-        header_cells[column].push_str(item.text.trim());
-        header_indices.push(*item_index);
     }
     if header_cells[1..].iter().any(String::is_empty)
         || (!header_cells[0].is_empty() && rules.len() != logical_rules.len())
@@ -989,7 +991,7 @@ fn build_open_edge_grid_table(
     item_indices.dedup();
 
     let mut rows = Vec::with_capacity(row_edges.len());
-    rows.push(header_items[0].1.y);
+    rows.push(header_y);
     rows.extend_from_slice(&row_edges[..row_edges.len() - 1]);
     Some(Table::new(col_edges, rows, cells, item_indices))
 }
@@ -2521,6 +2523,39 @@ mod tests {
         assert_eq!(tables[0].cells.len(), 3);
         assert_eq!(tables[0].cells[0], vec!["Category", "Metric", "Value"]);
         assert_eq!(tables[0].cells[1], vec!["Pack", "OCR body", "42"]);
+    }
+
+    #[test]
+    fn test_open_edge_grid_merges_multi_line_headers_by_column() {
+        let lines = vec![
+            make_hline(360.0, 30.0, 930.0, 1),
+            make_hline(275.0, 30.0, 930.0, 1),
+            make_hline(170.0, 30.0, 930.0, 1),
+            make_vline(330.0, 168.0, 362.0, 1),
+            make_vline(630.0, 168.0, 362.0, 1),
+        ];
+        let items = vec![
+            make_item("Content", 60.0, 390.0, 1),
+            make_item("Quality", 360.0, 390.0, 1),
+            make_item("Result", 660.0, 390.0, 1),
+            make_item("Category", 60.0, 375.0, 1),
+            make_item("Metric", 360.0, 375.0, 1),
+            make_item("Value", 660.0, 375.0, 1),
+            make_item("Pack", 60.0, 320.0, 1),
+            make_item("OCR body", 360.0, 320.0, 1),
+            make_item("42", 660.0, 320.0, 1),
+            make_item("Application", 60.0, 220.0, 1),
+            make_item("Search", 360.0, 220.0, 1),
+            make_item("84", 660.0, 220.0, 1),
+        ];
+
+        let tables = detect_tables_from_lines(&items, &lines, 1);
+        assert_eq!(tables.len(), 1);
+        assert_eq!(
+            tables[0].cells[0],
+            vec!["Content Category", "Quality Metric", "Result Value"]
+        );
+        assert_eq!(tables[0].item_indices.len(), items.len());
     }
 
     #[test]
