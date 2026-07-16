@@ -923,7 +923,7 @@ fn build_open_edge_grid_table(
         .map(|(x, _, _)| *x)
         .collect();
     let interior_edges = snap_edges(&scoped_vertical_xs, 3.0);
-    if !(2..=24).contains(&interior_edges.len()) {
+    if !(1..=24).contains(&interior_edges.len()) {
         return None;
     }
 
@@ -1268,17 +1268,25 @@ fn detect_tables_from_lines_inner(
                 })
                 .cloned()
                 .collect();
-            // Re-evaluate geometry and dense/open-edge alternatives on the
-            // remaining page, but do not recurse into sparse text anchors.
-            // The accepted anchors already represent every sparse candidate
-            // on this page; running that detector again can split unrelated
-            // document regions as progressively more rule bands are removed.
-            let remaining_tables =
-                detect_tables_from_lines_inner(items, &remaining_lines, page, false, true);
             let anchor_tables: Vec<Table> = text_anchor_tables
                 .into_iter()
                 .map(|candidate| candidate.table)
                 .collect();
+            // Re-evaluate geometry and dense/open-edge alternatives on the
+            // remaining page, but do not recurse into sparse text anchors.
+            // Keep a geometry-only result as a fallback: an inferred header
+            // can otherwise reach into an adjacent accepted anchor band and
+            // replace a valid physical grid with an overlapping hypothesis.
+            let vector_tables =
+                detect_tables_from_lines_inner(items, &remaining_lines, page, false, false);
+            let mut inferred_tables =
+                detect_tables_from_lines_inner(items, &remaining_lines, page, false, true);
+            inferred_tables.retain(|table| {
+                !anchor_tables
+                    .iter()
+                    .any(|anchor| tables_share_items(table, anchor))
+            });
+            let remaining_tables = combine_non_overlapping_tables(inferred_tables, vector_tables);
             alternatives
                 .retain(|alternative| !overlaps_multiple_tables(alternative, &anchor_tables));
             // A page-wide alternative that consumes two already-independent
@@ -2523,6 +2531,29 @@ mod tests {
         assert_eq!(tables[0].cells.len(), 3);
         assert_eq!(tables[0].cells[0], vec!["Category", "Metric", "Value"]);
         assert_eq!(tables[0].cells[1], vec!["Pack", "OCR body", "42"]);
+    }
+
+    #[test]
+    fn test_two_column_open_edge_uses_single_interior_divider() {
+        let lines = vec![
+            make_hline(360.0, 30.0, 630.0, 1),
+            make_hline(275.0, 30.0, 630.0, 1),
+            make_hline(170.0, 30.0, 630.0, 1),
+            make_vline(330.0, 168.0, 362.0, 1),
+        ];
+        let items = vec![
+            make_item("Category", 60.0, 375.0, 1),
+            make_item("Value", 360.0, 375.0, 1),
+            make_item("Pack", 60.0, 320.0, 1),
+            make_item("42", 360.0, 320.0, 1),
+            make_item("Application", 60.0, 220.0, 1),
+            make_item("84", 360.0, 220.0, 1),
+        ];
+
+        let tables = detect_tables_from_lines(&items, &lines, 1);
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].cells[0], vec!["Category", "Value"]);
+        assert_eq!(tables[0].cells[1], vec!["Pack", "42"]);
     }
 
     #[test]
