@@ -58,10 +58,13 @@ def local_pages(payload: dict[str, Any]) -> dict[int, dict[str, Any]]:
     return pages
 
 
-def alternate_pages(payload: dict[str, Any]) -> dict[int, dict[str, Any]]:
+def alternate_pages(
+    payload: dict[str, Any] | list[dict[str, Any]],
+) -> dict[int, dict[str, Any]]:
     """Summarize MuPDF ``stext.json`` evidence by page."""
     pages: dict[int, dict[str, Any]] = {}
-    for index, raw_page in enumerate(payload.get("pages", []), start=1):
+    raw_pages = payload if isinstance(payload, list) else payload.get("pages", [])
+    for index, raw_page in enumerate(raw_pages, start=1):
         page_number = int(raw_page.get("number", index))
         page = {
             "texts": [],
@@ -167,7 +170,7 @@ def compare_page(
 
 def compare_documents(
     local_payload: dict[str, Any],
-    alternate_payload: dict[str, Any],
+    alternate_payload: dict[str, Any] | list[dict[str, Any]],
     *,
     min_token_gain: int = 20,
     min_alternate_only_ratio: float = 0.15,
@@ -209,7 +212,7 @@ def compare_documents(
     }
 
 
-def _json_command(command: list[str]) -> dict[str, Any]:
+def _json_command(command: list[str]) -> Any:
     try:
         completed = subprocess.run(
             command,

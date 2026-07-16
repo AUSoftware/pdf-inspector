@@ -34,6 +34,15 @@ def page(lines, *, images=0):
 
 
 class EvidenceComparisonTests(unittest.TestCase):
+    def test_accepts_real_top_level_page_array(self):
+        local = local_payload([item(1, "alpha beta")])
+        alternate = [page([("alpha beta gamma", 10)])]
+
+        result = compare_documents(local, alternate)["pages"][0]
+
+        self.assertEqual(result["tokens"]["alternate"], 3)
+        self.assertEqual(result["tokens"]["net_alternate_gain"], 1)
+
     def test_flags_material_alternate_text_gain(self):
         local = local_payload([item(1, "alpha beta")])
         alternate = alternate_payload(
