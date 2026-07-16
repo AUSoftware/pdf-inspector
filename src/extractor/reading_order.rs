@@ -7,7 +7,7 @@
 //! deliberately evidence-gated; ordinary pages keep the established layout
 //! path.
 
-use crate::text_utils::{effective_width, is_rtl_text};
+use crate::text_utils::{effective_width, is_cjk_char, is_rtl_text};
 use crate::types::TextItem;
 
 const MIN_IMAGE_WIDTH: f32 = 60.0;
@@ -96,12 +96,15 @@ fn side_is_prose(items: &[&TextItem]) -> bool {
         .map(|item| item.text.trim())
         .collect::<Vec<_>>()
         .join(" ");
-    text.split_whitespace().count() >= 3
-        && text
-            .chars()
-            .filter(|character| character.is_alphabetic())
-            .count()
-            >= 10
+    let alphabetic_count = text
+        .chars()
+        .filter(|character| character.is_alphabetic())
+        .count();
+    let cjk_count = text
+        .chars()
+        .filter(|character| is_cjk_char(*character))
+        .count();
+    (text.split_whitespace().count() >= 3 || cjk_count >= 10) && alphabetic_count >= 10
 }
 
 fn aligned_row_split(row: &Row<'_>, x_min: f32, x_max: f32) -> Option<f32> {
@@ -268,11 +271,12 @@ fn paired_column_images(
                 && (y1 - y0).abs() >= MIN_IMAGE_HEIGHT
         })
         .collect();
-    let wide_images = qualifying
+    let wide_images: Vec<ImageRegion> = qualifying
         .iter()
-        .filter(|&&(x0, _, x1, _)| (x1 - x0).abs() >= page_width * 0.35)
-        .count();
-    if qualifying.len() < 3 || wide_images < 3 {
+        .copied()
+        .filter(|(x0, _, x1, _)| (x1 - x0).abs() >= page_width * 0.35)
+        .collect();
+    if qualifying.len() < 3 || wide_images.len() < 3 {
         return None;
     }
     let has_left = qualifying
@@ -282,6 +286,40 @@ fn paired_column_images(
         .iter()
         .any(|&(x0, _, x1, _)| (x0 + x1) / 2.0 >= split_x);
     if !has_left || !has_right {
+        return None;
+    }
+    // A meaningful image-backed column flow spans multiple vertical panels.
+    // Three same-row header/logo images can otherwise satisfy the image count
+    // and send an ordinary asymmetric page through sequential column order.
+    let image_y_min = wide_images
+        .iter()
+        .map(|region| region.1.min(region.3))
+        .fold(f32::INFINITY, f32::min);
+    let image_y_max = wide_images
+        .iter()
+        .map(|region| region.1.max(region.3))
+        .fold(f32::NEG_INFINITY, f32::max);
+    let has_vertical_stack = wide_images.iter().enumerate().any(|(index, left)| {
+        wide_images.iter().skip(index + 1).any(|right| {
+            let same_side =
+                ((left.0 + left.2) / 2.0 < split_x) == ((right.0 + right.2) / 2.0 < split_x);
+            let left_center = (left.1 + left.3) / 2.0;
+            let right_center = (right.1 + right.3) / 2.0;
+            let left_height = (left.3 - left.1).abs();
+            let right_height = (right.3 - right.1).abs();
+            let vertical_gap = if left.1.max(left.3) < right.1.min(right.3) {
+                right.1.min(right.3) - left.1.max(left.3)
+            } else if right.1.max(right.3) < left.1.min(left.3) {
+                left.1.min(left.3) - right.1.max(right.3)
+            } else {
+                0.0
+            };
+            same_side
+                && (left_center - right_center).abs() >= left_height.min(right_height) * 0.5
+                && vertical_gap <= left_height.max(right_height) * 0.5
+        })
+    });
+    if image_y_max - image_y_min < page_width * 0.45 || !has_vertical_stack {
         return None;
     }
     let y_top = qualifying
@@ -437,6 +475,19 @@ mod tests {
     }
 
     #[test]
+    fn full_width_image_anchors_cjk_column_flow() {
+        let mut items = Vec::new();
+        for index in 0..5 {
+            let y = 170.0 - index as f32 * 14.0;
+            items.push(item("左栏这是没有空格的正文内容", 55.0, y, 210.0));
+            items.push(item("右栏这是没有空格的正文内容", 280.0, y, 210.0));
+        }
+        let images = vec![(55.0, 250.0, 490.0, 680.0)];
+
+        assert!(infer_image_anchored_flow(&items, &images, None).is_some());
+    }
+
+    #[test]
     fn paired_images_anchor_unbalanced_column_flows() {
         let mut items = vec![
             item("running header", 55.0, 700.0, 430.0),
@@ -518,7 +569,11 @@ mod tests {
                 200.0,
             ));
         }
-        let images = vec![(55.0, 720.0, 205.0, 770.0), (280.0, 720.0, 450.0, 770.0)];
+        let images = vec![
+            (55.0, 720.0, 205.0, 770.0),
+            (60.0, 718.0, 210.0, 768.0),
+            (280.0, 720.0, 450.0, 770.0),
+        ];
         assert!(infer_image_anchored_flow(&items, &images, Some(270.0)).is_none());
     }
 
