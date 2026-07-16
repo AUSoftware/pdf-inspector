@@ -1,12 +1,17 @@
 import io
 import sys
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bench_opendataloader import _print_report, compare_evaluations, evaluate_gates
+from bench_opendataloader import (
+    _arguments,
+    _print_report,
+    compare_evaluations,
+    evaluate_gates,
+)
 
 
 def evaluation(overall, documents, *, missing=0):
@@ -120,6 +125,21 @@ class ComparisonTests(unittest.TestCase):
         )
 
         self.assertEqual(failures, ["reference overall score is unavailable"])
+
+    def test_arguments_reject_negative_counts_and_allow_zero_top(self):
+        required = [
+            "--bench-dir",
+            ".",
+            "--baseline",
+            "baseline",
+            "--candidate",
+            "candidate",
+        ]
+        self.assertEqual(_arguments(required + ["--top", "0"]).top, 0)
+        for option in ("--top", "--max-document-regression", "--max-missing"):
+            with self.subTest(option=option), redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    _arguments(required + [option, "-1"])
 
 
 if __name__ == "__main__":

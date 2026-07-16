@@ -25,6 +25,20 @@ SCORE_KEYS = (
 )
 
 
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return parsed
+
+
+def _non_negative_float(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0.0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return parsed
+
+
 def _scores(evaluation: dict[str, Any]) -> dict[str, float]:
     score = evaluation.get("metrics", {}).get("score", {})
     return {key: float(score[key]) for key in SCORE_KEYS if score.get(key) is not None}
@@ -240,10 +254,10 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--python", type=Path)
     parser.add_argument("--reference-evaluation", type=Path)
     parser.add_argument("--json-output", type=Path)
-    parser.add_argument("--top", type=int, default=10)
+    parser.add_argument("--top", type=_non_negative_int, default=10)
     parser.add_argument("--min-overall-delta", type=float, default=0.0)
-    parser.add_argument("--max-document-regression", type=float)
-    parser.add_argument("--max-missing", type=int, default=0)
+    parser.add_argument("--max-document-regression", type=_non_negative_float)
+    parser.add_argument("--max-missing", type=_non_negative_int, default=0)
     parser.add_argument("--require-reference-lead", action="store_true")
     return parser.parse_args(argv)
 
