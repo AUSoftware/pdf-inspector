@@ -404,9 +404,6 @@
   }
   .demo-file button:hover,
   .demo-file button:focus-visible { color: var(--heat-dark); }
-  .demo-actions { margin-top: 14px; display: flex; align-items: center; gap: 12px; }
-  .demo-actions .button { border: 0; cursor: pointer; }
-  .demo-actions .button[disabled] { opacity: .42; cursor: not-allowed; transform: none; }
   .demo-message { margin: 13px 2px 0; min-height: 19px; color: var(--ink-48); font: 11px/1.55 var(--mono); }
   .demo-message[data-tone="error"] { color: #a63520; }
   .demo-message[data-tone="success"] { color: #34725a; }
@@ -745,9 +742,6 @@
                 <span id="demo-file-size"></span>
                 <button id="demo-clear" type="button">Remove</button>
               </div>
-              <div class="demo-actions">
-                <button class="button button-primary" id="demo-run" type="button" disabled>Parse locally <span class="arrow" aria-hidden="true">→</span></button>
-              </div>
               <p class="demo-message" id="demo-message" role="status" aria-live="polite">Select a PDF to begin.</p>
             </div>
             <div class="demo-output" aria-label="PDF parsing result">
@@ -988,7 +982,6 @@ result = pdf_inspector.<span class="fn">process_pdf</span>(<span class="str">"do
     const fileName = document.querySelector("#demo-file-name");
     const fileSize = document.querySelector("#demo-file-size");
     const clearButton = document.querySelector("#demo-clear");
-    const runButton = document.querySelector("#demo-run");
     const copyButton = document.querySelector("#demo-copy");
     const message = document.querySelector("#demo-message");
     const engineStatus = document.querySelector("#demo-engine-status");
@@ -1021,10 +1014,8 @@ result = pdf_inspector.<span class="fn">process_pdf</span>(<span class="str">"do
 
     const setBusy = (isBusy) => {
       busy = isBusy;
-      runButton.disabled = isBusy || !selectedFile;
       clearButton.disabled = isBusy;
       input.disabled = isBusy;
-      runButton.firstChild.textContent = isBusy ? "Parsing locally " : "Parse locally ";
     };
 
     const clearResult = () => {
@@ -1041,7 +1032,6 @@ result = pdf_inspector.<span class="fn">process_pdf</span>(<span class="str">"do
       selectedFile = null;
       input.value = "";
       filePanel.hidden = true;
-      runButton.disabled = true;
       clearResult();
       setMessage("Select a PDF to begin.");
     };
@@ -1063,9 +1053,8 @@ result = pdf_inspector.<span class="fn">process_pdf</span>(<span class="str">"do
       fileName.textContent = file.name;
       fileSize.textContent = formatBytes(file.size);
       filePanel.hidden = false;
-      runButton.disabled = false;
       clearResult();
-      setMessage("Ready to parse locally.");
+      parseSelectedFile();
     };
 
     const processInWorker = (buffer) => new Promise((resolve, reject) => {
@@ -1143,11 +1132,15 @@ result = pdf_inspector.<span class="fn">process_pdf</span>(<span class="str">"do
     };
 
     dropZone.addEventListener("click", () => {
-      if (!busy) input.click();
+      if (!busy) {
+        input.value = "";
+        input.click();
+      }
     });
     dropZone.addEventListener("keydown", (event) => {
       if ((event.key === "Enter" || event.key === " ") && !busy) {
         event.preventDefault();
+        input.value = "";
         input.click();
       }
     });
@@ -1163,7 +1156,6 @@ result = pdf_inspector.<span class="fn">process_pdf</span>(<span class="str">"do
     });
     input.addEventListener("change", () => selectFile(input.files[0]));
     clearButton.addEventListener("click", clearFile);
-    runButton.addEventListener("click", parseSelectedFile);
     copyButton.addEventListener("click", async () => {
       if (!currentMarkdown) return;
       try {
