@@ -147,8 +147,7 @@
   tbody tr.us td:first-child::before { content: "▸ "; color: var(--accent); }
   .bench-foot { padding: 15px 18px; font-size: 13.5px; color: var(--ink-soft); background: var(--paper-2); border-top: 1px solid var(--line); }
   .bench-wrap { overflow-x: auto; }
-  .callouts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 22px; }
-  @media (max-width: 640px) { .callouts { grid-template-columns: 1fr; } }
+  .callouts { display: grid; grid-template-columns: 1fr; gap: 16px; margin-top: 22px; }
   .callout { border-left: 3px solid var(--accent); padding: 4px 0 4px 16px; }
   .callout .ct { font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent-deep); margin-bottom: 5px; }
   .callout p { font-size: 14.5px; color: var(--ink-soft); }
@@ -321,8 +320,7 @@
       <div class="bench-foot">Refreshed July 16, 2026, on Apple M4 Pro. Speed is the median of three complete corpus runs.</div>
     </div>
     <div class="callouts">
-      <div class="callout"><div class="ct">Best fit</div><p>Native-text PDFs where speed, reading order, and table structure matter. pdf-inspector delivered the highest overall score and fastest complete run in this benchmark.</p></div>
-      <div class="callout"><div class="ct">Route elsewhere</div><p>Scanned or image-only documents still need OCR. Heading hierarchy remains the main opportunity for native extraction.</p></div>
+      <div class="callout"><div class="ct">Best fit</div><p>Native-text PDFs where speed, reading order, and table structure matter. pdf-inspector delivered the highest overall, reading-order, and table scores, along with the fastest complete run in this benchmark. That makes it a strong local default for reports, research papers, financial documents, invoices, and legal PDFs that need clean, structured Markdown without adding OCR latency or infrastructure.</p></div>
     </div>
   </div>
 </section>
