@@ -37,9 +37,9 @@ Results were refreshed on July 16, 2026, on an Apple M4 Pro. Engine versions wer
 
 For context, engines that use OCR or model-based document parsing (docling, marker, mineru) score 0.83-0.88 overall but take 2-180 minutes on the same corpus — pdf-inspector reaches the top of that range without either, in 2.8 seconds.
 
-**Where we do well:** The best overall, reading-order, and table scores, plus the fastest complete corpus run among the engines shown.
+**Best fit:** Native-text PDFs where speed, reading order, and table structure matter. pdf-inspector delivered the highest overall score and fastest complete run in this benchmark.
 
-**Where we lag:** Heading hierarchy remains the clearest gap; LiteParse leads the MHS score. OCR-based engines can also recover text that has no usable PDF text layer.
+**Route elsewhere:** Scanned or image-only documents still need OCR. Heading hierarchy remains the main opportunity for native extraction.
 
 Use the [paired benchmark harness](docs/benchmarking.md) to compare two local builds against the exact same corpus and evaluator revision.
 
