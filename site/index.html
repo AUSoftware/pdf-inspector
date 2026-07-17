@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>pdf-inspector — fast, open-source PDF to Markdown</title>
-<meta name="description" content="An open-source Rust library for fast PDF classification and structured Markdown extraction, with bindings for Rust, Python, Node.js, and the command line.">
+<meta name="description" content="A fast, open-source Node.js package and CLI for PDF classification and structured Markdown extraction, powered by a native Rust core.">
 <meta name="theme-color" content="#f9f9f9">
 <meta property="og:title" content="pdf-inspector">
-<meta property="og:description" content="Fast, open-source PDF classification and structured Markdown extraction. Built in Rust by Firecrawl.">
+<meta property="og:description" content="A fast Node.js package and bundled CLI for PDF classification and structured Markdown extraction, powered by Rust.">
 <meta property="og:type" content="website">
 <link rel="icon" href="assets/firecrawl-mark.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -192,6 +192,8 @@
   .button-primary { color: #fff; background: var(--heat); border-color: var(--heat); }
   .button-primary:hover, .button-primary:focus-visible { background: var(--heat-dark); border-color: var(--heat-dark); }
   .button code { font: inherit; }
+  .source-link { padding: 0 5px; color: var(--ink-48); font-size: 14px; text-decoration: underline; text-decoration-color: var(--ink-16); text-underline-offset: 4px; }
+  .source-link:hover, .source-link:focus-visible { color: var(--heat-dark); text-decoration-color: var(--heat); }
   .arrow { font-family: var(--mono); color: currentColor; }
 
   .terminal {
@@ -258,6 +260,8 @@
   .package-top { display: flex; justify-content: space-between; color: var(--ink-32); font: 10px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; }
   .package code { display: block; margin-top: 12px; overflow: hidden; text-overflow: ellipsis; color: var(--ink-88); font: 13px/1.4 var(--mono); white-space: nowrap; }
   .package:hover .package-top, .package:focus-visible .package-top { color: var(--heat); }
+  .package-featured { background: var(--heat-4); box-shadow: inset 0 2px var(--heat); }
+  .package-featured .package-top { color: var(--heat-dark); }
 
   section { scroll-margin-top: 68px; }
   .section-label {
@@ -376,22 +380,6 @@
   #node:checked ~ .usage-grid #panel-node,
   #cli:checked ~ .usage-grid #panel-cli { display: block; }
 
-  .contribute-grid { display: grid; grid-template-columns: 1.1fr .9fr; border: 1px solid var(--border); background: var(--surface); }
-  .repo-map { padding: 30px; border-right: 1px solid var(--border); }
-  .repo-title { display: flex; justify-content: space-between; margin-bottom: 24px; color: var(--ink-32); font: 11px/1 var(--mono); }
-  .repo-files { border-top: 1px solid var(--border); }
-  .repo-file { min-height: 54px; padding: 0 4px; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: 160px 1fr; align-items: center; gap: 20px; }
-  .repo-file code { color: var(--heat-dark); font: 12px var(--mono); }
-  .repo-file span { color: var(--ink-48); font-size: 13px; }
-  .contribute-links { display: grid; grid-template-columns: 1fr 1fr; }
-  .contribute-link { min-height: 158px; padding: 23px; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); display: flex; flex-direction: column; justify-content: space-between; }
-  .contribute-link:nth-child(2n) { border-right: 0; }
-  .contribute-link:nth-last-child(-n+2) { border-bottom: 0; }
-  .contribute-link span { color: var(--ink-32); font: 10px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase; }
-  .contribute-link strong { font-size: 16px; font-weight: 500; }
-  .contribute-link:hover { background: var(--heat-4); }
-  .contribute-link:hover strong { color: var(--heat-dark); }
-
   .footer-main { min-height: 168px; padding-top: 36px; padding-bottom: 36px; display: flex; justify-content: space-between; align-items: flex-end; gap: 28px; }
   .footer-brand { display: flex; align-items: center; gap: 10px; color: var(--ink-48); font-size: 13px; }
   .footer-brand img { width: 102px; height: auto; }
@@ -413,8 +401,6 @@
     .pipe-arrow { width: 1px; height: 24px; justify-self: center; }
     .pipe-arrow::after { right: auto; bottom: -7px; top: auto; transform: rotate(90deg); }
     .pipe-node { min-height: 130px; }
-    .contribute-grid { grid-template-columns: 1fr; }
-    .repo-map { border-right: 0; border-bottom: 1px solid var(--border); }
   }
 
   @media (max-width: 680px) {
@@ -442,10 +428,6 @@
     #node:checked ~ .usage-grid .tab-list label[for=node],
     #cli:checked ~ .usage-grid .tab-list label[for=cli] { box-shadow: inset 0 -2px var(--heat); }
     .code-panel { padding: 22px 20px; min-height: 330px; }
-    .repo-file { grid-template-columns: 1fr; gap: 4px; padding: 13px 4px; }
-    .contribute-links { grid-template-columns: 1fr; }
-    .contribute-link, .contribute-link:nth-child(2n), .contribute-link:nth-last-child(-n+2) { min-height: 112px; border-right: 0; border-bottom: 1px solid var(--border); }
-    .contribute-link:last-child { border-bottom: 0; }
     .footer-main { align-items: flex-start; flex-direction: column; }
   }
 
@@ -480,22 +462,24 @@
       <div>
         <div class="oss-label"><i aria-hidden="true"></i>Firecrawl open source · MIT</div>
         <h1>PDF structure,<br><em>built for speed.</em></h1>
-        <p class="hero-copy">A Rust library that classifies PDFs and turns native text into clean, position-aware Markdown. Run it locally from Rust, Python, Node.js, or the command line.</p>
+        <p class="hero-copy">A native Node.js package and bundled CLI that classify PDFs and turn native text into clean, position-aware Markdown. Install once from npm, then use it in code or from your shell.</p>
         <div class="hero-actions">
-          <a class="button button-primary" href="https://github.com/firecrawl/pdf-inspector">View source <span class="arrow" aria-hidden="true">↗</span></a>
-          <a class="button" href="https://github.com/firecrawl/pdf-inspector#quick-start">Read the docs <span class="arrow" aria-hidden="true">→</span></a>
+          <a class="button button-primary" href="https://www.npmjs.com/package/@firecrawl/pdf-inspector">npm package <span class="arrow" aria-hidden="true">↗</span></a>
+          <a class="button" href="https://pypi.org/project/pdf-inspector/">PyPI <span class="arrow" aria-hidden="true">↗</span></a>
+          <a class="button" href="https://crates.io/crates/pdf-inspector">crates.io <span class="arrow" aria-hidden="true">↗</span></a>
+          <a class="source-link" href="https://github.com/firecrawl/pdf-inspector">View source</a>
         </div>
       </div>
 
       <div class="terminal" aria-label="pdf-inspector command line example">
         <div class="terminal-head">
           <div class="term-dots" aria-hidden="true"><i></i><i></i><i></i></div>
-          <span>pdf2md · local</span>
+          <span>npm CLI · local</span>
         </div>
-        <pre><span class="prompt">$</span> cargo install pdf-inspector
-<span class="term-muted">   Installed package `pdf-inspector`</span>
+        <pre><span class="prompt">$</span> npm install -g @firecrawl/pdf-inspector
+<span class="term-muted">   installed the native package + CLI</span>
 
-<span class="prompt">$</span> pdf2md annual-report.pdf
+<span class="prompt">$</span> pdf-inspector annual-report.pdf
 <span class="term-key"># Annual report 2025</span>
 
 ## Financial highlights
@@ -509,31 +493,31 @@
     </div>
 
     <div class="project-strip" aria-label="Project details">
-      <div class="project-stat"><span>Core</span><strong>Pure Rust</strong></div>
-      <div class="project-stat"><span>Interfaces</span><strong>Rust · Python · Node · CLI</strong></div>
-      <div class="project-stat"><span>Binaries</span><strong>pdf2md · detect-pdf</strong></div>
+      <div class="project-stat"><span>Primary API</span><strong>Node.js · TypeScript</strong></div>
+      <div class="project-stat"><span>Bundled CLI</span><strong>pdf-inspector</strong></div>
+      <div class="project-stat"><span>Native core</span><strong>Pure Rust</strong></div>
       <div class="project-stat"><span>License</span><strong>MIT</strong></div>
     </div>
 
     <div class="package-row" aria-label="Package installation">
-      <a class="package" href="https://crates.io/crates/pdf-inspector">
-        <span class="package-top"><span>crates.io</span><span>Rust ↗</span></span>
-        <code>cargo add pdf-inspector</code>
+      <a class="package package-featured" href="https://www.npmjs.com/package/@firecrawl/pdf-inspector">
+        <span class="package-top"><span>npm · primary</span><span>Node.js + CLI ↗</span></span>
+        <code>npm i @firecrawl/pdf-inspector</code>
       </a>
       <a class="package" href="https://pypi.org/project/pdf-inspector/">
         <span class="package-top"><span>PyPI</span><span>Python ↗</span></span>
         <code>pip install pdf-inspector</code>
       </a>
-      <a class="package" href="https://www.npmjs.com/package/@firecrawl/pdf-inspector">
-        <span class="package-top"><span>npm</span><span>Node.js ↗</span></span>
-        <code>npm i @firecrawl/pdf-inspector</code>
+      <a class="package" href="https://crates.io/crates/pdf-inspector">
+        <span class="package-top"><span>crates.io</span><span>Rust ↗</span></span>
+        <code>cargo add pdf-inspector</code>
       </a>
     </div>
   </div>
 
   <section id="capabilities" class="full-rule">
     <div class="shell">
-      <div class="section-label pad"><span>[ <b>01</b> / 05 ]</span><span>Core capabilities</span></div>
+      <div class="section-label pad"><span>[ <b>01</b> / 04 ]</span><span>Core capabilities</span></div>
       <div class="section-body pad">
         <div class="section-intro">
           <h2>A focused PDF<br>toolchain.</h2>
@@ -566,9 +550,9 @@
             <p>Emit headings, lists, tables, links, code, emphasis, captions, page markers, and token-efficient cleanup.</p>
           </article>
           <article class="capability">
-            <div class="cap-id"><span>06</span><span>lib.rs</span></div>
-            <h3>Local by default</h3>
-            <p>No model weights or external services. Use the Rust API directly or ship the maintained Python, Node.js, and CLI interfaces.</p>
+            <div class="cap-id"><span>06</span><span>napi/</span></div>
+            <h3>Node-first delivery</h3>
+            <p>Prebuilt native binaries, TypeScript definitions, and the bundled pdf-inspector CLI ship together through npm.</p>
           </article>
         </div>
       </div>
@@ -577,7 +561,7 @@
 
   <section id="architecture" class="full-rule">
     <div class="shell">
-      <div class="section-label pad"><span>[ <b>02</b> / 05 ]</span><span>Architecture</span></div>
+      <div class="section-label pad"><span>[ <b>02</b> / 04 ]</span><span>Architecture</span></div>
       <div class="section-body pad">
         <div class="section-intro">
           <h2>One parse.<br>Clear stages.</h2>
@@ -607,7 +591,7 @@
               <p>Clean Markdown plus classification and extraction metadata.</p>
             </div>
           </div>
-          <div class="arch-foot">Start in <code>src/lib.rs</code>, use <code>process_pdf</code>, and opt into JSON or positioned items when your pipeline needs more structure.</div>
+          <div class="arch-foot">Start with <code>@firecrawl/pdf-inspector</code> and <code>processPdf</code>, or run the bundled <code>pdf-inspector</code> CLI. Both use the same Rust pipeline.</div>
         </div>
       </div>
     </div>
@@ -615,7 +599,7 @@
 
   <section id="benchmark" class="full-rule">
     <div class="shell">
-      <div class="section-label pad"><span>[ <b>03</b> / 05 ]</span><span>Benchmark</span></div>
+      <div class="section-label pad"><span>[ <b>03</b> / 04 ]</span><span>Benchmark</span></div>
       <div class="section-body pad">
         <div class="section-intro">
           <h2>Measured on<br>real documents.</h2>
@@ -649,46 +633,25 @@
 
   <section id="usage" class="full-rule">
     <div class="shell">
-      <div class="section-label pad"><span>[ <b>04</b> / 05 ]</span><span>Usage</span></div>
+      <div class="section-label pad"><span>[ <b>04</b> / 04 ]</span><span>Usage</span></div>
       <div class="section-body pad">
         <div class="section-intro">
-          <h2>Use it from<br>your stack.</h2>
-          <p>The same processing pipeline is available across every interface. Choose a package for application code or install the binaries for scripts, shell pipelines, and quick inspection.</p>
+          <h2>Start with Node.<br>Use the CLI.</h2>
+          <p>The npm package is the main entry point: import the native Node.js API in application code or use the bundled pdf-inspector command for scripts and shell pipelines. Python and Rust packages expose the same core when you need them.</p>
         </div>
         <div class="tabs">
-          <input type="radio" name="language" id="rust" checked>
-          <input type="radio" name="language" id="python">
-          <input type="radio" name="language" id="node">
+          <input type="radio" name="language" id="node" checked>
           <input type="radio" name="language" id="cli">
+          <input type="radio" name="language" id="python">
+          <input type="radio" name="language" id="rust">
           <div class="usage-grid">
             <div class="tab-list" role="tablist" aria-label="Language examples">
-              <label for="rust" role="tab">Rust</label>
-              <label for="python" role="tab">Python</label>
               <label for="node" role="tab">Node.js</label>
               <label for="cli" role="tab">CLI</label>
+              <label for="python" role="tab">Python</label>
+              <label for="rust" role="tab">Rust</label>
             </div>
             <div class="panels">
-              <div class="code-panel" id="panel-rust" role="tabpanel"><pre><span class="cm">// cargo add pdf-inspector</span>
-<span class="kw">use</span> pdf_inspector::process_pdf;
-
-<span class="kw">let</span> result = <span class="fn">process_pdf</span>(<span class="str">"document.pdf"</span>)?;
-<span class="fn">println!</span>(<span class="str">"Type: {:?}"</span>, result.pdf_type);
-
-<span class="kw">if let</span> <span class="kw">Some</span>(markdown) = &amp;result.markdown {
-    <span class="fn">println!</span>(<span class="str">"{}"</span>, markdown);
-}
-
-<span class="cm">// </span><a href="https://github.com/firecrawl/pdf-inspector/blob/main/docs/rust-api.md">Full Rust API reference ↗</a></pre></div>
-              <div class="code-panel" id="panel-python" role="tabpanel"><pre><span class="cm"># pip install pdf-inspector</span>
-<span class="kw">import</span> pdf_inspector
-
-result = pdf_inspector.<span class="fn">process_pdf</span>(<span class="str">"document.pdf"</span>)
-
-<span class="fn">print</span>(result.pdf_type)
-<span class="fn">print</span>(result.markdown)
-<span class="fn">print</span>(result.pages_needing_ocr)
-
-<span class="cm"># </span><a href="https://github.com/firecrawl/pdf-inspector/blob/main/docs/python.md">Full Python API reference ↗</a></pre></div>
               <div class="code-panel" id="panel-node" role="tabpanel"><pre><span class="cm">// npm i @firecrawl/pdf-inspector</span>
 <span class="kw">import</span> { readFileSync } <span class="kw">from</span> <span class="str">'node:fs'</span>;
 <span class="kw">import</span> { processPdf } <span class="kw">from</span> <span class="str">'@firecrawl/pdf-inspector'</span>;
@@ -701,48 +664,42 @@ console.<span class="fn">log</span>(result.pdfType);
 console.<span class="fn">log</span>(result.markdown);
 
 <span class="cm">// </span><a href="https://github.com/firecrawl/pdf-inspector/blob/main/napi/README.md">Full Node.js API reference ↗</a></pre></div>
-              <div class="code-panel" id="panel-cli" role="tabpanel"><pre><span class="cm"># install both binaries</span>
-cargo <span class="fn">install</span> pdf-inspector
+              <div class="code-panel" id="panel-cli" role="tabpanel"><pre><span class="cm"># run directly from npm</span>
+npx <span class="fn">@firecrawl/pdf-inspector</span> document.pdf
 
-<span class="cm"># PDF → Markdown</span>
-<span class="fn">pdf2md</span> document.pdf
+<span class="cm"># or install the bundled CLI globally</span>
+npm install -g <span class="fn">@firecrawl/pdf-inspector</span>
+<span class="fn">pdf-inspector</span> document.pdf
 
 <span class="cm"># structured pipeline output</span>
-<span class="fn">pdf2md</span> document.pdf --json
+<span class="fn">pdf-inspector</span> document.pdf --json
 
-<span class="cm"># classification and layout analysis</span>
-<span class="fn">detect-pdf</span> document.pdf --analyze --json</pre></div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </section>
+<span class="cm"># classification only</span>
+<span class="fn">pdf-inspector</span> detect document.pdf --json
 
-  <section id="contribute" class="full-rule">
-    <div class="shell">
-      <div class="section-label pad"><span>[ <b>05</b> / 05 ]</span><span>Project</span></div>
-      <div class="section-body pad">
-        <div class="section-intro">
-          <h2>Read it. Run it.<br>Improve it.</h2>
-          <p>The codebase is organized around the extraction pipeline, with unit, integration, and regression coverage for the PDF edge cases that matter. Start with the module closest to the behavior you want to understand.</p>
-        </div>
-        <div class="contribute-grid">
-          <div class="repo-map">
-            <div class="repo-title"><span>REPOSITORY MAP</span><span>firecrawl/pdf-inspector</span></div>
-            <div class="repo-files">
-              <a class="repo-file" href="https://github.com/firecrawl/pdf-inspector/tree/main/src/extractor"><code>src/extractor/</code><span>Content streams, fonts, links, layout, reading order</span></a>
-              <a class="repo-file" href="https://github.com/firecrawl/pdf-inspector/tree/main/src/tables"><code>src/tables/</code><span>Grid, rectangle, line, and heuristic table detection</span></a>
-              <a class="repo-file" href="https://github.com/firecrawl/pdf-inspector/tree/main/src/markdown"><code>src/markdown/</code><span>Analysis, classification, conversion, and cleanup</span></a>
-              <a class="repo-file" href="https://github.com/firecrawl/pdf-inspector/tree/main/napi"><code>napi/</code><span>Node.js and Bun bindings via napi-rs</span></a>
-              <a class="repo-file" href="https://github.com/firecrawl/pdf-inspector/tree/main/tests"><code>tests/</code><span>Fixtures, integration coverage, and snapshots</span></a>
+<span class="cm"># </span><a href="https://github.com/firecrawl/pdf-inspector/blob/main/napi/README.md">Node.js and CLI reference ↗</a></pre></div>
+              <div class="code-panel" id="panel-python" role="tabpanel"><pre><span class="cm"># pip install pdf-inspector</span>
+<span class="kw">import</span> pdf_inspector
+
+result = pdf_inspector.<span class="fn">process_pdf</span>(<span class="str">"document.pdf"</span>)
+
+<span class="fn">print</span>(result.pdf_type)
+<span class="fn">print</span>(result.markdown)
+<span class="fn">print</span>(result.pages_needing_ocr)
+
+<span class="cm"># </span><a href="https://github.com/firecrawl/pdf-inspector/blob/main/docs/python.md">Full Python API reference ↗</a></pre></div>
+              <div class="code-panel" id="panel-rust" role="tabpanel"><pre><span class="cm">// cargo add pdf-inspector</span>
+<span class="kw">use</span> pdf_inspector::process_pdf;
+
+<span class="kw">let</span> result = <span class="fn">process_pdf</span>(<span class="str">"document.pdf"</span>)?;
+<span class="fn">println!</span>(<span class="str">"Type: {:?}"</span>, result.pdf_type);
+
+<span class="kw">if let</span> <span class="kw">Some</span>(markdown) = &amp;result.markdown {
+    <span class="fn">println!</span>(<span class="str">"{}"</span>, markdown);
+}
+
+<span class="cm">// </span><a href="https://github.com/firecrawl/pdf-inspector/blob/main/docs/rust-api.md">Full Rust API reference ↗</a></pre></div>
             </div>
-          </div>
-          <div class="contribute-links">
-            <a class="contribute-link" href="https://github.com/firecrawl/pdf-inspector"><span>Source</span><strong>Browse the repository ↗</strong></a>
-            <a class="contribute-link" href="https://github.com/firecrawl/pdf-inspector/issues"><span>Issues</span><strong>Report or pick up a bug ↗</strong></a>
-            <a class="contribute-link" href="https://github.com/firecrawl/pdf-inspector/pulls"><span>Contribute</span><strong>Open a pull request ↗</strong></a>
-            <a class="contribute-link" href="https://github.com/firecrawl/pdf-inspector/releases"><span>Releases</span><strong>See what changed ↗</strong></a>
           </div>
         </div>
       </div>
