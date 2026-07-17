@@ -270,12 +270,14 @@ pub fn extract_text(data: &[u8]) -> Result<String, JsValue> {
     initialize();
     let items = pdf_inspector::extractor::extract_text_with_positions_mem(data)
         .map_err(|error| js_error("extract text", error))?;
-    Ok(pdf_inspector::extractor::group_into_lines(items)
-        .into_iter()
-        .map(|line| line.text())
-        .filter(|line| !line.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n"))
+    Ok(
+        pdf_inspector::extractor::group_into_lines_preserving_all_text(items)
+            .into_iter()
+            .map(|line| line.text())
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 /// Return the WebAssembly package version.
@@ -326,7 +328,9 @@ mod tests {
         // Adobe-Korea1 CID 1086 (0x043E) maps to U+AC00 (Korean syllable GA).
         // There is deliberately no ToUnicode stream: decoding must use the
         // embedded predefined CMap rather than lopdf's plain-text fallback.
-        let content = "BT /F0 12 Tf 50 100 Td <043E> Tj ET";
+        // Korea1 CIDs 21 and 19 map to ASCII "4" and "2". Place them near
+        // the bottom edge so they look exactly like a numeric page footer.
+        let content = "BT /F0 12 Tf 50 100 Td <043E> Tj 0 -60 Td <00150013> Tj ET";
         add_object(
             &mut pdf,
             &mut offsets,
@@ -408,10 +412,10 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn extracts_cjk_with_predefined_cmap() {
+    fn extracts_cjk_and_preserves_numeric_page_footer() {
         let text = extract_text(&synthetic_korea1_pdf()).expect("extract predefined CMap text");
 
-        assert_eq!(text, "가");
+        assert_eq!(text, "가\n42");
     }
 
     #[wasm_bindgen_test]
