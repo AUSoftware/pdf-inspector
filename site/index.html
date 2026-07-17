@@ -213,7 +213,7 @@
   .button code { font: inherit; }
   .arrow { font-family: var(--mono); color: currentColor; }
 
-  .terminal {
+  .playground {
     border: 1px solid rgba(255,255,255,.08);
     border-radius: 12px;
     background: var(--code);
@@ -222,36 +222,99 @@
     overflow: hidden;
     position: relative;
   }
-  .terminal-head {
-    height: 42px;
-    padding: 0 14px;
+  .playground-switcher {
+    min-height: 53px;
+    padding: 9px 10px;
     border-bottom: 1px solid rgba(255,255,255,.08);
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 10px;
+    background: #181818;
+  }
+  .playground-switch {
+    padding: 3px;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 8px;
+    background: rgba(255,255,255,.035);
+  }
+  .playground-switch button {
+    height: 27px;
+    padding: 0 9px;
+    border: 0;
+    border-radius: 5px;
+    color: rgba(255,255,255,.48);
+    background: transparent;
+    cursor: pointer;
+    font: 500 10px/1 var(--mono);
+    transition: color .15s ease, background .15s ease, box-shadow .15s ease;
+  }
+  .playground-switch button:hover { color: #fff; }
+  .language-switch button[aria-pressed="true"] {
+    color: var(--ink);
+    background: #fff;
+    box-shadow: 0 1px 5px rgba(0,0,0,.25);
+  }
+  .mode-switch button[aria-pressed="true"] { color: #ff9c70; background: var(--heat-16); }
+  .terminal-head {
+    height: 40px;
+    padding: 0 14px;
+    border-bottom: 1px solid rgba(255,255,255,.08);
+    display: flex;
+    align-items: center;
+    gap: 9px;
     color: rgba(255,255,255,.42);
     font: 11px/1 var(--mono);
   }
   .term-dots { display: flex; gap: 5px; }
   .term-dots i { width: 7px; height: 7px; border-radius: 50%; background: rgba(255,255,255,.17); }
-  .terminal pre { margin: 0; padding: 24px 18px 28px; overflow-x: hidden; white-space: pre; font: 12px/1.75 var(--mono); }
+  .example-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .copy-button {
+    margin-left: auto;
+    padding: 4px 6px;
+    border: 0;
+    border-radius: 4px;
+    color: rgba(255,255,255,.42);
+    background: transparent;
+    cursor: pointer;
+    font: 10px/1 var(--mono);
+  }
+  .copy-button:hover, .copy-button:focus-visible { color: #fff; background: rgba(255,255,255,.06); }
+  .playground-body { min-height: 245px; }
+  .playground-panel {
+    min-height: 245px;
+    margin: 0;
+    padding: 22px 18px 24px;
+    overflow-x: hidden;
+    white-space: pre;
+    font: 11px/1.75 var(--mono);
+  }
+  .playground-panel[hidden] { display: none; }
+  .playground .cm { color: rgba(255,255,255,.34); }
+  .playground .kw { color: #ff9c70; }
+  .playground .str { color: #d5bea9; }
+  .playground .fn { color: #fff; font-weight: 600; }
   .prompt { color: var(--heat); }
   .term-muted { color: rgba(255,255,255,.38); }
   .term-key { color: #ffb28f; }
-  .terminal-result {
-    margin: 0 18px 18px;
-    padding: 12px 13px;
-    display: grid;
-    grid-template-columns: 1fr auto;
-    gap: 7px 16px;
-    border: 1px solid rgba(255,255,255,.08);
-    border-radius: 7px;
-    background: rgba(255,255,255,.035);
+  .playground-meta {
+    min-height: 42px;
+    padding: 0 14px;
+    border-top: 1px solid rgba(255,255,255,.08);
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
     color: rgba(255,255,255,.52);
-    font: 11px/1.3 var(--mono);
+    font: 10px/1.3 var(--mono);
   }
-  .terminal-result strong { color: #fff; font-weight: 500; }
-  .terminal-result strong.hot { color: #ff8b59; }
+  .playground-meta span { display: inline-flex; align-items: center; gap: 6px; }
+  .playground-meta span::before { content: ""; width: 4px; height: 4px; background: rgba(255,255,255,.24); }
+  .playground-meta span:first-child { color: #ff9c70; }
+  .playground-meta span:first-child::before { background: var(--heat); }
 
   .package-row { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--border); background: var(--surface); }
   .package {
@@ -403,11 +466,11 @@
   .footer-links { display: flex; gap: 20px; flex-wrap: wrap; color: var(--ink-48); font: 11px/1 var(--mono); text-transform: uppercase; letter-spacing: .05em; }
   .footer-links a:hover { color: var(--heat); }
 
-  a:focus-visible, label:focus-visible { outline: 2px solid var(--heat); outline-offset: 3px; }
+  a:focus-visible, button:focus-visible, label:focus-visible { outline: 2px solid var(--heat); outline-offset: 3px; }
 
   @media (max-width: 900px) {
     .hero-main { grid-template-columns: 1fr; gap: 44px; }
-    .terminal { max-width: 580px; }
+    .playground { max-width: 580px; }
     .section-intro { grid-template-columns: 1fr; gap: 20px; }
     .capability-grid { grid-template-columns: repeat(2, 1fr); }
     .capability:nth-child(3n) { border-right: 1px solid var(--border); }
@@ -425,7 +488,12 @@
     .project-brand small { display: none; }
     .hero-main { min-height: auto; padding-top: 70px; }
     h1 { font-size: clamp(47px, 14vw, 66px); }
-    .terminal pre { padding: 20px 16px 24px; font-size: 11px; }
+    .playground-switcher { align-items: stretch; flex-direction: column; }
+    .playground-switch { display: grid; }
+    .language-switch { grid-template-columns: repeat(3, 1fr); }
+    .mode-switch { grid-template-columns: repeat(2, 1fr); }
+    .playground-switch button { width: 100%; }
+    .playground-panel { padding: 20px 16px 22px; font-size: 10.5px; }
     .package-row { grid-template-columns: 1fr; }
     .package { border-right: 0; border-bottom: 1px solid var(--border); }
     .package:last-child { border-bottom: 0; }
@@ -481,31 +549,85 @@
           <div class="rust-label"><i aria-hidden="true">RS</i>Rust core</div>
         </div>
         <h1>PDF structure,<br><em>built for speed.</em></h1>
-        <p class="hero-copy">A Rust-powered, open-source parser that classifies PDFs and turns native text into clean, position-aware Markdown. Use it from Node.js or the bundled CLI, with packages also available from PyPI and crates.io.</p>
+        <p class="hero-copy">A Rust-powered, open-source parser that classifies PDFs and turns native text into clean, position-aware Markdown. Use the native core from Node.js, Python, or Rust, or drop into the bundled CLI.</p>
         <div class="hero-actions">
           <a class="button button-primary" href="https://github.com/firecrawl/pdf-inspector">View on GitHub <span class="arrow" aria-hidden="true">↗</span></a>
           <a class="button" href="https://github.com/firecrawl/pdf-inspector#quick-start">Read the docs <span class="arrow" aria-hidden="true">→</span></a>
         </div>
       </div>
 
-      <div class="terminal" aria-label="pdf-inspector command line example">
+      <div class="playground" data-playground aria-label="Interactive pdf-inspector examples">
+        <div class="playground-switcher">
+          <div class="playground-switch language-switch" role="group" aria-label="Language">
+            <button type="button" data-language="node" aria-pressed="true">Node.js</button>
+            <button type="button" data-language="python" aria-pressed="false">Python</button>
+            <button type="button" data-language="rust" aria-pressed="false">Rust</button>
+          </div>
+          <div class="playground-switch mode-switch" role="group" aria-label="Example type">
+            <button type="button" data-mode="code" aria-pressed="true">Code</button>
+            <button type="button" data-mode="cli" aria-pressed="false">CLI</button>
+          </div>
+        </div>
         <div class="terminal-head">
           <div class="term-dots" aria-hidden="true"><i></i><i></i><i></i></div>
-          <span>npm CLI · local</span>
+          <span class="example-title">npm · Node.js code</span>
+          <button class="copy-button" type="button" aria-label="Copy example">Copy</button>
         </div>
-        <pre><span class="prompt">$</span> npm i -g @firecrawl/pdf-inspector
-<span class="term-muted">   installed the native package + CLI</span>
+        <div class="playground-body" aria-live="polite">
+          <pre class="playground-panel" data-example="node-code" data-title="npm · Node.js code"><span class="kw">import</span> { readFileSync } <span class="kw">from</span> <span class="str">'node:fs'</span>;
+<span class="kw">import</span> {
+  processPdf
+} <span class="kw">from</span> <span class="str">'@firecrawl/pdf-inspector'</span>;
+
+<span class="kw">const</span> pdf = <span class="fn">readFileSync</span>(<span class="str">'annual-report.pdf'</span>);
+<span class="kw">const</span> result = <span class="fn">processPdf</span>(pdf);
+
+console.<span class="fn">log</span>(result.markdown);</pre>
+          <pre class="playground-panel" data-example="node-cli" data-title="npm · bundled CLI" hidden><span class="prompt">$</span> npm i -g @firecrawl/pdf-inspector
+<span class="term-muted">   installed native package + CLI</span>
 
 <span class="prompt">$</span> pdf-inspector annual-report.pdf
 <span class="term-key"># Annual report 2025</span>
 
 ## Financial highlights
-| Metric | 2025 | 2024 |
-|---|---:|---:|</pre>
-        <div class="terminal-result">
-          <span>document type</span><strong class="hot">TextBased</strong>
-          <span>output</span><strong>structured Markdown</strong>
-          <span>engine</span><strong>Rust</strong>
+| Metric | 2025 | 2024 |</pre>
+          <pre class="playground-panel" data-example="python-code" data-title="PyPI · Python code" hidden><span class="kw">import</span> pdf_inspector
+
+result = pdf_inspector.<span class="fn">process_pdf</span>(
+    <span class="str">"annual-report.pdf"</span>
+)
+
+<span class="fn">print</span>(result.pdf_type)
+<span class="fn">print</span>(result.markdown)</pre>
+          <pre class="playground-panel" data-example="python-cli" data-title="PyPI · Python shell" hidden><span class="prompt">$</span> pip install pdf-inspector
+<span class="prompt">$</span> python
+
+<span class="term-key">&gt;&gt;&gt;</span> import pdf_inspector as pdf
+<span class="term-key">&gt;&gt;&gt;</span> result = pdf.process_pdf(<span class="str">"report.pdf"</span>)
+<span class="term-key">&gt;&gt;&gt;</span> print(result.markdown)
+<span class="term-key"># Annual report 2025</span></pre>
+          <pre class="playground-panel" data-example="rust-code" data-title="crates.io · Rust code" hidden><span class="kw">use</span> pdf_inspector::process_pdf;
+
+<span class="kw">let</span> result = <span class="fn">process_pdf</span>(
+    <span class="str">"annual-report.pdf"</span>
+)?;
+
+<span class="kw">if let Some</span>(markdown) = result.markdown {
+    <span class="fn">println!</span>(<span class="str">"{markdown}"</span>);
+}</pre>
+          <pre class="playground-panel" data-example="rust-cli" data-title="crates.io · Rust CLI" hidden><span class="prompt">$</span> cargo install pdf-inspector
+<span class="term-muted">   installed pdf2md + detect-pdf</span>
+
+<span class="prompt">$</span> pdf2md annual-report.pdf
+<span class="term-key"># Annual report 2025</span>
+
+## Financial highlights
+| Metric | 2025 | 2024 |</pre>
+        </div>
+        <div class="playground-meta" aria-label="Runtime details">
+          <span>Rust core</span>
+          <span>Runs locally</span>
+          <span>Structured Markdown</span>
         </div>
       </div>
     </div>
@@ -742,6 +864,82 @@ result = pdf_inspector.<span class="fn">process_pdf</span>(<span class="str">"do
     </div>
   </div>
 </footer>
+
+<script>
+  (() => {
+    const playground = document.querySelector('[data-playground]');
+    if (!playground) return;
+
+    const languageButtons = [...playground.querySelectorAll('[data-language]')];
+    const modeButtons = [...playground.querySelectorAll('[data-mode]')];
+    const panels = [...playground.querySelectorAll('[data-example]')];
+    const title = playground.querySelector('.example-title');
+    const copyButton = playground.querySelector('.copy-button');
+    let language = 'node';
+    let mode = 'code';
+
+    const update = () => {
+      const key = `${language}-${mode}`;
+      const activePanel = panels.find((panel) => panel.dataset.example === key);
+
+      languageButtons.forEach((button) => {
+        button.setAttribute('aria-pressed', String(button.dataset.language === language));
+      });
+      modeButtons.forEach((button) => {
+        button.setAttribute('aria-pressed', String(button.dataset.mode === mode));
+      });
+      panels.forEach((panel) => { panel.hidden = panel !== activePanel; });
+
+      if (activePanel) title.textContent = activePanel.dataset.title;
+      copyButton.textContent = 'Copy';
+    };
+
+    const copyText = async (text) => {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+
+      const textArea = document.createElement('textarea');
+      textArea.value = text;
+      textArea.setAttribute('readonly', '');
+      textArea.style.position = 'fixed';
+      textArea.style.opacity = '0';
+      document.body.appendChild(textArea);
+      textArea.select();
+      const copied = document.execCommand('copy');
+      textArea.remove();
+      if (!copied) throw new Error('Copy failed');
+    };
+
+    languageButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        language = button.dataset.language;
+        update();
+      });
+    });
+
+    modeButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        mode = button.dataset.mode;
+        update();
+      });
+    });
+
+    copyButton.addEventListener('click', async () => {
+      const activePanel = panels.find((panel) => !panel.hidden);
+      if (!activePanel) return;
+
+      try {
+        await copyText(activePanel.textContent.trim());
+        copyButton.textContent = 'Copied';
+        window.setTimeout(() => { copyButton.textContent = 'Copy'; }, 1400);
+      } catch {
+        copyButton.textContent = 'Select to copy';
+      }
+    });
+  })();
+</script>
 
 </body>
 </html>
