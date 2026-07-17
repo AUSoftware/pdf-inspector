@@ -140,9 +140,16 @@
     gap: 64px;
     position: relative;
   }
-  .oss-label {
-    width: max-content;
+  .hero-labels {
     margin-bottom: 25px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .oss-label,
+  .rust-label {
+    width: max-content;
     padding: 6px 9px 6px 7px;
     display: flex;
     align-items: center;
@@ -156,6 +163,18 @@
     text-transform: uppercase;
   }
   .oss-label i { width: 6px; height: 16px; background: var(--heat); display: block; }
+  .rust-label {
+    padding-left: 8px;
+    border-color: var(--ink);
+    background: var(--ink);
+    color: var(--surface);
+  }
+  .rust-label i {
+    color: var(--heat);
+    font-style: normal;
+    font-weight: 700;
+    letter-spacing: -.03em;
+  }
   h1 {
     max-width: 780px;
     margin: 0;
@@ -457,9 +476,12 @@
   <div class="shell hero">
     <div class="hero-main pad">
       <div>
-        <div class="oss-label"><i aria-hidden="true"></i>Firecrawl open source · MIT</div>
+        <div class="hero-labels">
+          <div class="oss-label"><i aria-hidden="true"></i>Firecrawl open source · MIT</div>
+          <div class="rust-label"><i aria-hidden="true">RS</i>Rust core</div>
+        </div>
         <h1>PDF structure,<br><em>built for speed.</em></h1>
-        <p class="hero-copy">An open-source parser that classifies PDFs and turns native text into clean, position-aware Markdown. Install it from npm, PyPI, or crates.io, or use the bundled command line.</p>
+        <p class="hero-copy">A Rust-powered, open-source parser that classifies PDFs and turns native text into clean, position-aware Markdown. Use it from Node.js or the bundled CLI, with packages also available from PyPI and crates.io.</p>
         <div class="hero-actions">
           <a class="button button-primary" href="https://github.com/firecrawl/pdf-inspector">View on GitHub <span class="arrow" aria-hidden="true">↗</span></a>
           <a class="button" href="https://github.com/firecrawl/pdf-inspector#quick-start">Read the docs <span class="arrow" aria-hidden="true">→</span></a>
@@ -483,6 +505,7 @@
         <div class="terminal-result">
           <span>document type</span><strong class="hot">TextBased</strong>
           <span>output</span><strong>structured Markdown</strong>
+          <span>engine</span><strong>Rust</strong>
         </div>
       </div>
     </div>
