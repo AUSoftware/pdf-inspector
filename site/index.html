@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>pdf-inspector — fast, open-source PDF to Markdown</title>
-<meta name="description" content="A fast, open-source Node.js package and CLI for PDF classification and structured Markdown extraction, powered by a native Rust core.">
+<meta name="description" content="A fast, open-source PDF parser for structured Markdown extraction, available through npm, PyPI, crates.io, and the command line.">
 <meta name="theme-color" content="#f9f9f9">
 <meta property="og:title" content="pdf-inspector">
-<meta property="og:description" content="A fast Node.js package and bundled CLI for PDF classification and structured Markdown extraction, powered by Rust.">
+<meta property="og:description" content="Fast PDF classification and structured Markdown extraction for Node.js, Python, Rust, and the command line.">
 <meta property="og:type" content="website">
 <link rel="icon" href="assets/firecrawl-mark.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -192,8 +192,6 @@
   .button-primary { color: #fff; background: var(--heat); border-color: var(--heat); }
   .button-primary:hover, .button-primary:focus-visible { background: var(--heat-dark); border-color: var(--heat-dark); }
   .button code { font: inherit; }
-  .source-link { padding: 0 5px; color: var(--ink-48); font-size: 14px; text-decoration: underline; text-decoration-color: var(--ink-16); text-underline-offset: 4px; }
-  .source-link:hover, .source-link:focus-visible { color: var(--heat-dark); text-decoration-color: var(--heat); }
   .arrow { font-family: var(--mono); color: currentColor; }
 
   .terminal {
@@ -236,32 +234,31 @@
   .terminal-result strong { color: #fff; font-weight: 500; }
   .terminal-result strong.hot { color: #ff8b59; }
 
-  .project-strip {
-    min-height: 86px;
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    border-top: 1px solid var(--border);
-  }
-  .project-stat { padding: 20px 24px; border-right: 1px solid var(--border); }
-  .project-stat:last-child { border-right: 0; }
-  .project-stat span { display: block; color: var(--ink-32); font: 10px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; }
-  .project-stat strong { display: block; margin-top: 9px; font-size: 15px; font-weight: 500; letter-spacing: -.01em; }
-
-  .package-row { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--border); }
+  .package-row { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--border); background: var(--surface); }
   .package {
     min-width: 0;
-    padding: 22px 24px;
+    min-height: 154px;
+    padding: 23px 24px 20px;
     border-right: 1px solid var(--border);
-    background: var(--lighter);
-    transition: background .15s ease;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    background: var(--surface);
+    transition: background .15s ease, box-shadow .15s ease;
   }
   .package:last-child { border-right: 0; }
-  .package:hover, .package:focus-visible { background: var(--heat-4); }
-  .package-top { display: flex; justify-content: space-between; color: var(--ink-32); font: 10px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; }
-  .package code { display: block; margin-top: 12px; overflow: hidden; text-overflow: ellipsis; color: var(--ink-88); font: 13px/1.4 var(--mono); white-space: nowrap; }
-  .package:hover .package-top, .package:focus-visible .package-top { color: var(--heat); }
-  .package-featured { background: var(--heat-4); box-shadow: inset 0 2px var(--heat); }
-  .package-featured .package-top { color: var(--heat-dark); }
+  .package:hover, .package:focus-visible { background: var(--heat-4); box-shadow: inset 0 2px var(--heat); }
+  .package-heading { display: flex; align-items: center; gap: 12px; }
+  .registry-icon { width: 42px; height: 38px; flex: 0 0 auto; border-radius: 7px; display: inline-flex; align-items: center; justify-content: center; font-family: var(--mono); font-weight: 600; }
+  .registry-npm { background: #cb3837; color: #fff; font-size: 11px; letter-spacing: -.08em; }
+  .registry-pypi { border: 1px solid #3775a9; background: #3775a9; color: #ffd343; font-size: 14px; }
+  .registry-crates { background: var(--ink); color: #fff; font-size: 13px; }
+  .registry-name { min-width: 0; }
+  .registry-name strong { display: block; font-size: 16px; line-height: 1.15; font-weight: 500; letter-spacing: -.02em; }
+  .registry-name small { display: block; margin-top: 4px; color: var(--ink-48); font: 10px/1.2 var(--mono); text-transform: uppercase; letter-spacing: .05em; }
+  .package-arrow { margin-left: auto; color: var(--ink-32); font: 14px/1 var(--mono); }
+  .package code { display: block; margin-top: 22px; padding-top: 13px; border-top: 1px solid var(--border); overflow: hidden; text-overflow: ellipsis; color: var(--ink-64); font: 12px/1.4 var(--mono); white-space: nowrap; }
+  .package:hover .package-arrow, .package:focus-visible .package-arrow { color: var(--heat); }
 
   section { scroll-margin-top: 68px; }
   .section-label {
@@ -408,9 +405,6 @@
     .project-brand small { display: none; }
     .hero-main { min-height: auto; padding-top: 70px; }
     h1 { font-size: clamp(47px, 14vw, 66px); }
-    .project-strip { grid-template-columns: repeat(2, 1fr); }
-    .project-stat:nth-child(2) { border-right: 0; }
-    .project-stat:nth-child(-n+2) { border-bottom: 1px solid var(--border); }
     .package-row { grid-template-columns: 1fr; }
     .package { border-right: 0; border-bottom: 1px solid var(--border); }
     .package:last-child { border-bottom: 0; }
@@ -447,6 +441,7 @@
       <small>Open source</small>
     </a>
     <div class="nav-links">
+      <a href="#packages">Packages</a>
       <a href="#capabilities">Capabilities</a>
       <a href="#architecture">Architecture</a>
       <a href="#benchmark">Benchmark</a>
@@ -462,12 +457,10 @@
       <div>
         <div class="oss-label"><i aria-hidden="true"></i>Firecrawl open source · MIT</div>
         <h1>PDF structure,<br><em>built for speed.</em></h1>
-        <p class="hero-copy">A native Node.js package and bundled CLI that classify PDFs and turn native text into clean, position-aware Markdown. Install once from npm, then use it in code or from your shell.</p>
+        <p class="hero-copy">An open-source parser that classifies PDFs and turns native text into clean, position-aware Markdown. Install it from npm, PyPI, or crates.io, or use the bundled command line.</p>
         <div class="hero-actions">
-          <a class="button button-primary" href="https://www.npmjs.com/package/@firecrawl/pdf-inspector">npm package <span class="arrow" aria-hidden="true">↗</span></a>
-          <a class="button" href="https://pypi.org/project/pdf-inspector/">PyPI <span class="arrow" aria-hidden="true">↗</span></a>
-          <a class="button" href="https://crates.io/crates/pdf-inspector">crates.io <span class="arrow" aria-hidden="true">↗</span></a>
-          <a class="source-link" href="https://github.com/firecrawl/pdf-inspector">View source</a>
+          <a class="button button-primary" href="https://github.com/firecrawl/pdf-inspector">View on GitHub <span class="arrow" aria-hidden="true">↗</span></a>
+          <a class="button" href="https://github.com/firecrawl/pdf-inspector#quick-start">Read the docs <span class="arrow" aria-hidden="true">→</span></a>
         </div>
       </div>
 
@@ -492,24 +485,29 @@
       </div>
     </div>
 
-    <div class="project-strip" aria-label="Project details">
-      <div class="project-stat"><span>Primary API</span><strong>Node.js · TypeScript</strong></div>
-      <div class="project-stat"><span>Bundled CLI</span><strong>pdf-inspector</strong></div>
-      <div class="project-stat"><span>Native core</span><strong>Pure Rust</strong></div>
-      <div class="project-stat"><span>License</span><strong>MIT</strong></div>
-    </div>
-
-    <div class="package-row" aria-label="Package installation">
-      <a class="package package-featured" href="https://www.npmjs.com/package/@firecrawl/pdf-inspector">
-        <span class="package-top"><span>npm · primary</span><span>Node.js + CLI ↗</span></span>
+    <div class="package-row" id="packages" aria-label="Package registries">
+      <a class="package" href="https://www.npmjs.com/package/@firecrawl/pdf-inspector">
+        <span class="package-heading">
+          <span class="registry-icon registry-npm" aria-hidden="true">npm</span>
+          <span class="registry-name"><strong>npm</strong><small>Node.js + CLI</small></span>
+          <span class="package-arrow" aria-hidden="true">↗</span>
+        </span>
         <code>npm i @firecrawl/pdf-inspector</code>
       </a>
       <a class="package" href="https://pypi.org/project/pdf-inspector/">
-        <span class="package-top"><span>PyPI</span><span>Python ↗</span></span>
+        <span class="package-heading">
+          <span class="registry-icon registry-pypi" aria-hidden="true">Py</span>
+          <span class="registry-name"><strong>PyPI</strong><small>Python</small></span>
+          <span class="package-arrow" aria-hidden="true">↗</span>
+        </span>
         <code>pip install pdf-inspector</code>
       </a>
       <a class="package" href="https://crates.io/crates/pdf-inspector">
-        <span class="package-top"><span>crates.io</span><span>Rust ↗</span></span>
+        <span class="package-heading">
+          <span class="registry-icon registry-crates" aria-hidden="true">Cr</span>
+          <span class="registry-name"><strong>crates.io</strong><small>Rust</small></span>
+          <span class="package-arrow" aria-hidden="true">↗</span>
+        </span>
         <code>cargo add pdf-inspector</code>
       </a>
     </div>
@@ -551,8 +549,8 @@
           </article>
           <article class="capability">
             <div class="cap-id"><span>06</span><span>napi/</span></div>
-            <h3>Node-first delivery</h3>
-            <p>Prebuilt native binaries, TypeScript definitions, and the bundled pdf-inspector CLI ship together through npm.</p>
+            <h3>Packaged for your stack</h3>
+            <p>Install from npm, PyPI, or crates.io. The npm package also includes TypeScript definitions and the bundled pdf-inspector CLI.</p>
           </article>
         </div>
       </div>
@@ -591,7 +589,7 @@
               <p>Clean Markdown plus classification and extraction metadata.</p>
             </div>
           </div>
-          <div class="arch-foot">Start with <code>@firecrawl/pdf-inspector</code> and <code>processPdf</code>, or run the bundled <code>pdf-inspector</code> CLI. Both use the same Rust pipeline.</div>
+          <div class="arch-foot">Call <code>processPdf</code> from Node.js, <code>process_pdf</code> from Python or Rust, or run the bundled <code>pdf-inspector</code> CLI. Every interface uses the same Rust pipeline.</div>
         </div>
       </div>
     </div>
@@ -637,7 +635,7 @@
       <div class="section-body pad">
         <div class="section-intro">
           <h2>Start with Node.<br>Use the CLI.</h2>
-          <p>The npm package is the main entry point: import the native Node.js API in application code or use the bundled pdf-inspector command for scripts and shell pipelines. Python and Rust packages expose the same core when you need them.</p>
+          <p>Import the native Node.js API in application code or use the bundled pdf-inspector command for scripts and shell pipelines. Python and Rust packages expose the same processing core.</p>
         </div>
         <div class="tabs">
           <input type="radio" name="language" id="node" checked>
