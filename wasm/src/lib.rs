@@ -268,8 +268,14 @@ pub fn classify_pdf(data: &[u8]) -> Result<JsValue, JsValue> {
 #[wasm_bindgen(js_name = extractText, skip_typescript)]
 pub fn extract_text(data: &[u8]) -> Result<String, JsValue> {
     initialize();
-    pdf_inspector::extractor::extract_text_mem(data)
-        .map_err(|error| js_error("extract text", error))
+    let items = pdf_inspector::extractor::extract_text_with_positions_mem(data)
+        .map_err(|error| js_error("extract text", error))?;
+    Ok(pdf_inspector::extractor::group_into_lines(items)
+        .into_iter()
+        .map(|line| line.text())
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 /// Return the WebAssembly package version.
@@ -286,6 +292,86 @@ mod tests {
 
     const TEXT_PDF: &[u8] = include_bytes!("../../tests/fixtures/thermo-freon12.pdf");
     const ENCRYPTED_PDF: &[u8] = include_bytes!("../../tests/fixtures/encrypted-secret123.pdf");
+
+    fn synthetic_korea1_pdf() -> Vec<u8> {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = vec![0usize];
+
+        fn add_object(pdf: &mut Vec<u8>, offsets: &mut Vec<usize>, id: usize, body: &str) {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{id} 0 obj\n").as_bytes());
+            pdf.extend_from_slice(body.as_bytes());
+            pdf.extend_from_slice(b"\nendobj\n");
+        }
+
+        add_object(
+            &mut pdf,
+            &mut offsets,
+            1,
+            "<< /Type /Catalog /Pages 2 0 R >>",
+        );
+        add_object(
+            &mut pdf,
+            &mut offsets,
+            2,
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        );
+        add_object(
+            &mut pdf,
+            &mut offsets,
+            3,
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F0 5 0 R >> >> /Contents 4 0 R >>",
+        );
+
+        // Adobe-Korea1 CID 1086 (0x043E) maps to U+AC00 (Korean syllable GA).
+        // There is deliberately no ToUnicode stream: decoding must use the
+        // embedded predefined CMap rather than lopdf's plain-text fallback.
+        let content = "BT /F0 12 Tf 50 100 Td <043E> Tj ET";
+        add_object(
+            &mut pdf,
+            &mut offsets,
+            4,
+            &format!(
+                "<< /Length {} >>\nstream\n{}\nendstream",
+                content.len(),
+                content
+            ),
+        );
+        add_object(
+            &mut pdf,
+            &mut offsets,
+            5,
+            "<< /Type /Font /Subtype /Type0 /BaseFont /SyntheticKorea1 /Encoding /Identity-H /DescendantFonts [6 0 R] >>",
+        );
+        add_object(
+            &mut pdf,
+            &mut offsets,
+            6,
+            "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /SyntheticKorea1 /CIDSystemInfo << /Registry (Adobe) /Ordering (Korea1) /Supplement 2 >> /FontDescriptor 7 0 R /DW 1000 >>",
+        );
+        add_object(
+            &mut pdf,
+            &mut offsets,
+            7,
+            "<< /Type /FontDescriptor /FontName /SyntheticKorea1 /Flags 4 /FontBBox [-100 -200 1000 900] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 >>",
+        );
+
+        let xref_start = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n", offsets.len()).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF",
+                offsets.len(),
+                xref_start
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
 
     #[wasm_bindgen_test]
     fn processes_pdf_to_markdown() {
@@ -319,6 +405,13 @@ mod tests {
 
         assert_eq!(pdf_type, "TextBased");
         assert!(!text.is_empty());
+    }
+
+    #[wasm_bindgen_test]
+    fn extracts_cjk_with_predefined_cmap() {
+        let text = extract_text(&synthetic_korea1_pdf()).expect("extract predefined CMap text");
+
+        assert_eq!(text, "가");
     }
 
     #[wasm_bindgen_test]

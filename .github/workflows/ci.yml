@@ -106,6 +106,9 @@ jobs:
       - name: Check WebAssembly bindings
         run: cargo check --manifest-path wasm/Cargo.toml --target wasm32-unknown-unknown
 
+      - name: Check root package for WebAssembly
+        run: cargo check --target wasm32-unknown-unknown
+
       - name: Lint WebAssembly bindings
         run: cargo clippy --manifest-path wasm/Cargo.toml --target wasm32-unknown-unknown -- -D warnings
 
