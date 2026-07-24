@@ -5614,6 +5614,8 @@ pub enum PdfError {
     Parse(String),
     #[error("PDF is encrypted")]
     Encrypted,
+    #[error("Invalid PDF options: {0}")]
+    InvalidOptions(String),
     #[error("Invalid PDF structure")]
     InvalidStructure,
     #[error("Not a PDF: {0}")]

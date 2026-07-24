@@ -205,6 +205,11 @@ pub(crate) fn detect_from_document(
                 .collect();
             valid.sort();
             valid.dedup();
+            if valid.is_empty() {
+                return Err(PdfError::InvalidOptions(format!(
+                    "ScanStrategy::Pages contains no in-range page numbers for a {total_pages}-page PDF"
+                )));
+            }
             (valid, false)
         }
     };

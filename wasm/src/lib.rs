@@ -229,16 +229,25 @@ fn validate_object_fields(
     // serde-wasm-bindgen reads the fields named by the Rust struct but does
     // not enumerate other JavaScript object keys, so Serde's
     // deny_unknown_fields cannot catch them by itself.
-    let object = value.dyn_ref::<js_sys::Object>().ok_or_else(|| {
+    value.dyn_ref::<js_sys::Object>().ok_or_else(|| {
         js_error(
             "invalid options",
             format!("{object_name} must be an object"),
         )
     })?;
 
-    for key in js_sys::Object::keys(object).iter() {
+    let keys = js_sys::Reflect::own_keys(value).map_err(|_| {
+        js_error(
+            "invalid options",
+            format!("could not inspect {object_name} fields"),
+        )
+    })?;
+    for key in keys.iter() {
         let Some(key) = key.as_string() else {
-            continue;
+            return Err(js_error(
+                "invalid options",
+                format!("{object_name} fields must use string keys"),
+            ));
         };
         if !allowed_fields.contains(&key.as_str()) {
             return Err(js_error(
@@ -256,13 +265,14 @@ fn validate_strategy_fields(value: &JsValue) -> Result<(), JsValue> {
         return Ok(());
     }
 
-    let object = value.dyn_ref::<js_sys::Object>().ok_or_else(|| {
+    value.dyn_ref::<js_sys::Object>().ok_or_else(|| {
         js_error(
             "invalid options",
             "strategy must be \"earlyExit\", \"full\", { sample: number }, or { pages: number[] }",
         )
     })?;
-    let keys = js_sys::Object::keys(object);
+    let keys = js_sys::Reflect::own_keys(value)
+        .map_err(|_| js_error("invalid options", "could not inspect strategy fields"))?;
     if keys.length() != 1 {
         return Err(js_error(
             "invalid options",
@@ -270,7 +280,10 @@ fn validate_strategy_fields(value: &JsValue) -> Result<(), JsValue> {
         ));
     }
 
-    let key = keys.get(0).as_string().unwrap_or_default();
+    let key = keys
+        .get(0)
+        .as_string()
+        .ok_or_else(|| js_error("invalid options", "strategy fields must use string keys"))?;
     if key != "sample" && key != "pages" {
         return Err(js_error(
             "invalid options",
@@ -502,6 +515,19 @@ mod tests {
             .expect("read error message")
             .as_string()
             .expect("error message string")
+    }
+
+    fn define_non_enumerable_property(object: &js_sys::Object, name: &str, value: &JsValue) {
+        let descriptor = js_sys::Object::new();
+        Reflect::set(&descriptor, &JsValue::from_str("value"), value)
+            .expect("set descriptor value");
+        Reflect::set(
+            &descriptor,
+            &JsValue::from_str("enumerable"),
+            &JsValue::FALSE,
+        )
+        .expect("set descriptor enumerable");
+        js_sys::Object::define_property(object, &JsValue::from_str(name), &descriptor);
     }
 
     fn synthetic_korea1_pdf() -> Vec<u8> {
@@ -819,6 +845,22 @@ mod tests {
         let error = detect_pdf(TEXT_PDF, unknown.into()).expect_err("unknown option must fail");
         assert!(error_message(&error).contains("unknown option field `fullScan`"));
 
+        let hidden = js_sys::Object::new();
+        define_non_enumerable_property(&hidden, "hiddenOption", &JsValue::TRUE);
+        let error =
+            detect_pdf(TEXT_PDF, hidden.into()).expect_err("non-enumerable option must fail");
+        assert!(error_message(&error).contains("unknown option field `hiddenOption`"));
+
+        let symbol_keyed = js_sys::Object::new();
+        Reflect::set(
+            &symbol_keyed,
+            &js_sys::Symbol::for_("unsupportedOption").into(),
+            &JsValue::TRUE,
+        )
+        .expect("set symbol option");
+        let error = detect_pdf(TEXT_PDF, symbol_keyed.into()).expect_err("symbol option must fail");
+        assert!(error_message(&error).contains("option fields must use string keys"));
+
         let process_only = js_sys::Object::new();
         Reflect::set(
             &process_only,
@@ -837,12 +879,7 @@ mod tests {
             &JsValue::from_f64(8.0),
         )
         .expect("set sample");
-        Reflect::set(
-            &malformed_strategy,
-            &JsValue::from_str("typo"),
-            &JsValue::TRUE,
-        )
-        .expect("set strategy typo");
+        define_non_enumerable_property(&malformed_strategy, "hiddenTypo", &JsValue::TRUE);
         let options = js_sys::Object::new();
         Reflect::set(
             &options,
@@ -852,5 +889,21 @@ mod tests {
         .expect("set malformed strategy");
         let error = detect_pdf(TEXT_PDF, options.into()).expect_err("malformed strategy must fail");
         assert!(error_message(&error).contains("exactly one of `sample` or `pages`"));
+    }
+
+    #[wasm_bindgen_test]
+    fn rejects_strategy_pages_when_none_are_in_range() {
+        let pages = js_sys::Object::new();
+        Reflect::set(
+            &pages,
+            &JsValue::from_str("pages"),
+            &js_sys::Array::of1(&JsValue::from_f64(9999.0)),
+        )
+        .expect("set out-of-range pages");
+        let options = js_sys::Object::new();
+        Reflect::set(&options, &JsValue::from_str("strategy"), &pages).expect("set pages strategy");
+
+        let error = detect_pdf(TEXT_PDF, options.into()).expect_err("out-of-range pages must fail");
+        assert!(error_message(&error).contains("contains no in-range page numbers"));
     }
 }
