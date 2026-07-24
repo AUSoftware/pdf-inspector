@@ -25,7 +25,7 @@ pub enum PdfType {
 /// Strategy for which pages to scan during detection
 #[derive(Debug, Clone)]
 pub enum ScanStrategy {
-    /// Scan all pages, stop on first non-text page (current default).
+    /// Scan all pages, stop on first non-text page.
     /// Best for pipelines that route TextBased PDFs to fast extraction.
     EarlyExit,
     /// Scan all pages, no early exit.
