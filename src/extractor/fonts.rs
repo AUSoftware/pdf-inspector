@@ -539,14 +539,19 @@ fn tounicode_maps_codes(font_dict: &lopdf::Dictionary, cmaps: &FontCMaps, codes:
     let Some(entry) = cmaps.get_by_obj(obj_ref.0) else {
         return false;
     };
-    // At least one gid code mapped means the CMap addresses these codes;
-    // remaining unmapped codes are subset leftovers (e.g. the component
-    // glyphs of an emoji ZWJ sequence mapped whole on its first code).
-    // Fonts whose CMap ignores the gid codes entirely stay flagged, and
-    // the downstream garbage/encoding checks still catch partial damage.
-    codes
-        .iter()
-        .any(|&code| entry.primary.lookup(code as u16).is_some())
+    // At least one gid code usably mapped means the CMap addresses these
+    // codes; remaining unmapped codes are subset leftovers (e.g. the
+    // component glyphs of an emoji ZWJ sequence mapped whole on its first
+    // code). A mapping is usable only when extraction would accept it —
+    // empty or U+FFFD results are rejected there as invalid. Fonts whose
+    // CMap ignores the gid codes entirely stay flagged, and the downstream
+    // garbage/encoding checks still catch partial damage.
+    codes.iter().any(|&code| {
+        entry
+            .primary
+            .lookup(code as u16)
+            .is_some_and(|s| !s.is_empty() && !s.contains('\u{FFFD}'))
+    })
 }
 
 /// Parse font encoding from a font dictionary
@@ -2067,5 +2072,12 @@ end",
         // A ToUnicode that never addresses the gid codes leaves them
         // unresolvable.
         assert!(gid_flagged(Some("<10> <0041>")));
+    }
+
+    #[test]
+    fn gid_differences_with_replacement_char_tounicode_are_flagged() {
+        // A mapping to U+FFFD is not usable — extraction rejects it as an
+        // invalid CMap result — so it must not clear the gid flag.
+        assert!(gid_flagged(Some("<01> <FFFD>\n<02> <FFFD>")));
     }
 }
