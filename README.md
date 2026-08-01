@@ -24,14 +24,17 @@ Built by [Firecrawl](https://firecrawl.dev) to handle text-based PDFs locally in
 
 ## Benchmark
 
-Evaluated on the [opendataloader-bench](https://github.com/opendataloader-project/opendataloader-bench) corpus (200 PDFs). This head-to-head comparison uses each parser's Python API in a single process with one worker and OCR disabled. Scores are 0-1, higher is better.
+Evaluated on the [opendataloader-bench](https://github.com/opendataloader-project/opendataloader-bench) corpus (200 PDFs). Only local engines without model-based PDF parsing are shown; OCR was disabled. Scores are 0-1, higher is better.
 
 | Engine | Overall | Reading Order (NID) | Tables (TEDS) | Headings (MHS) | Speed (200 docs) |
 |---|---|---|---|---|---|
 | pdf-inspector | **0.875** | **0.915** | **0.814** | 0.788 | **0.470s** |
 | liteparse | 0.873 | 0.913 | 0.693 | **0.811** | 0.750s |
+| opendataloader | 0.831 | 0.902 | 0.489 | 0.739 | 3.000s |
+| pymupdf4llm | 0.732 | 0.885 | 0.401 | 0.412 | 18.173s |
+| markitdown | 0.589 | 0.844 | 0.273 | 0.000 | 22.790s |
 
-Results were refreshed on July 31, 2026, on an Apple M4 Pro using pdf-inspector 0.2.6 and LiteParse 2.10.1. Speed is the median of five alternating complete corpus runs after an excluded warm-up run. pdf-inspector completed the corpus 1.60x faster, with 37.3% lower runtime.
+pdf-inspector 0.2.6 and LiteParse 2.10.1 were refreshed on July 31, 2026, on an Apple M4 Pro. Their speed is the median of five alternating complete corpus runs after an excluded warm-up run; pdf-inspector completed the corpus 1.60x faster, with 37.3% lower runtime. The remaining rows use the latest stored results for OpenDataLoader 2.2.1, PyMuPDF4LLM 0.2.0, and MarkItDown 0.1.5 from the results repository. Their Apple M4 timings are included as reference rather than as part of the same timed run.
 
 The complete parser configuration, per-document predictions, evaluator output, and generated charts are available in the [reproducible results branch](https://github.com/firecrawl/opendataloader-bench/tree/abi/pdf-parser-benchmark-results).
 
