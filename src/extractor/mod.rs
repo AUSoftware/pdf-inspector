@@ -1532,6 +1532,95 @@ mod tests {
     }
 
     #[test]
+    fn inline_numeric_run_near_page_edge_is_not_removed() {
+        let mut items = vec![
+            make_merge_item("Total", 100.0, 30.0),
+            make_merge_item("730", 136.0, 18.0),
+            make_merge_item("seats", 160.0, 30.0),
+        ];
+        for item in &mut items {
+            item.y = 780.0;
+        }
+
+        let lines = group_into_lines(items);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text(), "Total 730 seats");
+    }
+
+    #[test]
+    fn numeric_page_footer_separated_from_label_is_removed() {
+        let mut page_number = make_merge_item("42", 25.0, 12.0);
+        page_number.y = 50.0;
+        let mut footer_label = make_merge_item("DOCUMENT FOOTER", 60.0, 100.0);
+        footer_label.y = 50.0;
+
+        let lines = group_into_lines(vec![page_number, footer_label]);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text(), "DOCUMENT FOOTER");
+    }
+
+    #[test]
+    fn recurring_numeric_folio_is_removed_even_beside_a_label() {
+        let mut items = Vec::new();
+        for (page, value) in [(1, "42"), (2, "43"), (3, "44")] {
+            let mut page_number = make_merge_item(value, 25.0, 12.0);
+            page_number.page = page;
+            page_number.y = 50.0;
+            let mut footer_label = make_merge_item("DOCUMENT FOOTER", 43.0, 100.0);
+            footer_label.page = page;
+            footer_label.y = 50.0;
+            items.extend([page_number, footer_label]);
+        }
+
+        let lines = group_into_lines(items);
+
+        assert_eq!(lines.len(), 3);
+        assert!(lines.iter().all(|line| line.text() == "DOCUMENT FOOTER"));
+    }
+
+    #[test]
+    fn repeated_numeric_body_column_is_not_treated_as_a_folio() {
+        let mut items = Vec::new();
+        for page in 1..=3 {
+            let mut row_number = make_merge_item("13", 72.0, 12.0);
+            row_number.page = page;
+            row_number.y = 730.0;
+            let mut name = make_merge_item("Person", 90.0, 42.0);
+            name.page = page;
+            name.y = 730.0;
+            items.extend([row_number, name]);
+        }
+
+        let lines = group_into_lines(items);
+
+        assert_eq!(lines.len(), 3);
+        assert!(lines.iter().all(|line| line.text() == "13 Person"));
+    }
+
+    #[test]
+    fn short_numeric_context_near_page_edge_is_preserved() {
+        let mut chapter = make_merge_item("Chapter", 100.0, 45.0);
+        chapter.y = 760.0;
+        let mut chapter_number = make_merge_item("1", 151.0, 6.0);
+        chapter_number.y = 760.0;
+
+        let chapter_lines = group_into_lines(vec![chapter, chapter_number]);
+        assert_eq!(chapter_lines.len(), 1);
+        assert_eq!(chapter_lines[0].text(), "Chapter 1");
+
+        let mut year = make_merge_item("2026", 100.0, 24.0);
+        year.y = 760.0;
+        let mut report = make_merge_item("Report", 130.0, 36.0);
+        report.y = 760.0;
+
+        let report_lines = group_into_lines(vec![year, report]);
+        assert_eq!(report_lines.len(), 1);
+        assert_eq!(report_lines[0].text(), "2026 Report");
+    }
+
+    #[test]
     fn test_bold_italic_detection() {
         // Test bold detection
         assert!(is_bold_font("Arial-Bold"));

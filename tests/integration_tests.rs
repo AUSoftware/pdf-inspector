@@ -13,7 +13,7 @@ use pdf_inspector::{
 };
 use std::collections::HashSet;
 
-fn make_minimal_text_pdf() -> Vec<u8> {
+fn make_text_pdf(content: &str, media_box: &str) -> Vec<u8> {
     let mut pdf = b"%PDF-1.4\n".to_vec();
     let mut offsets = vec![0usize];
 
@@ -40,10 +40,11 @@ fn make_minimal_text_pdf() -> Vec<u8> {
         &mut pdf,
         &mut offsets,
         3,
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        &format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [{media_box}] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
+        ),
     );
 
-    let content = "BT /F1 12 Tf 100 700 Td (Hello World) Tj 0 -14 Td (Second Line) Tj 0 -14 Td (Third Line) Tj ET";
     add_object(
         &mut pdf,
         &mut offsets,
@@ -77,6 +78,35 @@ fn make_minimal_text_pdf() -> Vec<u8> {
     );
 
     pdf
+}
+
+fn make_minimal_text_pdf() -> Vec<u8> {
+    make_text_pdf(
+        "BT /F1 12 Tf 100 700 Td (Hello World) Tj 0 -14 Td (Second Line) Tj 0 -14 Td (Third Line) Tj ET",
+        "0 0 612 792",
+    )
+}
+
+fn make_digit_run_repro_pdf() -> Vec<u8> {
+    let content = r#"BT
+/F1 12 Tf
+1 0 0 1 72 780 Tm (A\)) Tj
+1 0 0 1 96 780 Tm (The) Tj
+1 0 0 1 126 780 Tm (total) Tj
+1 0 0 1 166 780 Tm (of) Tj
+1 0 0 1 186 780 Tm (730) Tj
+1 0 0 1 220 780 Tm (seats) Tj
+1 0 0 1 262 780 Tm (was) Tj
+1 0 0 1 296 780 Tm (approved.) Tj
+1 0 0 1 72 755 Tm (B\)) Tj
+1 0 0 1 96 755 Tm (let) Tj
+1 0 0 1 120 755 Tm (log) Tj
+1 0 0 1 150 755 Tm (2) Tj
+1 0 0 1 164 755 Tm (=) Tj
+1 0 0 1 180 755 Tm (a) Tj
+1 0 0 1 72 720 Tm (C\) Control: The total of 730 seats was approved. let log 2 = a) Tj
+ET"#;
+    make_text_pdf(content, "0 0 595 842")
 }
 
 fn truncate_eof_marker(mut pdf: Vec<u8>) -> Vec<u8> {
@@ -328,6 +358,21 @@ fn test_group_into_lines_sorting_by_x() {
     let lines = group_into_lines(items);
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0].text(), "First Second Third");
+}
+
+#[test]
+fn test_digit_only_text_runs_are_preserved_in_markdown() {
+    let pdf = make_digit_run_repro_pdf();
+
+    let items = extract_text_with_positions_mem(&pdf).expect("extract positioned text");
+    assert!(items.iter().any(|item| item.text == "730"));
+    assert!(items.iter().any(|item| item.text == "2"));
+
+    let result = process_pdf_mem(&pdf).expect("convert PDF to markdown");
+    assert_eq!(
+        result.markdown.expect("markdown output").trim(),
+        "A) The total of 730 seats was approved.\nB) let log 2 = a\nC) Control: The total of 730 seats was approved. let log 2 = a"
+    );
 }
 
 // ============================================================================
