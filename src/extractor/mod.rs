@@ -27,6 +27,7 @@ pub use crate::text_utils::{is_bold_font, is_italic_font};
 pub use crate::types::{ItemType, TextLine};
 pub(crate) use fonts::FontStyleCache;
 pub(crate) use layout::detect_columns;
+pub(crate) use layout::filter_recurring_markdown_page_numbers;
 pub(crate) use layout::group_into_lines_with_thresholds;
 pub(crate) use layout::group_into_lines_with_thresholds_and_charts;
 pub(crate) use layout::group_into_lines_with_thresholds_and_regions;
@@ -1581,6 +1582,51 @@ mod tests {
     }
 
     #[test]
+    fn document_folio_filter_survives_per_page_layout_splitting() {
+        let mut items = Vec::new();
+        for (page, value) in [(1, "42"), (2, "43"), (3, "44")] {
+            let mut page_number = make_merge_item(value, 25.0, 12.0);
+            page_number.page = page;
+            page_number.y = 50.0;
+            let mut footer_label = make_merge_item("DOCUMENT FOOTER", 43.0, 100.0);
+            footer_label.page = page;
+            footer_label.y = 50.0;
+            items.extend([page_number, footer_label]);
+        }
+
+        let filtered = filter_recurring_markdown_page_numbers(items);
+        let mut lines = Vec::new();
+        for page in 1..=3 {
+            let page_items = filtered
+                .iter()
+                .filter(|item| item.page == page)
+                .cloned()
+                .collect();
+            lines.extend(group_into_lines_with_thresholds_and_charts(
+                page_items,
+                &HashMap::new(),
+                &HashSet::new(),
+                &HashMap::new(),
+            ));
+        }
+
+        assert_eq!(lines.len(), 3);
+        assert!(lines.iter().all(|line| line.text() == "DOCUMENT FOOTER"));
+    }
+
+    #[test]
+    fn numeric_page_edge_candidates_do_not_contextualize_each_other() {
+        let mut page_number = make_merge_item("42", 25.0, 12.0);
+        page_number.y = 50.0;
+        let mut year = make_merge_item("2026", 43.0, 24.0);
+        year.y = 50.0;
+
+        let lines = group_into_lines(vec![page_number, year]);
+
+        assert!(lines.is_empty());
+    }
+
+    #[test]
     fn repeated_numeric_body_column_is_not_treated_as_a_folio() {
         let mut items = Vec::new();
         for page in 1..=3 {
@@ -1618,6 +1664,17 @@ mod tests {
         let report_lines = group_into_lines(vec![year, report]);
         assert_eq!(report_lines.len(), 1);
         assert_eq!(report_lines[0].text(), "2026 Report");
+
+        let mut chapter = make_merge_item("Chapter", 100.0, 45.0);
+        chapter.y = 760.0;
+        let mut chapter_number = make_merge_item("1", 151.0, 6.0);
+        chapter_number.y = 760.0;
+        let mut edition_year = make_merge_item("2026", 163.0, 24.0);
+        edition_year.y = 760.0;
+
+        let chained_lines = group_into_lines(vec![chapter, chapter_number, edition_year]);
+        assert_eq!(chained_lines.len(), 1);
+        assert_eq!(chained_lines[0].text(), "Chapter 1 2026");
     }
 
     #[test]

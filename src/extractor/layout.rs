@@ -962,6 +962,7 @@ fn spans_multiple_columns(item: &TextItem, columns: &[ColumnRegion]) -> bool {
 
 const PAGE_NUMBER_Y_TOLERANCE: f32 = 3.0;
 const PAGE_NUMBER_CONTEXT_GAP_EM: f32 = 1.5;
+const PAGE_NUMBER_SLOT_BUCKET_WIDTH: f32 = 24.0;
 
 fn page_number_value(item: &TextItem) -> Option<u32> {
     let text = item.text.trim();
@@ -985,59 +986,175 @@ fn page_number_value(item: &TextItem) -> Option<u32> {
 /// Running headers and footers can place a page number directly beside a label,
 /// making proximity alone ambiguous. A sequence of three or more increasing
 /// values at the same geometry is strong document-level page-number evidence.
-fn recurring_page_number_mask(items: &[TextItem]) -> Vec<bool> {
+fn recurring_page_number_mask(items: &[TextItem], candidate_values: &[Option<u32>]) -> Vec<bool> {
     let candidates: Vec<(usize, u32)> = items
         .iter()
         .enumerate()
-        .filter_map(|(index, item)| page_number_value(item).map(|value| (index, value)))
+        .filter_map(|(index, _)| candidate_values[index].map(|value| (index, value)))
         .collect();
     let mut recurring = vec![false; items.len()];
-
-    for &(index, _) in &candidates {
+    let mut candidate_buckets: HashMap<(i32, i32), Vec<(usize, u32)>> = HashMap::new();
+    for &(index, value) in &candidates {
         let item = &items[index];
-        let mut values_by_page: HashMap<u32, u32> = HashMap::new();
+        let y_bucket = (item.y / PAGE_NUMBER_Y_TOLERANCE).floor() as i32;
+        let x_bucket = (item.x / PAGE_NUMBER_SLOT_BUCKET_WIDTH).floor() as i32;
+        candidate_buckets
+            .entry((y_bucket, x_bucket))
+            .or_default()
+            .push((index, value));
+    }
 
-        for &(other_index, value) in &candidates {
-            let other = &items[other_index];
-            let x_tolerance = item.font_size.max(other.font_size) * PAGE_NUMBER_CONTEXT_GAP_EM;
-            if (other.x - item.x).abs() <= x_tolerance
-                && (other.y - item.y).abs() < PAGE_NUMBER_Y_TOLERANCE
-                && (other.font_size - item.font_size).abs()
-                    <= item.font_size.max(other.font_size) * 0.2
-            {
-                values_by_page.entry(other.page).or_insert(value);
+    // Candidates emitted at identical geometry have identical comparison
+    // windows, so evaluate that window once. The spatial index limits each
+    // window to nearby page-edge slots while the exact checks preserve the
+    // original per-candidate classification semantics.
+    let mut recurrence_by_geometry: HashMap<(u32, u32, u32), bool> = HashMap::new();
+    for (index, _) in candidates {
+        let item = &items[index];
+        let geometry = (item.x.to_bits(), item.y.to_bits(), item.font_size.to_bits());
+        if let Some(&is_recurring) = recurrence_by_geometry.get(&geometry) {
+            recurring[index] = is_recurring;
+            continue;
+        }
+
+        let y_bucket = (item.y / PAGE_NUMBER_Y_TOLERANCE).floor() as i32;
+        let x_bucket = (item.x / PAGE_NUMBER_SLOT_BUCKET_WIDTH).floor() as i32;
+        // A matching font can be at most 25% larger because the precise
+        // compatibility check below allows a 20% difference from the larger
+        // font. Use that bound to limit the neighboring X buckets searched.
+        let search_x = item.font_size.max(1.0) * PAGE_NUMBER_CONTEXT_GAP_EM / 0.8;
+        let x_bucket_radius = (search_x / PAGE_NUMBER_SLOT_BUCKET_WIDTH).ceil() as i32 + 1;
+        // Keep the earliest item from each page, matching the original
+        // candidate-order `or_insert` behavior without sorting query results.
+        let mut values_by_page: HashMap<u32, (usize, u32)> = HashMap::new();
+
+        for nearby_y in y_bucket - 1..=y_bucket + 1 {
+            for nearby_x in x_bucket - x_bucket_radius..=x_bucket + x_bucket_radius {
+                let Some(nearby_candidates) = candidate_buckets.get(&(nearby_y, nearby_x)) else {
+                    continue;
+                };
+                for &(other_index, value) in nearby_candidates {
+                    let other = &items[other_index];
+                    let max_font_size = item.font_size.max(other.font_size);
+                    let x_tolerance = max_font_size * PAGE_NUMBER_CONTEXT_GAP_EM;
+                    if (other.x - item.x).abs() > x_tolerance
+                        || (other.y - item.y).abs() >= PAGE_NUMBER_Y_TOLERANCE
+                        || (other.font_size - item.font_size).abs() > max_font_size * 0.2
+                    {
+                        continue;
+                    }
+
+                    values_by_page
+                        .entry(other.page)
+                        .and_modify(|existing| {
+                            if other_index < existing.0 {
+                                *existing = (other_index, value);
+                            }
+                        })
+                        .or_insert((other_index, value));
+                }
             }
         }
 
-        if values_by_page.len() < 3 {
-            continue;
-        }
-        let mut page_values: Vec<(u32, u32)> = values_by_page.into_iter().collect();
+        let mut page_values: Vec<(u32, u32)> = values_by_page
+            .into_iter()
+            .map(|(page, (_, value))| (page, value))
+            .collect();
         page_values.sort_unstable_by_key(|&(page, _)| page);
-        if page_values
-            .iter()
-            .map(|&(_, value)| value)
-            .collect::<HashSet<_>>()
-            .len()
-            < 3
-        {
-            continue;
-        }
-
-        let plausible_steps = page_values
-            .windows(2)
-            .filter(|pair| {
-                let (page_a, value_a) = pair[0];
-                let (page_b, value_b) = pair[1];
-                value_b > value_a && value_b - value_a <= (page_b - page_a) * 4 + 2
-            })
-            .count();
-        if plausible_steps * 4 >= (page_values.len() - 1) * 3 {
-            recurring[index] = true;
-        }
+        let is_recurring = page_values.len() >= 3
+            && page_values
+                .iter()
+                .map(|&(_, value)| value)
+                .collect::<HashSet<_>>()
+                .len()
+                >= 3
+            && page_values
+                .windows(2)
+                .filter(|pair| {
+                    let (page_a, value_a) = pair[0];
+                    let (page_b, value_b) = pair[1];
+                    value_b > value_a && value_b - value_a <= (page_b - page_a) * 4 + 2
+                })
+                .count()
+                * 4
+                >= (page_values.len() - 1) * 3;
+        recurrence_by_geometry.insert(geometry, is_recurring);
+        recurring[index] = is_recurring;
     }
 
     recurring
+}
+
+/// Identify page-edge numeric items that belong to a nearby content run.
+///
+/// Numeric candidates on their own do not establish context for one another.
+/// A connected same-baseline run is contextual only when it also contains a
+/// non-candidate item, preserving lines such as `Chapter 1 2026` while still
+/// removing isolated numeric footer clusters.
+fn page_number_context_mask(items: &[TextItem], candidate_values: &[Option<u32>]) -> Vec<bool> {
+    let mut contextual = vec![false; items.len()];
+    let mut indices_by_page: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (index, item) in items.iter().enumerate() {
+        if !item.text.trim().is_empty() {
+            indices_by_page.entry(item.page).or_default().push(index);
+        }
+    }
+
+    for mut page_indices in indices_by_page.into_values() {
+        page_indices.sort_by(|&left, &right| {
+            items[right]
+                .y
+                .total_cmp(&items[left].y)
+                .then(items[left].x.total_cmp(&items[right].x))
+        });
+
+        let mut rows: Vec<Vec<usize>> = Vec::new();
+        for index in page_indices {
+            if rows.last().is_some_and(|row| {
+                (items[row[0]].y - items[index].y).abs() < PAGE_NUMBER_Y_TOLERANCE
+            }) {
+                rows.last_mut().unwrap().push(index);
+            } else {
+                rows.push(vec![index]);
+            }
+        }
+
+        for mut row in rows {
+            row.sort_by(|&left, &right| items[left].x.total_cmp(&items[right].x));
+            let mut start = 0;
+            while start < row.len() {
+                let mut end = start + 1;
+                let first = &items[row[start]];
+                let mut group_right = first.x + effective_width(first);
+                let mut group_font_size = first.font_size;
+
+                while end < row.len() {
+                    let item = &items[row[end]];
+                    let gap = item.x - group_right;
+                    if gap > group_font_size.max(item.font_size) * PAGE_NUMBER_CONTEXT_GAP_EM {
+                        break;
+                    }
+                    group_right = group_right.max(item.x + effective_width(item));
+                    group_font_size = group_font_size.max(item.font_size);
+                    end += 1;
+                }
+
+                if row[start..end]
+                    .iter()
+                    .any(|&index| candidate_values[index].is_none())
+                {
+                    for &index in &row[start..end] {
+                        if candidate_values[index].is_some() {
+                            contextual[index] = true;
+                        }
+                    }
+                }
+                start = end;
+            }
+        }
+    }
+
+    contextual
 }
 
 /// Decide which digit-only page-edge items can be removed before layout.
@@ -1046,54 +1163,27 @@ fn recurring_page_number_mask(items: &[TextItem]) -> Vec<bool> {
 /// item attached to neighboring content on the same baseline is therefore kept,
 /// unless document-level recurrence identifies it as a running folio.
 fn page_number_removal_mask(items: &[TextItem]) -> Vec<bool> {
-    let recurring = recurring_page_number_mask(items);
-    let mut baseline_buckets: HashMap<(u32, i32), Vec<usize>> = HashMap::new();
-    for (index, item) in items.iter().enumerate() {
-        let bucket = (item.y / PAGE_NUMBER_Y_TOLERANCE).floor() as i32;
-        baseline_buckets
-            .entry((item.page, bucket))
-            .or_default()
-            .push(index);
-    }
+    let candidate_values: Vec<Option<u32>> = items.iter().map(page_number_value).collect();
+    let recurring = recurring_page_number_mask(items, &candidate_values);
+    let contextual = page_number_context_mask(items, &candidate_values);
 
-    items
+    candidate_values
         .iter()
         .enumerate()
-        .map(|(index, item)| {
-            if page_number_value(item).is_none() {
-                return false;
-            }
-            if recurring[index] {
-                return true;
-            }
+        .map(|(index, value)| value.is_some() && (recurring[index] || !contextual[index]))
+        .collect()
+}
 
-            let bucket = (item.y / PAGE_NUMBER_Y_TOLERANCE).floor() as i32;
-            let has_context = (bucket - 1..=bucket + 1).any(|nearby_bucket| {
-                baseline_buckets
-                    .get(&(item.page, nearby_bucket))
-                    .is_some_and(|indices| {
-                        indices.iter().any(|&other_index| {
-                            if other_index == index {
-                                return false;
-                            }
-                            let other = &items[other_index];
-                            if other.text.trim().is_empty()
-                                || (other.y - item.y).abs() >= PAGE_NUMBER_Y_TOLERANCE
-                            {
-                                return false;
-                            }
-
-                            let gap = if other.x < item.x {
-                                item.x - (other.x + effective_width(other))
-                            } else {
-                                other.x - (item.x + effective_width(item))
-                            };
-                            gap <= item.font_size.max(other.font_size) * PAGE_NUMBER_CONTEXT_GAP_EM
-                        })
-                    })
-            });
-            !has_context
-        })
+/// Remove recurring numeric folios before Markdown layout partitions the
+/// document into pages, bands, or chart zones. Standalone filtering remains
+/// local to each layout partition so unrelated bands cannot establish context.
+pub(crate) fn filter_recurring_markdown_page_numbers(items: Vec<TextItem>) -> Vec<TextItem> {
+    let candidate_values: Vec<Option<u32>> = items.iter().map(page_number_value).collect();
+    let remove = recurring_page_number_mask(&items, &candidate_values);
+    items
+        .into_iter()
+        .zip(remove)
+        .filter_map(|(item, remove)| (!remove).then_some(item))
         .collect()
 }
 
@@ -1873,6 +1963,31 @@ mod tests {
         ];
         let lines = group_single_column(items, 0.10);
         assert_eq!(lines.len(), 1, "numbered table cells stay on one line");
+    }
+
+    #[test]
+    fn recurring_folio_is_found_amid_dense_numeric_page_bands() {
+        let mut items = Vec::new();
+        let mut folio_indices = Vec::new();
+        for page in 1..=20 {
+            for column in 0..40 {
+                let mut cell = make_item(page, 20.0 + column as f32 * 14.0, 730.0, "13");
+                cell.font_size = 8.0;
+                items.push(cell);
+            }
+            folio_indices.push(items.len());
+            items.push(make_item(page, 500.0, 50.0, &(40 + page).to_string()));
+        }
+
+        let candidate_values: Vec<Option<u32>> = items.iter().map(page_number_value).collect();
+        let recurring = recurring_page_number_mask(&items, &candidate_values);
+
+        assert!(folio_indices.iter().all(|&index| recurring[index]));
+        assert!(items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.y == 730.0)
+            .all(|(index, _)| !recurring[index]));
     }
 
     #[test]

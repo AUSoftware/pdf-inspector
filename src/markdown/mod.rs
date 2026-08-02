@@ -1670,6 +1670,11 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
             &page_image_regions,
         )
     } else {
+        // Apply document-level folio detection before any page is partitioned
+        // into physical bands or chart/prose zones. Each sub-layout still
+        // decides standalone status from its own local baseline context.
+        let non_table_items =
+            crate::extractor::filter_recurring_markdown_page_numbers(non_table_items);
         // Separate items into physical-band pages, chart/prose pages, and
         // ordinary pages. Chart/prose pages need a different reading order:
         // each chart is a full-width separator, while prose above and below
