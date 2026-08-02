@@ -27,7 +27,7 @@ pub use crate::text_utils::{is_bold_font, is_italic_font};
 pub use crate::types::{ItemType, TextLine};
 pub(crate) use fonts::FontStyleCache;
 pub(crate) use layout::detect_columns;
-pub(crate) use layout::filter_recurring_markdown_page_numbers;
+pub(crate) use layout::filter_explicit_markdown_page_numbers;
 pub(crate) use layout::group_into_lines_with_thresholds;
 pub(crate) use layout::group_into_lines_with_thresholds_and_charts;
 pub(crate) use layout::group_into_lines_with_thresholds_and_regions;
@@ -1563,38 +1563,51 @@ mod tests {
     }
 
     #[test]
-    fn recurring_numeric_folio_is_removed_even_beside_a_label() {
-        let mut items = Vec::new();
-        for (page, value) in [(1, "42"), (2, "43"), (3, "44")] {
-            let mut page_number = make_merge_item(value, 25.0, 12.0);
-            page_number.page = page;
-            page_number.y = 50.0;
-            let mut footer_label = make_merge_item("DOCUMENT FOOTER", 43.0, 100.0);
-            footer_label.page = page;
-            footer_label.y = 50.0;
-            items.extend([page_number, footer_label]);
+    fn labeled_page_number_is_removed_in_a_short_document() {
+        let mut label = make_merge_item("Page", 25.0, 28.0);
+        label.y = 50.0;
+        let mut page_number = make_merge_item("42", 57.0, 12.0);
+        page_number.y = 50.0;
+
+        let lines = group_into_lines(vec![label, page_number]);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text(), "Page");
+    }
+
+    #[test]
+    fn labeled_page_number_with_running_header_suffix_is_removed() {
+        let mut items = vec![
+            make_merge_item("Page", 25.0, 28.0),
+            make_merge_item("42", 57.0, 12.0),
+            make_merge_item("of", 73.0, 12.0),
+            make_merge_item("100", 89.0, 18.0),
+            make_merge_item("Report header", 111.0, 78.0),
+        ];
+        for item in &mut items {
+            item.y = 50.0;
         }
 
         let lines = group_into_lines(items);
 
-        assert_eq!(lines.len(), 3);
-        assert!(lines.iter().all(|line| line.text() == "DOCUMENT FOOTER"));
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text(), "Page of 100 Report header");
     }
 
     #[test]
     fn document_folio_filter_survives_per_page_layout_splitting() {
         let mut items = Vec::new();
         for (page, value) in [(1, "42"), (2, "43"), (3, "44")] {
-            let mut page_number = make_merge_item(value, 25.0, 12.0);
+            let mut label = make_merge_item("Page", 25.0, 28.0);
+            label.page = page;
+            label.y = 50.0;
+            let mut page_number = make_merge_item(value, 57.0, 12.0);
             page_number.page = page;
             page_number.y = 50.0;
-            let mut footer_label = make_merge_item("DOCUMENT FOOTER", 43.0, 100.0);
-            footer_label.page = page;
-            footer_label.y = 50.0;
-            items.extend([page_number, footer_label]);
+            items.extend([label, page_number]);
         }
 
-        let filtered = filter_recurring_markdown_page_numbers(items);
+        let filtered = filter_explicit_markdown_page_numbers(items);
         let mut lines = Vec::new();
         for page in 1..=3 {
             let page_items = filtered
@@ -1611,7 +1624,7 @@ mod tests {
         }
 
         assert_eq!(lines.len(), 3);
-        assert!(lines.iter().all(|line| line.text() == "DOCUMENT FOOTER"));
+        assert!(lines.iter().all(|line| line.text() == "Page"));
     }
 
     #[test]
@@ -1627,10 +1640,10 @@ mod tests {
     }
 
     #[test]
-    fn repeated_numeric_body_column_is_not_treated_as_a_folio() {
+    fn incrementing_numeric_body_column_is_not_treated_as_a_folio() {
         let mut items = Vec::new();
-        for page in 1..=3 {
-            let mut row_number = make_merge_item("13", 72.0, 12.0);
+        for (page, value) in [(1, "13"), (2, "14"), (3, "15")] {
+            let mut row_number = make_merge_item(value, 72.0, 12.0);
             row_number.page = page;
             row_number.y = 730.0;
             let mut name = make_merge_item("Person", 90.0, 42.0);
@@ -1642,7 +1655,63 @@ mod tests {
         let lines = group_into_lines(items);
 
         assert_eq!(lines.len(), 3);
-        assert!(lines.iter().all(|line| line.text() == "13 Person"));
+        assert_eq!(lines[0].text(), "13 Person");
+        assert_eq!(lines[1].text(), "14 Person");
+        assert_eq!(lines[2].text(), "15 Person");
+    }
+
+    #[test]
+    fn page_number_prefix_does_not_remove_substantive_text_during_layout() {
+        let mut items = vec![
+            make_merge_item("Page", 25.0, 28.0),
+            make_merge_item("42", 57.0, 12.0),
+            make_merge_item("explains", 73.0, 44.0),
+            make_merge_item("the result", 121.0, 55.0),
+        ];
+        for item in &mut items {
+            item.y = 50.0;
+        }
+
+        let lines = group_into_lines(items);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text(), "Page 42 explains the result");
+    }
+
+    #[test]
+    fn repeated_page_number_prefix_with_substantive_text_is_preserved_during_layout() {
+        let mut items = Vec::new();
+        for (page, value, chapter) in [(1, "42", "Chapter 1"), (2, "43", "Chapter 2")] {
+            let mut label = make_merge_item("Page", 25.0, 28.0);
+            label.page = page;
+            label.y = 50.0;
+            let mut page_number = make_merge_item(value, 57.0, 12.0);
+            page_number.page = page;
+            page_number.y = 50.0;
+            let mut suffix = make_merge_item(chapter, 73.0, 58.0);
+            suffix.page = page;
+            suffix.y = 50.0;
+            items.extend([label, page_number, suffix]);
+        }
+
+        let lines = group_into_lines(items);
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text(), "Page 42 Chapter 1");
+        assert_eq!(lines[1].text(), "Page 43 Chapter 2");
+    }
+
+    #[test]
+    fn page_number_phrase_in_the_page_body_is_preserved() {
+        let items = vec![
+            make_merge_item("Page", 25.0, 28.0),
+            make_merge_item("42", 57.0, 12.0),
+        ];
+
+        let lines = group_into_lines(items);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text(), "Page 42");
     }
 
     #[test]

@@ -962,7 +962,6 @@ fn spans_multiple_columns(item: &TextItem, columns: &[ColumnRegion]) -> bool {
 
 const PAGE_NUMBER_Y_TOLERANCE: f32 = 3.0;
 const PAGE_NUMBER_CONTEXT_GAP_EM: f32 = 1.5;
-const PAGE_NUMBER_SLOT_BUCKET_WIDTH: f32 = 24.0;
 
 fn page_number_value(item: &TextItem) -> Option<u32> {
     let text = item.text.trim();
@@ -981,118 +980,18 @@ fn page_number_value(item: &TextItem) -> Option<u32> {
     text.parse().ok()
 }
 
-/// Identify numeric folios that recur in the same page-edge slot.
-///
-/// Running headers and footers can place a page number directly beside a label,
-/// making proximity alone ambiguous. A sequence of three or more increasing
-/// values at the same geometry is strong document-level page-number evidence.
-fn recurring_page_number_mask(items: &[TextItem], candidate_values: &[Option<u32>]) -> Vec<bool> {
-    let candidates: Vec<(usize, u32)> = items
-        .iter()
-        .enumerate()
-        .filter_map(|(index, _)| candidate_values[index].map(|value| (index, value)))
-        .collect();
-    let mut recurring = vec![false; items.len()];
-    let mut candidate_buckets: HashMap<(i32, i32), Vec<(usize, u32)>> = HashMap::new();
-    for &(index, value) in &candidates {
-        let item = &items[index];
-        let y_bucket = (item.y / PAGE_NUMBER_Y_TOLERANCE).floor() as i32;
-        let x_bucket = (item.x / PAGE_NUMBER_SLOT_BUCKET_WIDTH).floor() as i32;
-        candidate_buckets
-            .entry((y_bucket, x_bucket))
-            .or_default()
-            .push((index, value));
-    }
-
-    // Candidates emitted at identical geometry have identical comparison
-    // windows, so evaluate that window once. The spatial index limits each
-    // window to nearby page-edge slots while the exact checks preserve the
-    // original per-candidate classification semantics.
-    let mut recurrence_by_geometry: HashMap<(u32, u32, u32), bool> = HashMap::new();
-    for (index, _) in candidates {
-        let item = &items[index];
-        let geometry = (item.x.to_bits(), item.y.to_bits(), item.font_size.to_bits());
-        if let Some(&is_recurring) = recurrence_by_geometry.get(&geometry) {
-            recurring[index] = is_recurring;
-            continue;
-        }
-
-        let y_bucket = (item.y / PAGE_NUMBER_Y_TOLERANCE).floor() as i32;
-        let x_bucket = (item.x / PAGE_NUMBER_SLOT_BUCKET_WIDTH).floor() as i32;
-        // A matching font can be at most 25% larger because the precise
-        // compatibility check below allows a 20% difference from the larger
-        // font. Use that bound to limit the neighboring X buckets searched.
-        let search_x = item.font_size.max(1.0) * PAGE_NUMBER_CONTEXT_GAP_EM / 0.8;
-        let x_bucket_radius = (search_x / PAGE_NUMBER_SLOT_BUCKET_WIDTH).ceil() as i32 + 1;
-        // Keep the earliest item from each page, matching the original
-        // candidate-order `or_insert` behavior without sorting query results.
-        let mut values_by_page: HashMap<u32, (usize, u32)> = HashMap::new();
-
-        for nearby_y in y_bucket - 1..=y_bucket + 1 {
-            for nearby_x in x_bucket - x_bucket_radius..=x_bucket + x_bucket_radius {
-                let Some(nearby_candidates) = candidate_buckets.get(&(nearby_y, nearby_x)) else {
-                    continue;
-                };
-                for &(other_index, value) in nearby_candidates {
-                    let other = &items[other_index];
-                    let max_font_size = item.font_size.max(other.font_size);
-                    let x_tolerance = max_font_size * PAGE_NUMBER_CONTEXT_GAP_EM;
-                    if (other.x - item.x).abs() > x_tolerance
-                        || (other.y - item.y).abs() >= PAGE_NUMBER_Y_TOLERANCE
-                        || (other.font_size - item.font_size).abs() > max_font_size * 0.2
-                    {
-                        continue;
-                    }
-
-                    values_by_page
-                        .entry(other.page)
-                        .and_modify(|existing| {
-                            if other_index < existing.0 {
-                                *existing = (other_index, value);
-                            }
-                        })
-                        .or_insert((other_index, value));
-                }
-            }
-        }
-
-        let mut page_values: Vec<(u32, u32)> = values_by_page
-            .into_iter()
-            .map(|(page, (_, value))| (page, value))
-            .collect();
-        page_values.sort_unstable_by_key(|&(page, _)| page);
-        let is_recurring = page_values.len() >= 3
-            && page_values
-                .iter()
-                .map(|&(_, value)| value)
-                .collect::<HashSet<_>>()
-                .len()
-                >= 3
-            && page_values
-                .windows(2)
-                .filter(|pair| {
-                    let (page_a, value_a) = pair[0];
-                    let (page_b, value_b) = pair[1];
-                    value_b > value_a && value_b - value_a <= (page_b - page_a) * 4 + 2
-                })
-                .count()
-                * 4
-                >= (page_values.len() - 1) * 3;
-        recurrence_by_geometry.insert(geometry, is_recurring);
-        recurring[index] = is_recurring;
-    }
-
-    recurring
-}
-
 /// Identify page-edge numeric items that belong to a nearby content run.
 ///
 /// Numeric candidates on their own do not establish context for one another.
 /// A connected same-baseline run is contextual only when it also contains a
 /// non-candidate item, preserving lines such as `Chapter 1 2026` while still
 /// removing isolated numeric footer clusters.
-fn page_number_context_mask(items: &[TextItem], candidate_values: &[Option<u32>]) -> Vec<bool> {
+fn page_number_context_masks(
+    items: &[TextItem],
+    candidate_values: &[Option<u32>],
+) -> (Vec<bool>, Vec<bool>) {
     let mut contextual = vec![false; items.len()];
+    let mut explicit_folio = vec![false; items.len()];
     let mut indices_by_page: HashMap<u32, Vec<usize>> = HashMap::new();
     for (index, item) in items.iter().enumerate() {
         if !item.text.trim().is_empty() {
@@ -1139,13 +1038,40 @@ fn page_number_context_mask(items: &[TextItem], candidate_values: &[Option<u32>]
                     end += 1;
                 }
 
-                if row[start..end]
+                let has_context = row[start..end]
                     .iter()
-                    .any(|&index| candidate_values[index].is_none())
-                {
-                    for &index in &row[start..end] {
+                    .any(|&index| candidate_values[index].is_none());
+                let has_candidate = row[start..end]
+                    .iter()
+                    .any(|&index| candidate_values[index].is_some());
+                if has_context && has_candidate {
+                    let group = &row[start..end];
+                    let group_text = group
+                        .iter()
+                        .map(|&index| items[index].text.trim())
+                        .filter(|text| !text.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let group_is_folio =
+                        crate::text_utils::is_explicit_page_number_expression(&group_text);
+                    for (position, &index) in group.iter().enumerate() {
                         if candidate_values[index].is_some() {
                             contextual[index] = true;
+                            let previous = position
+                                .checked_sub(1)
+                                .map(|position| items[group[position]].text.trim());
+                            let next = group
+                                .get(position + 1)
+                                .map(|&index| items[index].text.trim());
+                            let follows_page_label =
+                                previous.is_some_and(|text| text.eq_ignore_ascii_case("page"));
+                            let starts_of_expression =
+                                next.is_some_and(|text| text.eq_ignore_ascii_case("of"));
+                            let is_centered_folio = previous == Some("-") && next == Some("-");
+                            explicit_folio[index] = group_is_folio
+                                && (follows_page_label
+                                    || starts_of_expression
+                                    || is_centered_folio);
                         }
                     }
                 }
@@ -1154,32 +1080,32 @@ fn page_number_context_mask(items: &[TextItem], candidate_values: &[Option<u32>]
         }
     }
 
-    contextual
+    (contextual, explicit_folio)
 }
 
 /// Decide which digit-only page-edge items can be removed before layout.
 ///
 /// PDF producers commonly emit one text-showing operation per word. A numeric
-/// item attached to neighboring content on the same baseline is therefore kept,
-/// unless document-level recurrence identifies it as a running folio.
+/// item attached to neighboring content on the same baseline is therefore kept.
+/// Complete page-number expressions such as `Page 42` remain removable even
+/// though their numeric item has lexical context.
 fn page_number_removal_mask(items: &[TextItem]) -> Vec<bool> {
     let candidate_values: Vec<Option<u32>> = items.iter().map(page_number_value).collect();
-    let recurring = recurring_page_number_mask(items, &candidate_values);
-    let contextual = page_number_context_mask(items, &candidate_values);
+    let (contextual, explicit_folio) = page_number_context_masks(items, &candidate_values);
 
     candidate_values
         .iter()
         .enumerate()
-        .map(|(index, value)| value.is_some() && (recurring[index] || !contextual[index]))
+        .map(|(index, value)| explicit_folio[index] || (value.is_some() && !contextual[index]))
         .collect()
 }
 
-/// Remove recurring numeric folios before Markdown layout partitions the
-/// document into pages, bands, or chart zones. Standalone filtering remains
-/// local to each layout partition so unrelated bands cannot establish context.
-pub(crate) fn filter_recurring_markdown_page_numbers(items: Vec<TextItem>) -> Vec<TextItem> {
+/// Remove numeric folios before Markdown layout partitions the document into
+/// pages, bands, or chart zones. This preserves the complete baseline context
+/// needed to recognize expressions whose items could otherwise be separated.
+pub(crate) fn filter_explicit_markdown_page_numbers(items: Vec<TextItem>) -> Vec<TextItem> {
     let candidate_values: Vec<Option<u32>> = items.iter().map(page_number_value).collect();
-    let remove = recurring_page_number_mask(&items, &candidate_values);
+    let (_, remove) = page_number_context_masks(&items, &candidate_values);
     items
         .into_iter()
         .zip(remove)
@@ -1467,6 +1393,19 @@ fn group_into_lines_with_thresholds_and_regions_impl(
 
     for page in pages {
         let page_items: Vec<TextItem> = items.iter().filter(|i| i.page == page).cloned().collect();
+        // Page-edge numeric runs are weak evidence for column geometry. Keep
+        // contextual values for line assembly, but prevent their preservation
+        // from changing the page's inferred layout.
+        let column_detection_items: Vec<TextItem> = page_items
+            .iter()
+            .filter(|item| page_number_value(item).is_none())
+            .cloned()
+            .collect();
+        let column_detection_items = if column_detection_items.is_empty() {
+            &page_items
+        } else {
+            &column_detection_items
+        };
 
         // Use pre-computed threshold from fix_letterspaced_items if available
         // (computed before embedded-space removal, with full signal).
@@ -1478,7 +1417,7 @@ fn group_into_lines_with_thresholds_and_regions_impl(
         // their own positioned-region ordering and therefore stay on that path.
         if !chart_regions.contains_key(&page) {
             let preliminary_columns =
-                detect_columns(&page_items, page, table_pages.contains(&page));
+                detect_columns(column_detection_items, page, table_pages.contains(&page));
             let detected_split =
                 (preliminary_columns.len() == 2).then_some(preliminary_columns[0].x_max);
             if let Some(band) = image_regions.get(&page).and_then(|regions| {
@@ -1520,6 +1459,9 @@ fn group_into_lines_with_thresholds_and_regions_impl(
                 let col_input: Vec<TextItem> = page_items
                     .iter()
                     .filter(|it| {
+                        if page_number_value(it).is_some() {
+                            return false;
+                        }
                         let cx = it.x + it.width / 2.0;
                         // Tight bounds: this only blinds the histogram to
                         // chart-internal text; rows adjacent to the chart
@@ -1532,7 +1474,7 @@ fn group_into_lines_with_thresholds_and_regions_impl(
                     .collect();
                 detect_columns(&col_input, page, table_pages.contains(&page))
             }
-            None => detect_columns(&page_items, page, table_pages.contains(&page)),
+            None => detect_columns(column_detection_items, page, table_pages.contains(&page)),
         };
 
         if columns.len() <= 1 {
@@ -1963,31 +1905,6 @@ mod tests {
         ];
         let lines = group_single_column(items, 0.10);
         assert_eq!(lines.len(), 1, "numbered table cells stay on one line");
-    }
-
-    #[test]
-    fn recurring_folio_is_found_amid_dense_numeric_page_bands() {
-        let mut items = Vec::new();
-        let mut folio_indices = Vec::new();
-        for page in 1..=20 {
-            for column in 0..40 {
-                let mut cell = make_item(page, 20.0 + column as f32 * 14.0, 730.0, "13");
-                cell.font_size = 8.0;
-                items.push(cell);
-            }
-            folio_indices.push(items.len());
-            items.push(make_item(page, 500.0, 50.0, &(40 + page).to_string()));
-        }
-
-        let candidate_values: Vec<Option<u32>> = items.iter().map(page_number_value).collect();
-        let recurring = recurring_page_number_mask(&items, &candidate_values);
-
-        assert!(folio_indices.iter().all(|&index| recurring[index]));
-        assert!(items
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| item.y == 730.0)
-            .all(|(index, _)| !recurring[index]));
     }
 
     #[test]
