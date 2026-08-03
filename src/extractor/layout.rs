@@ -962,8 +962,10 @@ fn spans_multiple_columns(item: &TextItem, columns: &[ColumnRegion]) -> bool {
 
 const PAGE_NUMBER_Y_TOLERANCE: f32 = 3.0;
 const PAGE_NUMBER_CONTEXT_GAP_EM: f32 = 1.5;
-const REPEATED_FOLIO_MARGIN_Y: f32 = 60.0;
-const REPEATED_FOLIO_TOP_Y: f32 = 760.0;
+const PAGE_NUMBER_BOTTOM_Y: f32 = 100.0;
+const PAGE_NUMBER_TOP_Y: f32 = 720.0;
+const SPREAD_MIN_CONTENT_WIDTH_EM: f32 = 40.0;
+const SPREAD_EDGE_FRACTION: f32 = 0.25;
 
 type ContextualCandidateOccurrence = (u32, f32, Vec<(usize, u32)>);
 
@@ -977,7 +979,7 @@ fn page_number_value(item: &TextItem) -> Option<u32> {
     // Must be at top or bottom of page.
     // US Letter = 792pt, A4 = 841pt. Page numbers are typically in the
     // top ~5% or bottom ~12% of the page.
-    if item.y <= 720.0 && item.y >= 100.0 {
+    if item.y <= PAGE_NUMBER_TOP_Y && item.y >= PAGE_NUMBER_BOTTOM_Y {
         return None;
     }
 
@@ -1044,13 +1046,25 @@ fn mark_repeated_folio_candidates(
 
             let unique_values: HashSet<u32> = values.iter().map(|(_, value, _)| *value).collect();
             let mostly_unique = unique_values.len() * 5 >= values.len() * 4;
-            let increasing_pairs = values
+            let page_tracking_pairs = values
                 .windows(2)
-                .filter(|pair| pair[1].1 > pair[0].1)
+                .filter(|pair| {
+                    let page_delta = pair[1].0 - pair[0].0;
+                    let value_delta = pair[1].1.saturating_sub(pair[0].1);
+                    value_delta == page_delta || value_delta == page_delta.saturating_mul(2)
+                })
                 .count();
-            let mostly_increasing = increasing_pairs * 5 >= (values.len() - 1) * 4;
+            let mostly_tracks_page_order = page_tracking_pairs * 5 >= (values.len() - 1) * 4;
+            // A running folio can be offset by front matter or advance twice per
+            // PDF page in a two-page spread, but its magnitude should still be
+            // plausible for the document. This keeps changing metadata such as
+            // a sequence of years from becoming a deletion signal.
+            let max_plausible_folio = (document_page_count as u32).saturating_mul(4).max(100);
+            let plausible_magnitude = values
+                .iter()
+                .all(|(_, value, _)| *value <= max_plausible_folio);
 
-            if mostly_unique && mostly_increasing {
+            if mostly_unique && mostly_tracks_page_order && plausible_magnitude {
                 for (_, _, index) in values {
                     explicit_folio[index] = true;
                 }
@@ -1073,6 +1087,7 @@ fn mark_spread_folio_pairs(
     explicit_folio: &mut [bool],
 ) {
     let mut candidates_by_page: HashMap<u32, Vec<usize>> = HashMap::new();
+    let mut page_bounds: HashMap<u32, (f32, f32)> = HashMap::new();
     for (index, value) in candidate_values.iter().enumerate() {
         if value.is_some() {
             candidates_by_page
@@ -1081,8 +1096,19 @@ fn mark_spread_folio_pairs(
                 .push(index);
         }
     }
+    for item in items.iter().filter(|item| !item.text.trim().is_empty()) {
+        let bounds = page_bounds
+            .entry(item.page)
+            .or_insert((f32::INFINITY, f32::NEG_INFINITY));
+        bounds.0 = bounds.0.min(item.x);
+        bounds.1 = bounds.1.max(item.x + effective_width(item));
+    }
 
-    for page_candidates in candidates_by_page.into_values() {
+    for (page, page_candidates) in candidates_by_page {
+        let Some(&(page_left, page_right)) = page_bounds.get(&page) else {
+            continue;
+        };
+        let page_width = page_right - page_left;
         let known_folios: Vec<usize> = page_candidates
             .iter()
             .copied()
@@ -1100,9 +1126,15 @@ fn mark_spread_folio_pairs(
                 let other_value = candidate_values[other].unwrap();
                 let same_baseline =
                     (items[index].y - items[other].y).abs() < PAGE_NUMBER_Y_TOLERANCE;
-                let opposite_sides = (items[index].x - items[other].x).abs()
-                    > items[index].font_size.max(items[other].font_size) * 10.0;
-                same_baseline && opposite_sides && value.abs_diff(other_value) == 1
+                let font_size = items[index].font_size.max(items[other].font_size);
+                let wide_spread = page_width > font_size * SPREAD_MIN_CONTENT_WIDTH_EM;
+                let left_edge = page_left + page_width * SPREAD_EDGE_FRACTION;
+                let right_edge = page_right - page_width * SPREAD_EDGE_FRACTION;
+                let item_center = items[index].x + effective_width(&items[index]) / 2.0;
+                let other_center = items[other].x + effective_width(&items[other]) / 2.0;
+                let opposite_edges = (item_center <= left_edge && other_center >= right_edge)
+                    || (other_center <= left_edge && item_center >= right_edge);
+                same_baseline && wide_spread && opposite_edges && value.abs_diff(other_value) == 1
             });
             if paired {
                 explicit_folio[index] = true;
@@ -1204,8 +1236,8 @@ fn page_number_context_masks(
                         .filter_map(|&index| candidate_values[index].map(|value| (index, value)))
                         .collect();
                     let in_deep_margin = candidates.iter().all(|(index, _)| {
-                        items[*index].y < REPEATED_FOLIO_MARGIN_Y
-                            || items[*index].y > REPEATED_FOLIO_TOP_Y
+                        items[*index].y < PAGE_NUMBER_BOTTOM_Y
+                            || items[*index].y > PAGE_NUMBER_TOP_Y
                     });
                     if in_deep_margin
                         && context_text

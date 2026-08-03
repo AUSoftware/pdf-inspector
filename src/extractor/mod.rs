@@ -1699,6 +1699,62 @@ mod tests {
     }
 
     #[test]
+    fn changing_year_in_repeated_deep_margin_header_is_preserved() {
+        let mut items = Vec::new();
+        for (page, year) in [(1, "2020"), (2, "2021"), (3, "2022"), (4, "2023")] {
+            let mut year = make_merge_item(year, 25.0, 24.0);
+            year.page = page;
+            year.y = 780.0;
+            let mut header = make_merge_item("Annual report", 53.0, 78.0);
+            header.page = page;
+            header.y = 780.0;
+            items.extend([year, header]);
+        }
+
+        let lines = group_into_lines(items);
+
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0].text(), "2020 Annual report");
+        assert_eq!(lines[3].text(), "2023 Annual report");
+    }
+
+    #[test]
+    fn separated_content_is_not_treated_as_a_spread_folio_pair() {
+        let mut value = make_merge_item("12", 100.0, 12.0);
+        value.y = 30.0;
+        let mut label = make_merge_item("Total", 116.0, 30.0);
+        label.y = 30.0;
+        let mut unrelated_number = make_merge_item("13", 300.0, 12.0);
+        unrelated_number.y = 30.0;
+
+        let lines = group_into_lines(vec![value, label, unrelated_number]);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text(), "12 Total");
+    }
+
+    #[test]
+    fn repeated_folio_uses_the_full_page_edge_band() {
+        let mut items = Vec::new();
+        for (page, value) in [(1, "2"), (2, "4"), (3, "6"), (4, "8")] {
+            let mut page_number = make_merge_item(value, 25.0, 12.0);
+            page_number.page = page;
+            page_number.y = 80.0;
+            let mut footer = make_merge_item("Company report footer", 41.0, 120.0);
+            footer.page = page;
+            footer.y = 80.0;
+            items.extend([page_number, footer]);
+        }
+
+        let lines = group_into_lines(items);
+
+        assert_eq!(lines.len(), 4);
+        assert!(lines
+            .iter()
+            .all(|line| line.text() == "Company report footer"));
+    }
+
+    #[test]
     fn contextual_folio_on_facing_page_spread_is_removed() {
         let mut marker = make_merge_item("•", 19.0, 6.0);
         marker.y = 30.0;
