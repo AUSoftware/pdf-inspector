@@ -27,10 +27,11 @@ pub use crate::text_utils::{is_bold_font, is_italic_font};
 pub use crate::types::{ItemType, TextLine};
 pub(crate) use fonts::FontStyleCache;
 pub(crate) use layout::detect_columns;
-pub(crate) use layout::filter_explicit_markdown_page_numbers;
+pub(crate) use layout::filter_markdown_page_numbers;
 pub(crate) use layout::group_into_lines_with_thresholds;
-pub(crate) use layout::group_into_lines_with_thresholds_and_charts;
 pub(crate) use layout::group_into_lines_with_thresholds_and_regions;
+pub(crate) use layout::group_prefiltered_items_into_lines_with_thresholds_and_charts;
+pub(crate) use layout::group_prefiltered_items_into_lines_with_thresholds_and_regions;
 pub(crate) use layout::is_newspaper_layout;
 pub(crate) use layout::ColumnRegion;
 pub use layout::{group_into_lines, group_into_lines_preserving_all_text};
@@ -1624,7 +1625,10 @@ mod tests {
             items.extend([label, page_number]);
         }
 
-        let filtered = filter_explicit_markdown_page_numbers(items);
+        let filtered = filter_markdown_page_numbers(items);
+        assert!(filtered
+            .iter()
+            .all(|item| !matches!(item.text.as_str(), "42" | "43" | "44")));
         let mut lines = Vec::new();
         for page in 1..=3 {
             let page_items = filtered
@@ -1632,12 +1636,14 @@ mod tests {
                 .filter(|item| item.page == page)
                 .cloned()
                 .collect();
-            lines.extend(group_into_lines_with_thresholds_and_charts(
-                page_items,
-                &HashMap::new(),
-                &HashSet::new(),
-                &HashMap::new(),
-            ));
+            lines.extend(
+                group_prefiltered_items_into_lines_with_thresholds_and_charts(
+                    page_items,
+                    &HashMap::new(),
+                    &HashSet::new(),
+                    &HashMap::new(),
+                ),
+            );
         }
 
         assert_eq!(lines.len(), 3);
@@ -1747,6 +1753,56 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line.text() == "4 Company report footer"));
+    }
+
+    #[test]
+    fn sparse_document_pages_count_toward_repeated_folio_coverage() {
+        let mut items = Vec::new();
+        for (page, value) in [(1, "1"), (10, "10"), (19, "19"), (28, "28")] {
+            let mut number = make_merge_item(value, 25.0, 12.0);
+            number.page = page;
+            number.y = 30.0;
+            let mut footer = make_merge_item("Company report footer", 41.0, 120.0);
+            footer.page = page;
+            footer.y = 30.0;
+            items.extend([number, footer]);
+        }
+
+        let lines = group_into_lines(items);
+
+        assert!(lines
+            .iter()
+            .any(|line| line.text() == "1 Company report footer"));
+        assert!(lines
+            .iter()
+            .any(|line| line.text() == "28 Company report footer"));
+    }
+
+    #[test]
+    fn prefiltered_contextual_number_survives_layout_partitioning() {
+        let mut items = vec![
+            make_merge_item("Total", 100.0, 30.0),
+            make_merge_item("730", 136.0, 18.0),
+            make_merge_item("seats", 160.0, 30.0),
+        ];
+        for item in &mut items {
+            item.y = 780.0;
+        }
+
+        let filtered = filter_markdown_page_numbers(items);
+        let partitioned_number: Vec<TextItem> = filtered
+            .into_iter()
+            .filter(|item| item.text == "730")
+            .collect();
+        let lines = group_prefiltered_items_into_lines_with_thresholds_and_charts(
+            partitioned_number,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text(), "730");
     }
 
     #[test]

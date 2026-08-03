@@ -1672,8 +1672,7 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
     } else {
         // Apply folio detection before any page is partitioned into physical
         // bands or chart/prose zones so complete baseline context is retained.
-        let non_table_items =
-            crate::extractor::filter_explicit_markdown_page_numbers(non_table_items);
+        let non_table_items = crate::extractor::filter_markdown_page_numbers(non_table_items);
         // Separate items into physical-band pages, chart/prose pages, and
         // ordinary pages. Chart/prose pages need a different reading order:
         // each chart is a full-width separator, while prose above and below
@@ -1694,13 +1693,14 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
             }
         }
         // Process unsplit pages normally
-        let mut all_lines = crate::extractor::group_into_lines_with_thresholds_and_regions(
-            unsplit_items,
-            page_thresholds,
-            &table_page_set,
-            &page_chart_map,
-            &page_image_regions,
-        );
+        let mut all_lines =
+            crate::extractor::group_prefiltered_items_into_lines_with_thresholds_and_regions(
+                unsplit_items,
+                page_thresholds,
+                &table_page_set,
+                &page_chart_map,
+                &page_image_regions,
+            );
         // Process each split page's bands independently, then interleave
         // by Y position so paired zones (e.g. left/right months) appear together.
         let mut split_pages: Vec<u32> = split_page_items.keys().copied().collect();
@@ -1718,7 +1718,7 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
                     .collect();
                 if !band_items.is_empty() {
                     page_lines.extend(
-                        crate::extractor::group_into_lines_with_thresholds_and_charts(
+                        crate::extractor::group_prefiltered_items_into_lines_with_thresholds_and_charts(
                             band_items,
                             page_thresholds,
                             &table_page_set,
@@ -1752,7 +1752,7 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
                         .collect();
                     if !column_items.is_empty() {
                         zone_lines.extend(
-                            crate::extractor::group_into_lines_with_thresholds_and_charts(
+                            crate::extractor::group_prefiltered_items_into_lines_with_thresholds_and_charts(
                                 column_items,
                                 page_thresholds,
                                 &table_page_set,
@@ -1793,7 +1793,7 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
                         item.y >= low || item_is_in_chart_region(item, chart_regions)
                     });
                 all_lines.extend(
-                    crate::extractor::group_into_lines_with_thresholds_and_charts(
+                    crate::extractor::group_prefiltered_items_into_lines_with_thresholds_and_charts(
                         chart_zone,
                         page_thresholds,
                         &table_page_set,

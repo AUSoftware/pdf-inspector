@@ -1166,7 +1166,14 @@ fn page_number_context_masks(
             indices_by_page.entry(item.page).or_default().push(index);
         }
     }
-    let document_page_count = indices_by_page.len();
+    // Page keys are 1-based. Use the highest observed page rather than the
+    // number of pages containing text so blank or sparse pages still count
+    // toward the document-coverage requirement.
+    let document_page_count = items
+        .iter()
+        .map(|item| item.page as usize)
+        .max()
+        .unwrap_or(0);
 
     for mut page_indices in indices_by_page.into_values() {
         page_indices.sort_by(|&left, &right| {
@@ -1326,9 +1333,8 @@ fn page_number_removal_mask(items: &[TextItem]) -> Vec<bool> {
 /// Remove numeric folios before Markdown layout partitions the document into
 /// pages, bands, or chart zones. This preserves the complete baseline context
 /// needed to recognize expressions whose items could otherwise be separated.
-pub(crate) fn filter_explicit_markdown_page_numbers(items: Vec<TextItem>) -> Vec<TextItem> {
-    let candidate_values: Vec<Option<u32>> = items.iter().map(page_number_value).collect();
-    let (_, remove) = page_number_context_masks(&items, &candidate_values);
+pub(crate) fn filter_markdown_page_numbers(items: Vec<TextItem>) -> Vec<TextItem> {
+    let remove = page_number_removal_mask(&items);
     items
         .into_iter()
         .zip(remove)
@@ -1563,6 +1569,27 @@ pub(crate) fn group_into_lines_with_thresholds_and_charts(
     )
 }
 
+/// Group items after document-level page-number filtering has already run.
+///
+/// Partitioned Markdown layout uses this path so a contextual candidate that
+/// was preserved with its complete baseline context is not reconsidered after
+/// its neighboring text lands in another band or chart/prose zone.
+pub(crate) fn group_prefiltered_items_into_lines_with_thresholds_and_charts(
+    items: Vec<TextItem>,
+    page_thresholds: &HashMap<u32, f32>,
+    table_pages: &HashSet<u32>,
+    chart_regions: &HashMap<u32, Vec<(f32, f32, f32, f32)>>,
+) -> Vec<TextLine> {
+    group_into_lines_with_thresholds_and_regions_impl(
+        items,
+        page_thresholds,
+        table_pages,
+        chart_regions,
+        &HashMap::new(),
+        false,
+    )
+}
+
 pub(crate) fn group_into_lines_with_thresholds_and_regions(
     items: Vec<TextItem>,
     page_thresholds: &HashMap<u32, f32>,
@@ -1577,6 +1604,23 @@ pub(crate) fn group_into_lines_with_thresholds_and_regions(
         chart_regions,
         image_regions,
         true,
+    )
+}
+
+pub(crate) fn group_prefiltered_items_into_lines_with_thresholds_and_regions(
+    items: Vec<TextItem>,
+    page_thresholds: &HashMap<u32, f32>,
+    table_pages: &HashSet<u32>,
+    chart_regions: &HashMap<u32, Vec<(f32, f32, f32, f32)>>,
+    image_regions: &HashMap<u32, Vec<super::reading_order::ImageRegion>>,
+) -> Vec<TextLine> {
+    group_into_lines_with_thresholds_and_regions_impl(
+        items,
+        page_thresholds,
+        table_pages,
+        chart_regions,
+        image_regions,
+        false,
     )
 }
 
