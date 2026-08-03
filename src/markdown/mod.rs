@@ -976,15 +976,27 @@ pub fn to_markdown_from_items_with_rects(
     options: MarkdownOptions,
     rects: &[crate::types::PdfRect],
 ) -> String {
+    let document_page_count = items.iter().map(|item| item.page).max().unwrap_or(0);
     to_markdown_from_items_with_rects_and_lines(
         items,
         options,
         rects,
         &[],
-        &HashMap::new(),
-        None,
-        &[],
+        MarkdownDocumentContext {
+            page_thresholds: &HashMap::new(),
+            struct_roles: None,
+            struct_tables: &[],
+            page_count: document_page_count,
+        },
     )
+}
+
+pub(crate) struct MarkdownDocumentContext<'a> {
+    pub(crate) page_thresholds: &'a HashMap<u32, f32>,
+    pub(crate) struct_roles:
+        Option<&'a HashMap<u32, HashMap<i64, crate::structure_tree::StructRole>>>,
+    pub(crate) struct_tables: &'a [crate::structure_tree::StructTable],
+    pub(crate) page_count: u32,
 }
 
 /// Convert positioned text items to markdown, using rectangles and line segments for table detection.
@@ -996,15 +1008,20 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
     options: MarkdownOptions,
     rects: &[crate::types::PdfRect],
     pdf_lines: &[crate::types::PdfLine],
-    page_thresholds: &HashMap<u32, f32>,
-    struct_roles: Option<&HashMap<u32, HashMap<i64, crate::structure_tree::StructRole>>>,
-    struct_tables: &[crate::structure_tree::StructTable],
+    context: MarkdownDocumentContext<'_>,
 ) -> String {
     use crate::tables::{
         detect_tables, detect_tables_from_lines, detect_tables_from_rects,
         detect_tables_from_struct_tree, try_build_rect_guided_table,
     };
     use crate::types::ItemType;
+
+    let MarkdownDocumentContext {
+        page_thresholds,
+        struct_roles,
+        struct_tables,
+        page_count: document_page_count,
+    } = context;
 
     if items.is_empty() {
         return String::new();
@@ -1075,7 +1092,6 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
 
     let mut pages: Vec<u32> = page_groups.keys().copied().collect();
     pages.sort();
-    let page_count = pages.last().copied().unwrap_or(0) + 1;
 
     // Track band splits per page so we can split non-table items later
     let mut page_band_splits: HashMap<u32, Vec<(f32, f32)>> = HashMap::new();
@@ -1658,11 +1674,19 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
     // column detection on pages where table column gaps would be misidentified.
     let table_page_set: HashSet<u32> = page_tables.keys().copied().collect();
 
+    // Make the page-number decision once with complete document context and
+    // the authoritative PDF page count. This intentionally follows table-only
+    // classification so folio cleanup cannot alter table continuation logic.
+    // Every later layout partition consumes this already-filtered collection
+    // without reconsidering preserved values.
+    let non_table_items =
+        crate::extractor::filter_markdown_page_numbers(non_table_items, document_page_count);
+
     // Split non-table items by band boundaries before line grouping so that
     // items from different side-by-side zones (e.g. left/right month columns
     // in a calendar) don't merge into the same line.
     let lines = if page_band_splits.is_empty() && page_chart_prose_splits.is_empty() {
-        crate::extractor::group_into_lines_with_thresholds_and_regions(
+        crate::extractor::group_prefiltered_items_into_lines_with_thresholds_and_regions(
             non_table_items,
             page_thresholds,
             &table_page_set,
@@ -1670,9 +1694,6 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
             &page_image_regions,
         )
     } else {
-        // Apply folio detection before any page is partitioned into physical
-        // bands or chart/prose zones so complete baseline context is retained.
-        let non_table_items = crate::extractor::filter_markdown_page_numbers(non_table_items);
         // Separate items into physical-band pages, chart/prose pages, and
         // ordinary pages. Chart/prose pages need a different reading order:
         // each chart is a full-width separator, while prose above and below
@@ -1812,7 +1833,7 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
 
     // Strip repeated headers/footers before conversion
     let lines = if options.strip_headers_footers {
-        preprocess::strip_repeated_lines(lines, page_count)
+        preprocess::strip_repeated_lines(lines, document_page_count)
     } else {
         lines
     };

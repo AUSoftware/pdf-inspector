@@ -1155,6 +1155,7 @@ fn mark_spread_folio_pairs(
 fn page_number_context_masks(
     items: &[TextItem],
     candidate_values: &[Option<u32>],
+    document_page_count: usize,
 ) -> (Vec<bool>, Vec<bool>) {
     let mut contextual = vec![false; items.len()];
     let mut explicit_folio = vec![false; items.len()];
@@ -1166,15 +1167,6 @@ fn page_number_context_masks(
             indices_by_page.entry(item.page).or_default().push(index);
         }
     }
-    // Page keys are 1-based. Use the highest observed page rather than the
-    // number of pages containing text so blank or sparse pages still count
-    // toward the document-coverage requirement.
-    let document_page_count = items
-        .iter()
-        .map(|item| item.page as usize)
-        .max()
-        .unwrap_or(0);
-
     for mut page_indices in indices_by_page.into_values() {
         page_indices.sort_by(|&left, &right| {
             items[right]
@@ -1319,9 +1311,10 @@ fn page_number_context_masks(
 /// item attached to neighboring content on the same baseline is therefore kept.
 /// Complete page-number expressions such as `Page 42` remain removable even
 /// though their numeric item has lexical context.
-fn page_number_removal_mask(items: &[TextItem]) -> Vec<bool> {
+fn page_number_removal_mask(items: &[TextItem], document_page_count: usize) -> Vec<bool> {
     let candidate_values: Vec<Option<u32>> = items.iter().map(page_number_value).collect();
-    let (contextual, explicit_folio) = page_number_context_masks(items, &candidate_values);
+    let (contextual, explicit_folio) =
+        page_number_context_masks(items, &candidate_values, document_page_count);
 
     candidate_values
         .iter()
@@ -1333,8 +1326,11 @@ fn page_number_removal_mask(items: &[TextItem]) -> Vec<bool> {
 /// Remove numeric folios before Markdown layout partitions the document into
 /// pages, bands, or chart zones. This preserves the complete baseline context
 /// needed to recognize expressions whose items could otherwise be separated.
-pub(crate) fn filter_markdown_page_numbers(items: Vec<TextItem>) -> Vec<TextItem> {
-    let remove = page_number_removal_mask(&items);
+pub(crate) fn filter_markdown_page_numbers(
+    items: Vec<TextItem>,
+    document_page_count: u32,
+) -> Vec<TextItem> {
+    let remove = page_number_removal_mask(&items, document_page_count as usize);
     items
         .into_iter()
         .zip(remove)
@@ -1641,7 +1637,16 @@ fn group_into_lines_with_thresholds_and_regions_impl(
     // removed page numbers cannot affect column detection. Plain-text callers
     // opt out because dropping extracted text violates that API.
     let items = if filter_page_numbers {
-        let remove = page_number_removal_mask(&items);
+        // Item-only grouping has no document metadata, so use the highest
+        // observed 1-based page as its best available coverage denominator.
+        // The Markdown document path passes the authoritative PDF page count
+        // through `filter_markdown_page_numbers` before reaching this helper.
+        let observed_page_count = items
+            .iter()
+            .map(|item| item.page as usize)
+            .max()
+            .unwrap_or(0);
+        let remove = page_number_removal_mask(&items, observed_page_count);
         items
             .into_iter()
             .zip(remove)
@@ -1668,11 +1673,7 @@ fn group_into_lines_with_thresholds_and_regions_impl(
             .filter(|item| page_number_value(item).is_none())
             .cloned()
             .collect();
-        let column_detection_items = if column_detection_items.is_empty() {
-            &page_items
-        } else {
-            &column_detection_items
-        };
+        let column_detection_items = column_detection_items.as_slice();
 
         // Use pre-computed threshold from fix_letterspaced_items if available
         // (computed before embedded-space removal, with full signal).
@@ -1686,7 +1687,7 @@ fn group_into_lines_with_thresholds_and_regions_impl(
             let preliminary_columns =
                 detect_columns(column_detection_items, page, table_pages.contains(&page));
             let detected_split =
-                (preliminary_columns.len() == 2).then_some(preliminary_columns[0].x_max);
+                (preliminary_columns.len() == 2).then(|| preliminary_columns[0].x_max);
             if let Some(band) = image_regions.get(&page).and_then(|regions| {
                 super::reading_order::infer_image_anchored_flow(
                     &page_items,

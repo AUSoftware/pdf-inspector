@@ -29,7 +29,6 @@ pub(crate) use fonts::FontStyleCache;
 pub(crate) use layout::detect_columns;
 pub(crate) use layout::filter_markdown_page_numbers;
 pub(crate) use layout::group_into_lines_with_thresholds;
-pub(crate) use layout::group_into_lines_with_thresholds_and_regions;
 pub(crate) use layout::group_prefiltered_items_into_lines_with_thresholds_and_charts;
 pub(crate) use layout::group_prefiltered_items_into_lines_with_thresholds_and_regions;
 pub(crate) use layout::is_newspaper_layout;
@@ -1625,7 +1624,7 @@ mod tests {
             items.extend([label, page_number]);
         }
 
-        let filtered = filter_markdown_page_numbers(items);
+        let filtered = filter_markdown_page_numbers(items, 3);
         assert!(filtered
             .iter()
             .all(|item| !matches!(item.text.as_str(), "42" | "43" | "44")));
@@ -1779,6 +1778,25 @@ mod tests {
     }
 
     #[test]
+    fn trailing_blank_pages_count_toward_repeated_folio_coverage() {
+        let mut items = Vec::new();
+        for (page, value) in [(1, "1"), (2, "2"), (3, "3"), (4, "4")] {
+            let mut number = make_merge_item(value, 25.0, 12.0);
+            number.page = page;
+            number.y = 30.0;
+            let mut footer = make_merge_item("Company report footer", 41.0, 120.0);
+            footer.page = page;
+            footer.y = 30.0;
+            items.extend([number, footer]);
+        }
+
+        let filtered = filter_markdown_page_numbers(items, 20);
+
+        assert!(filtered.iter().any(|item| item.text == "1"));
+        assert!(filtered.iter().any(|item| item.text == "4"));
+    }
+
+    #[test]
     fn prefiltered_contextual_number_survives_layout_partitioning() {
         let mut items = vec![
             make_merge_item("Total", 100.0, 30.0),
@@ -1789,7 +1807,7 @@ mod tests {
             item.y = 780.0;
         }
 
-        let filtered = filter_markdown_page_numbers(items);
+        let filtered = filter_markdown_page_numbers(items, 1);
         let partitioned_number: Vec<TextItem> = filtered
             .into_iter()
             .filter(|item| item.text == "730")
@@ -1803,6 +1821,30 @@ mod tests {
 
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text(), "730");
+    }
+
+    #[test]
+    fn numeric_only_partition_does_not_define_columns() {
+        let mut items = Vec::new();
+        for row in 0..20 {
+            let y = 90.0 - row as f32 * 4.0;
+            let mut left = make_merge_item(&(row + 1).to_string(), 50.0, 20.0);
+            left.y = y;
+            let mut right = make_merge_item(&(row + 101).to_string(), 350.0, 20.0);
+            right.y = y;
+            items.extend([left, right]);
+        }
+        assert_eq!(detect_columns(&items, 1, false).len(), 2);
+
+        let lines = group_prefiltered_items_into_lines_with_thresholds_and_charts(
+            items,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(lines.len(), 20);
+        assert!(lines.iter().all(|line| line.items.len() == 2));
     }
 
     #[test]

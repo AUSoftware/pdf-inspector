@@ -534,9 +534,12 @@ pub fn extract_pages_markdown_mem(
                 options,
                 &page_rects,
                 &[],
-                &page_thresholds,
-                None,
-                &[],
+                markdown::MarkdownDocumentContext {
+                    page_thresholds: &page_thresholds,
+                    struct_roles: None,
+                    struct_tables: &[],
+                    page_count,
+                },
             )
         };
 
@@ -3743,9 +3746,12 @@ fn process_document(
                     options.markdown,
                     &rects,
                     &lines,
-                    &page_thresholds,
-                    struct_roles.as_ref(),
-                    &struct_tables,
+                    markdown::MarkdownDocumentContext {
+                        page_thresholds: &page_thresholds,
+                        struct_roles: struct_roles.as_ref(),
+                        struct_tables: &struct_tables,
+                        page_count,
+                    },
                 ))
             };
 
