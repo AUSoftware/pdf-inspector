@@ -1002,6 +1002,7 @@ pub fn to_markdown_from_items_with_rects_and_page_count(
             struct_roles: None,
             struct_tables: &[],
             page_count: document_page_count,
+            prefiltered_page_number_pages: None,
         },
     )
 }
@@ -1012,6 +1013,9 @@ pub(crate) struct MarkdownDocumentContext<'a> {
         Option<&'a HashMap<u32, HashMap<i64, crate::structure_tree::StructRole>>>,
     pub(crate) struct_tables: &'a [crate::structure_tree::StructTable],
     pub(crate) page_count: u32,
+    /// Pages where an upstream document-level pass removed folios. When this
+    /// is `None`, this converter owns the filtering pass.
+    pub(crate) prefiltered_page_number_pages: Option<&'a HashSet<u32>>,
 }
 
 /// Convert positioned text items to markdown, using rectangles and line segments for table detection.
@@ -1036,11 +1040,20 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
         struct_roles,
         struct_tables,
         page_count: document_page_count,
+        prefiltered_page_number_pages,
     } = context;
 
     if items.is_empty() {
         return String::new();
     }
+
+    // Table detection must retain the original collection because short
+    // numeric table cells can be indistinguishable from folios until
+    // structural context is available. Callers that already filtered with
+    // full-document context provide the removed-page set so the final
+    // non-table path does not reconsider a page-local partition.
+    let items_are_prefiltered = prefiltered_page_number_pages.is_some();
+    let removed_page_number_pages = prefiltered_page_number_pages.cloned().unwrap_or_default();
 
     // Separate images and links from text items
     let mut images: Vec<TextItem> = Vec::new();
@@ -1159,7 +1172,10 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
         });
         let chart_prose_columns = chart_prose_split.is_some();
 
-        // Check for side-by-side layout (e.g. two tables placed left and right)
+        // Check for side-by-side table layout using the original items. Sparse
+        // numeric cells need table context before they can be distinguished
+        // safely from folios; cleaned evidence is reserved for column and
+        // final non-table layout decisions.
         let mut bands = split_side_by_side(&page_items);
         // A rect table crossing a proposed split boundary means the "gutter"
         // is really the gap between ruled and borderless table columns —
@@ -1674,7 +1690,11 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
 
     // Find pages that are table-only (no remaining non-table text)
     let table_only_pages: HashSet<u32> = {
-        let pages_with_text: HashSet<u32> = non_table_items.iter().map(|i| i.page).collect();
+        let mut pages_with_text: HashSet<u32> = non_table_items.iter().map(|i| i.page).collect();
+        // Preserve the pre-filter continuation classification: a page that
+        // originally also contained a folio does not become table-only merely
+        // because an upstream document-level pass removed it.
+        pages_with_text.extend(removed_page_number_pages);
         page_tables
             .keys()
             .filter(|p| !pages_with_text.contains(p))
@@ -1689,13 +1709,15 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
     // column detection on pages where table column gaps would be misidentified.
     let table_page_set: HashSet<u32> = page_tables.keys().copied().collect();
 
-    // Make the page-number decision once with complete document context and
-    // the authoritative PDF page count. This intentionally follows table-only
-    // classification so folio cleanup cannot alter table continuation logic.
-    // Every later layout partition consumes this already-filtered collection
-    // without reconsidering preserved values.
-    let non_table_items =
-        crate::extractor::filter_markdown_page_numbers(non_table_items, document_page_count);
+    let non_table_items = if items_are_prefiltered {
+        non_table_items
+    } else {
+        crate::extractor::filter_markdown_page_numbers_with_removed_pages(
+            non_table_items,
+            document_page_count,
+        )
+        .0
+    };
 
     // Split non-table items by band boundaries before line grouping so that
     // items from different side-by-side zones (e.g. left/right month columns

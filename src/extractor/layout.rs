@@ -1119,33 +1119,72 @@ fn mark_spread_folio_pairs(
             continue;
         };
         let page_width = page_right - page_left;
-        let known_folios: Vec<usize> = page_candidates
-            .iter()
-            .copied()
-            .filter(|&index| !contextual[index] || explicit_folio[index])
-            .collect();
+        if page_width <= 0.0 {
+            continue;
+        }
+        let left_edge = page_left + page_width * SPREAD_EDGE_FRACTION;
+        let right_edge = page_right - page_width * SPREAD_EDGE_FRACTION;
+        let max_pair_font_size = page_width / SPREAD_MIN_CONTENT_WIDTH_EM;
+        let edge_side = |index: usize| {
+            let center = items[index].x + effective_width(&items[index]) / 2.0;
+            if center <= left_edge {
+                Some(false)
+            } else if center >= right_edge {
+                Some(true)
+            } else {
+                None
+            }
+        };
+
+        // Index strong folio evidence by value and spread edge. Sorted
+        // baselines let each contextual candidate query only the two adjacent
+        // values on the opposite edge in O(log n), rather than comparing every
+        // candidate pair on numeric-heavy pages.
+        let mut known_baselines: HashMap<(u32, bool), Vec<f32>> = HashMap::new();
+        for &index in &page_candidates {
+            if (contextual[index] && !explicit_folio[index])
+                || items[index].font_size >= max_pair_font_size
+            {
+                continue;
+            }
+            let Some(side) = edge_side(index) else {
+                continue;
+            };
+            let value = candidate_values[index].unwrap();
+            known_baselines
+                .entry((value, side))
+                .or_default()
+                .push(items[index].y);
+        }
+        for baselines in known_baselines.values_mut() {
+            baselines.sort_by(f32::total_cmp);
+        }
 
         for index in page_candidates {
-            if !contextual[index] || explicit_folio[index] {
+            if !contextual[index]
+                || explicit_folio[index]
+                || items[index].font_size >= max_pair_font_size
+            {
                 continue;
             }
             let Some(value) = candidate_values[index] else {
                 continue;
             };
-            let paired = known_folios.iter().any(|&other| {
-                let other_value = candidate_values[other].unwrap();
-                let same_baseline =
-                    (items[index].y - items[other].y).abs() < PAGE_NUMBER_Y_TOLERANCE;
-                let font_size = items[index].font_size.max(items[other].font_size);
-                let wide_spread = page_width > font_size * SPREAD_MIN_CONTENT_WIDTH_EM;
-                let left_edge = page_left + page_width * SPREAD_EDGE_FRACTION;
-                let right_edge = page_right - page_width * SPREAD_EDGE_FRACTION;
-                let item_center = items[index].x + effective_width(&items[index]) / 2.0;
-                let other_center = items[other].x + effective_width(&items[other]) / 2.0;
-                let opposite_edges = (item_center <= left_edge && other_center >= right_edge)
-                    || (other_center <= left_edge && item_center >= right_edge);
-                same_baseline && wide_spread && opposite_edges && value.abs_diff(other_value) == 1
-            });
+            let Some(side) = edge_side(index) else {
+                continue;
+            };
+            let y = items[index].y;
+            let paired = [value.checked_sub(1), value.checked_add(1)]
+                .into_iter()
+                .flatten()
+                .filter_map(|other_value| known_baselines.get(&(other_value, !side)))
+                .any(|baselines| {
+                    let first = baselines
+                        .partition_point(|baseline| *baseline <= y - PAGE_NUMBER_Y_TOLERANCE);
+                    baselines
+                        .get(first)
+                        .is_some_and(|baseline| *baseline < y + PAGE_NUMBER_Y_TOLERANCE)
+                });
             if paired {
                 explicit_folio[index] = true;
             }
@@ -1370,19 +1409,41 @@ fn page_number_removal_mask(items: &[TextItem], document_page_count: usize) -> V
         .collect()
 }
 
-/// Remove numeric folios before Markdown layout partitions the document into
-/// pages, bands, or chart zones. This preserves the complete baseline context
-/// needed to recognize expressions whose items could otherwise be separated.
+/// Remove numeric folios using complete document context before downstream
+/// non-table layout partitions could separate the evidence needed to recognize
+/// them.
+#[cfg(test)]
 pub(crate) fn filter_markdown_page_numbers(
     items: Vec<TextItem>,
     document_page_count: u32,
 ) -> Vec<TextItem> {
+    filter_markdown_page_numbers_with_removed_pages(items, document_page_count).0
+}
+
+/// Filter Markdown folios while retaining the pages where items were removed.
+///
+/// The page set lets downstream table-continuation classification preserve its
+/// pre-filter semantics even though structural layout consumes the cleaned
+/// item collection.
+pub(crate) fn filter_markdown_page_numbers_with_removed_pages(
+    items: Vec<TextItem>,
+    document_page_count: u32,
+) -> (Vec<TextItem>, HashSet<u32>) {
     let remove = page_number_removal_mask(&items, document_page_count as usize);
-    items
+    let mut removed_pages = HashSet::new();
+    let items = items
         .into_iter()
         .zip(remove)
-        .filter_map(|(item, remove)| (!remove).then_some(item))
-        .collect()
+        .filter_map(|(item, remove)| {
+            if remove {
+                removed_pages.insert(item.page);
+                None
+            } else {
+                Some(item)
+            }
+        })
+        .collect();
+    (items, removed_pages)
 }
 
 /// Group text items into lines, with multi-column support

@@ -467,16 +467,19 @@ pub fn extract_pages_markdown_mem(
         extractor::extract_positioned_text_from_doc(&doc, &font_cmaps, None)?;
     let text_quality = analyze_text_quality(&all_items);
 
-    // Compute layout complexity from full document (near-zero cost).
-    let complexity = compute_layout_complexity(&all_items, &all_rects, &all_lines);
+    // Resolve page numbers before any structural analysis. Keep the removed
+    // page set so per-page Markdown conversion can preserve document-wide
+    // decisions without re-filtering a partition.
+    let (filtered_items, removed_page_number_pages) =
+        extractor::filter_markdown_page_numbers_with_removed_pages(all_items.clone(), page_count);
+
+    // Tables need the original numeric cells; columns use folio-cleaned
+    // evidence so removed page numbers cannot create false layout metadata.
+    let complexity = compute_layout_complexity(&all_items, &filtered_items, &all_rects, &all_lines);
 
     // Compute font stats from full document (cross-page consistency).
-    let font_stats = markdown::analysis::calculate_font_stats_from_items(&all_items);
-
-    // Resolve recurring contextual folios while the complete document is
-    // available. Per-page conversion cannot reconstruct recurrence evidence
-    // after the items are partitioned below.
-    let all_items = extractor::filter_markdown_page_numbers(all_items, page_count);
+    let font_stats = markdown::analysis::calculate_font_stats_from_items(&filtered_items);
+    let all_items = filtered_items;
 
     // When caller doesn't specify pages, return every page in document order.
     let all_pages: Vec<u32>;
@@ -544,6 +547,7 @@ pub fn extract_pages_markdown_mem(
                     struct_roles: None,
                     struct_tables: &[],
                     page_count,
+                    prefiltered_page_number_pages: Some(&removed_page_number_pages),
                 },
             )
         };
@@ -3741,7 +3745,11 @@ fn process_document(
 
             let text_quality = analyze_text_quality(&items);
             merge_ocr_reasons(&mut ocr_reasons_by_page, text_quality.reasons_by_page);
-            let layout = compute_layout_complexity(&items, &rects, &lines);
+            let (layout_items, _) = extractor::filter_markdown_page_numbers_with_removed_pages(
+                items.clone(),
+                page_count,
+            );
+            let layout = compute_layout_complexity(&items, &layout_items, &rects, &lines);
 
             let md = if options.mode == ProcessMode::Analyze {
                 None
@@ -3756,6 +3764,7 @@ fn process_document(
                         struct_roles: struct_roles.as_ref(),
                         struct_tables: &struct_tables,
                         page_count,
+                        prefiltered_page_number_pages: None,
                     },
                 ))
             };
@@ -5518,6 +5527,7 @@ mod looks_like_partial_table_tests {
 /// Analyse extracted items and rects for layout complexity.
 fn compute_layout_complexity(
     items: &[types::TextItem],
+    column_items: &[types::TextItem],
     rects: &[types::PdfRect],
     lines: &[types::PdfLine],
 ) -> LayoutComplexity {
@@ -5602,7 +5612,7 @@ fn compute_layout_complexity(
 
     let mut pages_with_columns: Vec<u32> = Vec::new();
     for page in seen_pages {
-        let cols = extractor::detect_columns(items, page, pages_with_tables.contains(&page));
+        let cols = extractor::detect_columns(column_items, page, pages_with_tables.contains(&page));
         if cols.len() >= 2 {
             pages_with_columns.push(page);
         }
@@ -5812,6 +5822,23 @@ mod tests {
             page,
             ..test_item(text, 10.0, 10.0, text.len() as f32 * 5.0, 12.0)
         }
+    }
+
+    #[test]
+    fn removed_sparse_folios_leave_no_layout_evidence() {
+        let items = vec![
+            test_item("1", 25.0, 20.0, 12.0, 10.0),
+            test_item("2", 520.0, 60.0, 12.0, 10.0),
+        ];
+        let (filtered, _) =
+            extractor::filter_markdown_page_numbers_with_removed_pages(items.clone(), 1);
+        assert!(filtered.is_empty());
+
+        let filtered = compute_layout_complexity(&items, &filtered, &[], &[]);
+
+        assert!(!filtered.is_complex);
+        assert!(filtered.pages_with_tables.is_empty());
+        assert!(filtered.pages_with_columns.is_empty());
     }
 
     #[test]
