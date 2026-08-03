@@ -162,10 +162,21 @@ pub(crate) fn build_type3_scales(
         if !is_type3 {
             continue;
         }
-        let num = |o: &Object| match o {
-            Object::Integer(i) => *i as f32,
-            Object::Real(r) => *r,
-            _ => 0.0,
+        // Array elements may themselves be indirect references per PDF
+        // syntax — resolve before reading the numeric value.
+        let num = |o: &Object| {
+            let resolved = match o {
+                Object::Reference(r) => match doc.get_object(*r) {
+                    Ok(inner) => inner,
+                    Err(_) => return 0.0,
+                },
+                other => other,
+            };
+            match resolved {
+                Object::Integer(i) => *i as f32,
+                Object::Real(r) => *r,
+                _ => 0.0,
+            }
         };
         let Some(matrix) = font_dict
             .get(b"FontMatrix")
@@ -1587,6 +1598,43 @@ fn score_text(text: &str) -> i32 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn type3_scale_resolves_indirect_matrix_and_bbox_numbers() {
+        use lopdf::{dictionary, Document, Object};
+        // FontMatrix/FontBBox elements may be indirect references per PDF
+        // syntax; the scale must use their resolved values, not zero.
+        let mut doc = Document::with_version("1.4");
+        let matrix_d = doc.add_object(Object::Real(-1.0));
+        let bbox_top = doc.add_object(Object::Integer(3));
+        let font_dict = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type3",
+            "FontMatrix" => vec![
+                Object::Integer(1),
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Reference(matrix_d),
+                Object::Integer(0),
+                Object::Integer(0),
+            ],
+            "FontBBox" => vec![
+                Object::Integer(1),
+                Object::Integer(-156),
+                Object::Integer(37),
+                Object::Reference(bbox_top),
+            ],
+        };
+        let mut fonts = std::collections::BTreeMap::new();
+        fonts.insert(b"T2".to_vec(), &font_dict);
+        let scales = super::build_type3_scales(&doc, &fonts);
+        let scale = scales.get("T2").copied().unwrap_or(1.0);
+        // bbox height 159 x |matrix_y| 1.0
+        assert!(
+            (scale - 159.0).abs() < 0.5,
+            "scale should use resolved indirect values, got {scale}"
+        );
+    }
 
     #[test]
     fn texcm_math_symbols_remap() {
