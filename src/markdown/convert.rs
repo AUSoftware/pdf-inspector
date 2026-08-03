@@ -508,6 +508,8 @@ fn line_ends_sentence(text: &str) -> bool {
 /// the signature of a display equation rather than prose or a heading.
 fn is_symbol_dominated(text: &str) -> bool {
     let alnum = text.chars().filter(|c| c.is_alphanumeric()).count();
+    // Grouping characters are deliberately excluded: parenthesized short
+    // headings like "(R-12)" or "[DRAFT]" are common and are not math.
     let mathy = text
         .chars()
         .filter(|c| {
@@ -517,12 +519,6 @@ fn is_symbol_dominated(text: &str) -> bool {
                     | '='
                     | '/'
                     | '^'
-                    | '('
-                    | ')'
-                    | '['
-                    | ']'
-                    | '{'
-                    | '}'
                     | '|'
                     | '<'
                     | '>'
@@ -536,7 +532,7 @@ fn is_symbol_dominated(text: &str) -> bool {
             )
         })
         .count();
-    mathy * 2 >= alnum.max(1)
+    mathy >= 2 && mathy * 2 >= alnum.max(1)
 }
 
 fn is_wrapped_same_style_line(prev: &TextLine, next: &TextLine, para_threshold: f32) -> bool {
@@ -1129,6 +1125,12 @@ pub(super) fn to_markdown_from_lines_with_tables_and_images(
             && !is_toc_entry_line(plain_trimmed)
             && !is_heading_fragment(plain_trimmed)
             && toc_suppress_page != Some(line.page)
+            // Display equations must never become headings — through the
+            // font-tier path or the rarity fallback. They are standalone and
+            // isolated by construction, so without this gate they score
+            // straight past both.
+            && !plain_trimmed.contains('=')
+            && !is_symbol_dominated(plain_trimmed)
         {
             let line_font_size =
                 crate::markdown::analysis::line_dominant_font_size(line).unwrap_or(base_size);
@@ -1149,13 +1151,6 @@ pub(super) fn to_markdown_from_lines_with_tables_and_images(
                 }
                 let word_count = plain_trimmed.split_whitespace().count();
                 if !(1..=15).contains(&word_count) {
-                    return None;
-                }
-                // Display equations are standalone AND isolated by
-                // construction, so they score straight past the 0.5
-                // threshold. Headings essentially never contain '=' or are
-                // dominated by math symbols.
-                if plain_trimmed.contains('=') || is_symbol_dominated(plain_trimmed) {
                     return None;
                 }
                 if wrapped_bold_paragraph_lines.contains(&line_idx) {
@@ -1541,6 +1536,9 @@ pub fn to_markdown_from_lines(lines: Vec<TextLine>, options: MarkdownOptions) ->
             && !is_heading_fragment(plain_trimmed)
             && toc_suppress_page != Some(line.page)
             && !(options.detect_code && line.items.iter().any(|i| is_monospace_font(&i.font)))
+            // Display equations must never become headings (see main path).
+            && !plain_trimmed.contains('=')
+            && !is_symbol_dominated(plain_trimmed)
         {
             let line_font_size =
                 crate::markdown::analysis::line_dominant_font_size(line).unwrap_or(base_size);
@@ -1556,13 +1554,6 @@ pub fn to_markdown_from_lines(lines: Vec<TextLine>, options: MarkdownOptions) ->
                 }
                 let word_count = plain_trimmed.split_whitespace().count();
                 if !(1..=15).contains(&word_count) {
-                    return None;
-                }
-                // Display equations are standalone AND isolated by
-                // construction, so they score straight past the 0.5
-                // threshold. Headings essentially never contain '=' or are
-                // dominated by math symbols.
-                if plain_trimmed.contains('=') || is_symbol_dominated(plain_trimmed) {
                     return None;
                 }
                 if wrapped_bold_paragraph_lines.contains(&line_idx) {

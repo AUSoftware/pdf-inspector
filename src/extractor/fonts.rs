@@ -221,7 +221,8 @@ pub(crate) fn parse_font_widths(
 /// columns) collapses — common in 1990s dvips/Distiller PDFs.
 ///
 /// Widths are resolved per code through the font's Differences encoding when
-/// present, falling back to Latin-1 — the same order the text decoder uses —
+/// present, falling back to the same single-byte decode the text extractor
+/// uses (cp1252-style smart punctuation for 0x80..=0x9F, Latin-1 elsewhere) —
 /// so the width of a code always matches the char we extract for it.
 fn base14_fallback_widths(doc: &Document, font_dict: &lopdf::Dictionary) -> Option<FontWidthInfo> {
     let base_font = font_dict
@@ -242,7 +243,7 @@ fn base14_fallback_widths(doc: &Document, font_dict: &lopdf::Dictionary) -> Opti
         let ch = enc_map
             .get(&(code as u8))
             .copied()
-            .unwrap_or(code as u8 as char);
+            .unwrap_or_else(|| decode_single_byte_fallback_char(code as u8, true));
         if let Some(w) = crate::extractor::base14::base14_char_width(&base_font, ch) {
             widths.insert(code, w);
         }

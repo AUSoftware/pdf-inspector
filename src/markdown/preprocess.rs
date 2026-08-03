@@ -73,7 +73,10 @@ pub(crate) fn merge_heading_lines(
 
     for line in lines {
         let line_level = effective_heading_level(&line, base_size, heading_tiers, struct_roles);
-        let line_font = line.items.first().map(|i| i.font_size).unwrap_or(base_size);
+        // Dominant size, consistent with effective_heading_level: a large
+        // leading delimiter must not inflate the merge gap threshold.
+        let line_font =
+            crate::markdown::analysis::line_dominant_font_size(&line).unwrap_or(base_size);
 
         // Check if the previous line is a heading at the same level on the same page
         let should_merge = if let (Some(prev), Some(curr_level)) = (result.last(), line_level) {
@@ -181,8 +184,15 @@ pub(crate) fn merge_drop_caps(lines: Vec<TextLine>, base_size: f32) -> Vec<TextL
         // ~1.9x the body size.
         if line.items.len() > 1 {
             let first = &line.items[0];
+            // The rest of the line must be a substantive body-text run —
+            // a lone label or math fragment beside a big glyph is not a
+            // drop-cap paragraph and must not be rewritten.
+            let rest_letters: usize = line.items[1..]
+                .iter()
+                .map(|i| i.text.chars().filter(|c| c.is_alphabetic()).count())
+                .sum();
             let is_embedded_cap = first.font_size >= base_size * 1.8
-                && first.text.trim().len() == 1
+                && first.text.trim().chars().count() == 1
                 && first
                     .text
                     .trim()
@@ -192,19 +202,26 @@ pub(crate) fn merge_drop_caps(lines: Vec<TextLine>, base_size: f32) -> Vec<TextL
                 && line.items[1..]
                     .iter()
                     .all(|i| i.font_size < base_size * 1.5)
-                && line.items[1..].iter().any(|i| i.x > first.x);
+                && line.items[1..].iter().any(|i| i.x > first.x)
+                && rest_letters >= 8;
             if is_embedded_cap {
                 let drop_char = first.text.trim().chars().next().unwrap();
                 let cap_x = first.x;
                 let cap_span = first.font_size * 1.5;
                 let line_y = line.y;
-                // The paragraph's first line sits just above, indented past
-                // the cap glyph.
-                let target = result.iter_mut().rev().find(|prev| {
+                // Only the IMMEDIATELY preceding line qualifies: the
+                // paragraph's first line sits directly above, in the same
+                // column, indented past the cap glyph by roughly the cap's
+                // width. Anything else (other columns, distant content)
+                // must not receive the character.
+                let target = result.last_mut().filter(|prev| {
                     prev.page == line.page
                         && prev.y > line_y
                         && prev.y - line_y <= cap_span
-                        && prev.items.first().is_some_and(|i| i.x > cap_x)
+                        && prev
+                            .items
+                            .first()
+                            .is_some_and(|i| i.x > cap_x && i.x - cap_x <= first.font_size * 2.5)
                 });
                 if let Some(prev_line) = target {
                     if let Some(first_item) = prev_line.items.first_mut() {

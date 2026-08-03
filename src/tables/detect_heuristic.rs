@@ -137,24 +137,63 @@ fn expand_consolidated_items(items: &[TextItem]) -> (Vec<TextItem>, Vec<usize>) 
     (expanded, index_map)
 }
 
-/// True when a small-font item is horizontally attached to a larger-font item
-/// on the same visual line — a sub/superscript in running text or math
-/// (equation subscripts, footnote markers). Script attachments are not table
-/// cells; without this filter, display equations with sub/superscripts form
-/// phantom small-font table regions (e.g. TeX papers where log₁₀ subscripts
-/// cluster with footnote lines into a fake 3-column table).
-fn is_script_attachment(small: &TextItem, all_items: &[TextItem]) -> bool {
-    let attach_gap = small.font_size.max(4.0) * 0.6;
-    all_items.iter().any(|body| {
-        body.font_size >= small.font_size * 1.2
-            && (small.y - body.y).abs() <= body.font_size * 0.8
-            && {
-                let gap_after_body = small.x - (body.x + body.width);
-                let gap_before_body = body.x - (small.x + small.width);
-                (-attach_gap..=attach_gap).contains(&gap_after_body)
-                    || (-attach_gap..=attach_gap).contains(&gap_before_body)
-            }
-    })
+/// Index of candidate "body" items (larger-font attachment targets) sorted by
+/// Y, so script-attachment checks scan a narrow Y window instead of the whole
+/// page per candidate.
+struct ScriptBodyIndex<'a> {
+    /// (y, item), sorted ascending by y
+    by_y: Vec<(f32, &'a TextItem)>,
+    /// widest vertical attachment window any body item can produce
+    max_window: f32,
+}
+
+impl<'a> ScriptBodyIndex<'a> {
+    fn new(items: &'a [TextItem]) -> Self {
+        // Smallest table-candidate font is 6pt, so any possible attachment
+        // target is at least 6 × 1.2 pt.
+        let mut by_y: Vec<(f32, &TextItem)> = items
+            .iter()
+            .filter(|i| i.font_size >= 6.0 * 1.2)
+            .map(|i| (i.y, i))
+            .collect();
+        by_y.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let max_window = by_y
+            .iter()
+            .map(|(_, i)| i.font_size * 0.8)
+            .fold(0.0f32, f32::max);
+        Self { by_y, max_window }
+    }
+
+    /// True when a small-font item is horizontally attached to a larger-font
+    /// item at a script baseline offset — a sub/superscript in running text
+    /// or math (equation subscripts, footnote markers). Script attachments
+    /// are not table cells; without this filter, display equations with
+    /// sub/superscripts form phantom small-font table regions (e.g. TeX
+    /// papers where log₁₀ subscripts cluster with footnote lines into a fake
+    /// 3-column table). A genuine baseline offset is required so same-line
+    /// table neighbors (a small cell beside a larger label cell) are never
+    /// classified as scripts.
+    fn is_script_attachment(&self, small: &TextItem) -> bool {
+        let attach_gap = small.font_size.max(4.0) * 0.6;
+        let lo = self
+            .by_y
+            .partition_point(|(y, _)| *y < small.y - self.max_window);
+        self.by_y[lo..]
+            .iter()
+            .take_while(|(y, _)| *y <= small.y + self.max_window)
+            .any(|(_, body)| {
+                let dy = (small.y - body.y).abs();
+                body.font_size >= small.font_size * 1.2
+                    && dy > body.font_size * 0.05
+                    && dy <= body.font_size * 0.8
+                    && {
+                        let gap_after_body = small.x - (body.x + body.width);
+                        let gap_before_body = body.x - (small.x + small.width);
+                        (-attach_gap..=attach_gap).contains(&gap_after_body)
+                            || (-attach_gap..=attach_gap).contains(&gap_before_body)
+                    }
+            })
+    }
 }
 
 /// Detect tables in a set of text items from a single page
@@ -176,11 +215,12 @@ pub fn detect_tables(items: &[TextItem], base_font_size: f32, skip_body_font: bo
     // === Pass 1: Small-font tables (existing behavior) ===
     let table_font_threshold = base_font_size * 0.90;
 
+    let script_index = ScriptBodyIndex::new(items);
     let table_candidates: Vec<(usize, &TextItem)> = items
         .iter()
         .enumerate()
         .filter(|(_, item)| item.font_size <= table_font_threshold && item.font_size >= 6.0)
-        .filter(|(_, item)| !is_script_attachment(item, items))
+        .filter(|(_, item)| !script_index.is_script_attachment(item))
         .collect();
 
     if table_candidates.len() >= 6 {
@@ -198,9 +238,11 @@ pub fn detect_tables(items: &[TextItem], base_font_size: f32, skip_body_font: bo
             }
 
             for (_, it) in &region_items {
+                // Coordinates and metrics only — document text must not
+                // leak into logs.
                 log::debug!(
-                    "  region item: {:?} x={:.1} y={:.1} w={:.1} fs={:.1} font={}",
-                    it.text,
+                    "  region item: {} chars x={:.1} y={:.1} w={:.1} fs={:.1} font={}",
+                    it.text.chars().count(),
                     it.x,
                     it.y,
                     it.width,
@@ -613,23 +655,28 @@ fn detect_table_in_region(items: &[(usize, &TextItem)], mode: TableDetectionMode
         cells.push(row_cells);
     }
 
-    // Validation 0: reject tiny all-numeric fragments. A ≤2-row grid whose
-    // every cell is a bare 1-2 digit number carries no tabular information —
-    // in practice these are exponent/subscript clusters from display math
-    // (e.g. the W^-2, W^-4 determinant superscripts in TeX papers) that
-    // happen to align. Emitting them as plain text lines is strictly better.
-    let nonempty_cells: Vec<&String> = cells.iter().flatten().filter(|c| !c.is_empty()).collect();
-    if rows.len() <= 2
-        && !nonempty_cells.is_empty()
-        && nonempty_cells
-            .iter()
-            .all(|c| c.len() <= 2 && c.chars().all(|ch| ch.is_ascii_digit()))
-    {
-        log::debug!(
-            "  validation 0 fail: tiny all-numeric fragment ({} cells)",
-            nonempty_cells.len()
-        );
-        return None;
+    // Validation 0 (small-font pass only): reject tiny all-numeric
+    // fragments. A ≤2-row grid whose every cell is a bare 1-2 digit number
+    // carries no tabular information — in practice these are
+    // exponent/subscript clusters from display math (e.g. the W^-2, W^-4
+    // determinant superscripts in TeX papers) that happen to align. Emitting
+    // them as plain text lines is strictly better. Body-font tables are not
+    // subject to this veto: their cells cannot be script glyphs.
+    if matches!(mode, TableDetectionMode::SmallFont) {
+        let nonempty_cells: Vec<&String> =
+            cells.iter().flatten().filter(|c| !c.is_empty()).collect();
+        if rows.len() <= 2
+            && !nonempty_cells.is_empty()
+            && nonempty_cells
+                .iter()
+                .all(|c| c.len() <= 2 && c.chars().all(|ch| ch.is_ascii_digit()))
+        {
+            log::debug!(
+                "  validation 0 fail: tiny all-numeric fragment ({} cells)",
+                nonempty_cells.len()
+            );
+            return None;
+        }
     }
 
     // Validation 1: some rows should have content in first column.
@@ -1726,7 +1773,7 @@ mod tests {
         let body = make_item("log", 100.0, 500.0, 10.0, 15.0);
         let sub = make_item("10", 115.5, 497.0, 7.0, 7.0);
         let items = vec![body, sub.clone()];
-        assert!(is_script_attachment(&sub, &items));
+        assert!(ScriptBodyIndex::new(&items).is_script_attachment(&sub));
     }
 
     #[test]
@@ -1735,7 +1782,7 @@ mod tests {
         let body = make_item("Hartley", 200.0, 500.0, 10.0, 35.0);
         let sup = make_item("2", 235.8, 504.0, 6.6, 3.5);
         let items = vec![body, sup.clone()];
-        assert!(is_script_attachment(&sup, &items));
+        assert!(ScriptBodyIndex::new(&items).is_script_attachment(&sup));
     }
 
     #[test]
@@ -1745,7 +1792,18 @@ mod tests {
         let body = make_item("Revenue", 100.0, 500.0, 10.0, 40.0);
         let cell = make_item("1,234", 180.0, 500.0, 7.0, 20.0);
         let items = vec![body, cell.clone()];
-        assert!(!is_script_attachment(&cell, &items));
+        assert!(!ScriptBodyIndex::new(&items).is_script_attachment(&cell));
+    }
+
+    #[test]
+    fn script_attachment_ignores_same_baseline_neighbor_cell() {
+        // A small cell immediately beside a larger label cell on the SAME
+        // baseline is a table layout, not a subscript — a genuine baseline
+        // offset is required.
+        let label = make_item("Total", 100.0, 500.0, 10.0, 25.0);
+        let cell = make_item("42", 127.0, 500.0, 7.5, 9.0);
+        let items = vec![label, cell.clone()];
+        assert!(!ScriptBodyIndex::new(&items).is_script_attachment(&cell));
     }
 
     #[test]
@@ -1754,37 +1812,53 @@ mod tests {
         let body = make_item("Header", 100.0, 500.0, 10.0, 30.0);
         let cell = make_item("42", 131.0, 486.0, 7.0, 10.0);
         let items = vec![body, cell.clone()];
-        assert!(!is_script_attachment(&cell, &items));
+        assert!(!ScriptBodyIndex::new(&items).is_script_attachment(&cell));
+    }
+
+    /// The equation-subscript + footnote layout from Shannon entropy.pdf
+    /// page 1, with real coordinates. Without body anchors ("log" items) the
+    /// small-font items alone must form a phantom 3-column table — proving
+    /// this layout exercises the detection path — and adding the anchors
+    /// must suppress it via the script-attachment filter.
+    fn shannon_page1_small_items() -> Vec<TextItem> {
+        vec![
+            // Equation subscripts (7.4pt): log2 M = log10 M / log10 2
+            make_item("2", 267.4, 133.9, 7.4, 3.7),
+            make_item("10", 306.2, 133.9, 7.4, 7.4),
+            make_item("10", 342.7, 133.9, 7.4, 7.4),
+            make_item("10", 325.0, 118.9, 7.4, 7.4),
+            // Footnote block (8pt)
+            make_item("Bell System Technical Journal,", 295.7, 101.9, 8.0, 95.0),
+            make_item(
+                "April 1924, p. 324; Certain Topics in",
+                396.7,
+                101.9,
+                8.0,
+                130.0,
+            ),
+            make_item("v. 47, April 1928, p. 617.", 250.9, 92.5, 8.0, 90.0),
+            make_item("Bell System Technical Journal,", 264.2, 82.6, 8.0, 95.0),
+            make_item("July 1928, p. 535.", 364.3, 82.6, 8.0, 65.0),
+        ]
     }
 
     #[test]
     fn equation_scripts_do_not_form_phantom_table() {
-        // Regression: display equations with sub/superscripts plus footnote
-        // lines used to form a fake small-font table (Shannon entropy.pdf p.1).
-        let mut items = Vec::new();
-        // Display equation: log2 M = log10 M / log10 2 with small subscripts
-        for (text, x, sub_x) in [("log", 200.0, 215.5), ("log", 260.0, 275.5)] {
-            items.push(make_item(text, x, 500.0, 10.0, 15.0));
-            items.push(make_item("10", sub_x, 497.0, 7.0, 7.0));
-        }
-        items.push(make_item("log", 200.0, 480.0, 10.0, 15.0));
-        items.push(make_item("2", 215.5, 477.0, 7.0, 3.5));
-        items.push(make_item("M", 230.0, 480.0, 10.0, 9.0));
-        // Footnote block below (single wide column of small text)
-        items.push(make_item(
-            "1 Nyquist, H., Certain Factors Affecting Telegraph Speed",
-            72.0,
-            440.0,
-            8.0,
-            300.0,
-        ));
-        items.push(make_item(
-            "2 Hartley, R. V. L., Transmission of Information",
-            72.0,
-            430.0,
-            8.0,
-            280.0,
-        ));
+        // Sanity: without the larger-font anchors the same items DO form a
+        // phantom table, so this layout genuinely reaches region detection.
+        let bare = shannon_page1_small_items();
+        assert!(
+            !detect_tables(&bare, 10.0, false).is_empty(),
+            "test layout must form a phantom table when the filter cannot fire"
+        );
+
+        // With the "log" anchors adjacent to each subscript, the script
+        // filter removes the subscripts and no table survives.
+        let mut items = shannon_page1_small_items();
+        items.push(make_item("log", 253.0, 137.0, 10.0, 13.5));
+        items.push(make_item("log", 291.5, 137.0, 10.0, 13.5));
+        items.push(make_item("log", 328.0, 137.0, 10.0, 13.5));
+        items.push(make_item("log", 310.3, 122.0, 10.0, 13.5));
         let tables = detect_tables(&items, 10.0, false);
         assert!(
             tables.is_empty(),

@@ -406,51 +406,57 @@ pub(crate) fn compute_heading_tiers(lines: &[TextLine], base_size: f32) -> Vec<f
     let mut heading_sizes: Vec<f32> = Vec::new();
 
     for line in lines {
-        if let Some(first) = line.items.first() {
-            if first.font_size / base_size >= 1.2 {
-                // Digit-only lines (page numbers, issue numbers) must not
-                // define heading tiers: a large bold folio claims tier 0 and
-                // blocks the bold-size fallback for the document's real
-                // same-size headings.
-                let text = line.text();
-                let t = text.trim();
-                if !t.is_empty() && t.chars().all(|c| !c.is_alphabetic()) {
-                    continue;
-                }
-                // Near-empty lines (oversized glyph runs — display-math
-                // operators like ∫∫, ⟨⟩ or √ that decode as "ZZ"/"h i"/"p p"
-                // in TeX bitmap fonts, drop caps) must not define tiers
-                // either. Real headings have at least three letters, two of
-                // them distinct.
-                let mut letters: Vec<char> = t
-                    .chars()
-                    .filter(|c| c.is_alphabetic())
-                    .flat_map(|c| c.to_lowercase())
-                    .collect();
-                let total_letters = letters.len();
-                letters.sort_unstable();
-                letters.dedup();
-                if total_letters < 3 || letters.len() < 2 {
-                    continue;
-                }
-                // A heading line is uniformly large. Mixed-size lines (a
-                // drop cap or large math glyph followed by body-size text)
-                // are body content, not headings.
-                let uniform = line
-                    .items
-                    .iter()
-                    .all(|i| i.font_size >= first.font_size * 0.8);
-                if !uniform {
-                    continue;
-                }
-                log::debug!(
-                    "heading tier candidate: fs={:.1} page={} {:?}",
-                    first.font_size,
-                    line.page,
-                    &t[..t.len().min(60)]
-                );
-                heading_sizes.push(first.font_size);
+        // Use the dominant (alphanumeric-weighted) size — the same notion
+        // heading DETECTION matches against tiers — so a large leading
+        // ornament or section marker can't register a tier at a size no
+        // line will ever be classified with.
+        let Some(dominant) = line_dominant_font_size(line) else {
+            continue;
+        };
+        if dominant / base_size >= 1.2 {
+            // Digit-only lines (page numbers, issue numbers) must not
+            // define heading tiers: a large bold folio claims tier 0 and
+            // blocks the bold-size fallback for the document's real
+            // same-size headings.
+            let text = line.text();
+            let t = text.trim();
+            if !t.is_empty() && t.chars().all(|c| !c.is_alphabetic()) {
+                continue;
             }
+            // Near-empty lines (oversized glyph runs — display-math
+            // operators like ∫∫, ⟨⟩ or √ that decode as "ZZ"/"h i"/"p p"
+            // in TeX bitmap fonts, drop caps) must not define tiers
+            // either. Real headings have at least three letters, two of
+            // them distinct.
+            let mut letters: Vec<char> = t
+                .chars()
+                .filter(|c| c.is_alphabetic())
+                .flat_map(|c| c.to_lowercase())
+                .collect();
+            let total_letters = letters.len();
+            letters.sort_unstable();
+            letters.dedup();
+            if total_letters < 3 || letters.len() < 2 {
+                continue;
+            }
+            // A heading line is uniformly sized: every item within ±20% of
+            // the dominant size. Mixed-size lines (a drop cap or oversized
+            // math glyph anywhere in the line — leading OR trailing) are
+            // body content, not headings.
+            let uniform = line
+                .items
+                .iter()
+                .all(|i| (i.font_size - dominant).abs() <= dominant * 0.2);
+            if !uniform {
+                continue;
+            }
+            log::debug!(
+                "heading tier candidate: fs={:.1} page={} {:?}",
+                dominant,
+                line.page,
+                t.chars().take(60).collect::<String>()
+            );
+            heading_sizes.push(dominant);
         }
     }
 
