@@ -977,6 +977,21 @@ pub fn to_markdown_from_items_with_rects(
     rects: &[crate::types::PdfRect],
 ) -> String {
     let document_page_count = items.iter().map(|item| item.page).max().unwrap_or(0);
+    to_markdown_from_items_with_rects_and_page_count(items, options, rects, document_page_count)
+}
+
+/// Convert positioned text items to Markdown with an authoritative PDF page count.
+///
+/// Use this overload when the owning PDF is available so trailing blank or
+/// unextracted pages are included in document-level header and folio coverage.
+/// Item-only callers can continue using [`to_markdown_from_items_with_rects`],
+/// which falls back to the highest observed item page.
+pub fn to_markdown_from_items_with_rects_and_page_count(
+    items: Vec<TextItem>,
+    options: MarkdownOptions,
+    rects: &[crate::types::PdfRect],
+    document_page_count: u32,
+) -> String {
     to_markdown_from_items_with_rects_and_lines(
         items,
         options,

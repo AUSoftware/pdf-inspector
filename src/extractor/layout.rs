@@ -970,6 +970,13 @@ const SPREAD_EDGE_FRACTION: f32 = 0.25;
 type ContextualCandidateOccurrence = (u32, f32, Vec<(usize, u32)>);
 
 fn page_number_value(item: &TextItem) -> Option<u32> {
+    if !matches!(
+        item.item_type,
+        crate::types::ItemType::Text | crate::types::ItemType::FormField
+    ) {
+        return None;
+    }
+
     let text = item.text.trim();
 
     if text.is_empty() || text.len() > 4 || !text.chars().all(|c| c.is_ascii_digit()) {
@@ -1163,7 +1170,11 @@ fn page_number_context_masks(
         HashMap::new();
     let mut indices_by_page: HashMap<u32, Vec<usize>> = HashMap::new();
     for (index, item) in items.iter().enumerate() {
-        if !item.text.trim().is_empty() {
+        if matches!(
+            item.item_type,
+            crate::types::ItemType::Text | crate::types::ItemType::FormField
+        ) && !item.text.trim().is_empty()
+        {
             indices_by_page.entry(item.page).or_default().push(index);
         }
     }
@@ -1206,13 +1217,49 @@ fn page_number_context_masks(
                     end += 1;
                 }
 
-                let has_context = row[start..end].iter().any(|&index| {
+                let group = &row[start..end];
+                let has_lexical_context = group.iter().any(|&index| {
                     candidate_values[index].is_none()
                         && items[index]
                             .text
                             .chars()
-                            .any(|character| character.is_alphanumeric())
+                            .any(|character| character.is_alphabetic())
                 });
+                // Numeric data near a page edge also needs protection, but a
+                // lone long integer beside a short candidate is not enough to
+                // establish context. Preserve explicit numeric structures
+                // (list markers, ranges, comma-formatted values, dotted index
+                // entries) and dense runs with at least one long integer.
+                let numeric_like = |text: &str| {
+                    text.chars().any(|character| character.is_numeric())
+                        && !text.chars().any(|character| character.is_alphabetic())
+                };
+                let has_structured_numeric_context = group.iter().any(|&index| {
+                    if candidate_values[index].is_some() {
+                        return false;
+                    }
+                    let text = items[index].text.trim();
+                    numeric_like(text)
+                        && text
+                            .chars()
+                            .any(|character| !character.is_numeric() && !character.is_whitespace())
+                });
+                let numeric_item_count = group
+                    .iter()
+                    .filter(|&&index| numeric_like(items[index].text.trim()))
+                    .count();
+                let has_long_integer = group.iter().any(|&index| {
+                    candidate_values[index].is_none()
+                        && items[index]
+                            .text
+                            .trim()
+                            .chars()
+                            .all(|character| character.is_numeric())
+                });
+                let has_dense_numeric_context = numeric_item_count >= 3 && has_long_integer;
+                let has_context = has_lexical_context
+                    || has_structured_numeric_context
+                    || has_dense_numeric_context;
                 let has_candidate = row[start..end]
                     .iter()
                     .any(|&index| candidate_values[index].is_some());

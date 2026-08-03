@@ -53,8 +53,8 @@ pub use extractor::{
     extract_text_with_positions_pages,
 };
 pub use markdown::{
-    to_markdown, to_markdown_from_items, to_markdown_from_items_with_rects, MarkdownOptions,
-    MarkdownProfile,
+    to_markdown, to_markdown_from_items, to_markdown_from_items_with_rects,
+    to_markdown_from_items_with_rects_and_page_count, MarkdownOptions, MarkdownProfile,
 };
 pub use process_mode::ProcessMode;
 pub use types::{LayoutComplexity, PdfLine, PdfRect, TextItem};
@@ -472,6 +472,11 @@ pub fn extract_pages_markdown_mem(
 
     // Compute font stats from full document (cross-page consistency).
     let font_stats = markdown::analysis::calculate_font_stats_from_items(&all_items);
+
+    // Resolve recurring contextual folios while the complete document is
+    // available. Per-page conversion cannot reconstruct recurrence evidence
+    // after the items are partitioned below.
+    let all_items = extractor::filter_markdown_page_numbers(all_items, page_count);
 
     // When caller doesn't specify pages, return every page in document order.
     let all_pages: Vec<u32>;

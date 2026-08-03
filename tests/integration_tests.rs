@@ -8,7 +8,8 @@ use pdf_inspector::{
     detect_pdf_type, detect_vector_grid_in_region_mem, extract_pages_markdown,
     extract_pages_markdown_mem, extract_tables_in_regions_mem, extract_text,
     extract_text_in_regions_mem, extract_text_with_positions, extract_text_with_positions_mem,
-    process_pdf_mem, process_pdf_with_options, to_markdown, MarkdownOptions, PdfError, PdfOptions,
+    process_pdf_mem, process_pdf_with_options, to_markdown,
+    to_markdown_from_items_with_rects_and_page_count, MarkdownOptions, PdfError, PdfOptions,
     PdfType, TextItem,
 };
 use std::collections::HashSet;
@@ -59,6 +60,80 @@ fn make_text_pdf(content: &str, media_box: &str) -> Vec<u8> {
         &mut pdf,
         &mut offsets,
         5,
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    );
+
+    let xref_start = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n", offsets.len()).as_bytes());
+    pdf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in offsets.iter().skip(1) {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF",
+            offsets.len(),
+            xref_start
+        )
+        .as_bytes(),
+    );
+
+    pdf
+}
+
+fn make_recurring_contextual_folio_pdf() -> Vec<u8> {
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    let mut offsets = vec![0usize];
+
+    fn add_object(pdf: &mut Vec<u8>, offsets: &mut Vec<usize>, id: usize, body: &str) {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{id} 0 obj\n").as_bytes());
+        pdf.extend_from_slice(body.as_bytes());
+        pdf.extend_from_slice(b"\nendobj\n");
+    }
+
+    add_object(
+        &mut pdf,
+        &mut offsets,
+        1,
+        "<< /Type /Catalog /Pages 2 0 R >>",
+    );
+    add_object(
+        &mut pdf,
+        &mut offsets,
+        2,
+        "<< /Type /Pages /Kids [3 0 R 5 0 R 7 0 R 9 0 R] /Count 4 >>",
+    );
+    for page_index in 0..4 {
+        let page_id = 3 + page_index * 2;
+        let content_id = page_id + 1;
+        add_object(
+            &mut pdf,
+            &mut offsets,
+            page_id,
+            &format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 11 0 R >> >> /Contents {content_id} 0 R >>"
+            ),
+        );
+        let page_number = page_index + 1;
+        let content = format!(
+            "BT /F1 12 Tf 1 0 0 1 25 30 Tm ({page_number}) Tj 1 0 0 1 41 30 Tm (Company report footer) Tj 1 0 0 1 72 700 Tm (Body page {page_number}) Tj ET"
+        );
+        add_object(
+            &mut pdf,
+            &mut offsets,
+            content_id,
+            &format!(
+                "<< /Length {} >>\nstream\n{}\nendstream",
+                content.len(),
+                content
+            ),
+        );
+    }
+    add_object(
+        &mut pdf,
+        &mut offsets,
+        11,
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     );
 
@@ -590,6 +665,30 @@ fn test_markdown_from_items_page_breaks() {
     assert!(!md.contains("---"));
     assert!(md.contains("Content on first page"));
     assert!(md.contains("Content on second page"));
+}
+
+#[test]
+fn test_markdown_page_count_overload_includes_trailing_blank_pages_in_folio_coverage() {
+    let mut items = Vec::new();
+    for (page, value) in [(1, "1"), (2, "2"), (3, "3"), (4, "4")] {
+        items.push(make_text_item(value, 25.0, 30.0, 12.0, page));
+        items.push(make_text_item(
+            "Company report footer",
+            41.0,
+            30.0,
+            12.0,
+            page,
+        ));
+    }
+    let options = MarkdownOptions {
+        strip_headers_footers: false,
+        ..MarkdownOptions::default()
+    };
+
+    let md = to_markdown_from_items_with_rects_and_page_count(items, options, &[], 20);
+
+    assert!(md.contains("1 Company report footer"));
+    assert!(md.contains("4 Company report footer"));
 }
 
 // ============================================================================
@@ -2958,6 +3057,25 @@ fn test_extract_pages_markdown_basic() {
     // Text-based PDF should produce non-empty markdown
     assert!(!result.pages[0].markdown.is_empty());
     assert!(!result.pages[0].needs_ocr);
+}
+
+#[test]
+fn test_extract_pages_markdown_uses_document_wide_folio_context() {
+    let pdf = make_recurring_contextual_folio_pdf();
+    let result = extract_pages_markdown_mem(&pdf, None).unwrap();
+
+    assert_eq!(result.pages.len(), 4);
+    for (index, page) in result.pages.iter().enumerate() {
+        assert!(page.markdown.contains("Company report footer"));
+        assert!(
+            !page
+                .markdown
+                .contains(&format!("{} Company report footer", index + 1)),
+            "recurring contextual folio survived on page {}: {}",
+            index + 1,
+            page.markdown
+        );
+    }
 }
 
 #[test]

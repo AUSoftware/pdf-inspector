@@ -1650,15 +1650,40 @@ mod tests {
     }
 
     #[test]
-    fn numeric_page_edge_candidates_do_not_contextualize_each_other() {
+    fn numeric_only_page_edge_runs_do_not_contextualize_folios() {
         let mut page_number = make_merge_item("42", 25.0, 12.0);
         page_number.y = 50.0;
-        let mut year = make_merge_item("2026", 43.0, 24.0);
-        year.y = 50.0;
+        let mut long_number = make_merge_item("12345", 43.0, 30.0);
+        long_number.y = 50.0;
 
-        let lines = group_into_lines(vec![page_number, year]);
+        let lines = group_into_lines(vec![page_number, long_number]);
 
-        assert!(lines.is_empty());
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text(), "12345");
+    }
+
+    #[test]
+    fn structured_and_dense_numeric_page_edge_runs_are_preserved() {
+        let mut list_marker = make_merge_item("11)", 25.0, 18.0);
+        list_marker.y = 50.0;
+        let mut chapter = make_merge_item("13", 47.0, 12.0);
+        chapter.y = 50.0;
+
+        let mut isbn_prefix = make_merge_item("9", 25.0, 6.0);
+        isbn_prefix.page = 2;
+        isbn_prefix.y = 50.0;
+        let mut isbn_mid = make_merge_item("780113", 35.0, 36.0);
+        isbn_mid.page = 2;
+        isbn_mid.y = 50.0;
+        let mut isbn_end = make_merge_item("227426", 75.0, 36.0);
+        isbn_end.page = 2;
+        isbn_end.y = 50.0;
+
+        let lines = group_into_lines(vec![list_marker, chapter, isbn_prefix, isbn_mid, isbn_end]);
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text(), "11) 13");
+        assert_eq!(lines[1].text(), "9 780113 227426");
     }
 
     #[test]
