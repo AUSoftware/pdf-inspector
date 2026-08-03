@@ -966,6 +966,7 @@ const PAGE_NUMBER_BOTTOM_Y: f32 = 100.0;
 const PAGE_NUMBER_TOP_Y: f32 = 720.0;
 const SPREAD_MIN_CONTENT_WIDTH_EM: f32 = 40.0;
 const SPREAD_EDGE_FRACTION: f32 = 0.25;
+const ADJACENT_PAGE_MIN_CONTENT_WIDTH_EM: f32 = 26.0;
 
 type ContextualCandidateOccurrence = (u32, f32, Vec<(usize, u32)>);
 
@@ -1197,9 +1198,10 @@ fn mark_spread_folio_pairs(
 ///
 /// Facing pages commonly put folios on opposite outer edges. A running header
 /// can touch the right-hand folio while the next left-hand folio is isolated.
-/// The isolated candidate is strong evidence when the values advance with the
-/// PDF pages, the baselines and font sizes match, and the candidates occupy
-/// opposite page edges.
+/// A single isolated candidate is not enough to remove nearby contextual text.
+/// Require a second pre-existing anchor in the same advancing sequence, along
+/// with a genuinely wide content span, stable baselines/font sizes, and
+/// alternating outer edges.
 fn mark_adjacent_page_folio_pairs(
     items: &[TextItem],
     candidate_values: &[Option<u32>],
@@ -1212,17 +1214,7 @@ fn mark_adjacent_page_folio_pairs(
     // later candidates; every match must be anchored by evidence established
     // before this cross-page pass.
     let strong_folio_evidence = explicit_folio.to_vec();
-    let mut candidates_by_page: HashMap<u32, Vec<usize>> = HashMap::new();
     let mut page_bounds: HashMap<u32, (f32, f32)> = HashMap::new();
-
-    for (index, value) in candidate_values.iter().enumerate() {
-        if value.is_some() {
-            candidates_by_page
-                .entry(items[index].page)
-                .or_default()
-                .push(index);
-        }
-    }
     for item in items.iter().filter(|item| !item.text.trim().is_empty()) {
         let bounds = page_bounds
             .entry(item.page)
@@ -1234,7 +1226,7 @@ fn mark_adjacent_page_folio_pairs(
     let edge_side = |index: usize| {
         let &(page_left, page_right) = page_bounds.get(&items[index].page)?;
         let page_width = page_right - page_left;
-        if page_width <= 0.0 {
+        if page_width < items[index].font_size * ADJACENT_PAGE_MIN_CONTENT_WIDTH_EM {
             return None;
         }
         let center = items[index].x + effective_width(&items[index]) / 2.0;
@@ -1249,6 +1241,37 @@ fn mark_adjacent_page_folio_pairs(
         }
     };
 
+    // Anchor sequences by outer edge and the value/page offset. This enforces
+    // forward page tracking and lets candidates query adjacent pages directly,
+    // while a baseline-sorted index finds a second independent anchor without
+    // a document-wide quadratic scan.
+    let mut anchors_by_page: HashMap<(u32, bool, i64), Vec<usize>> = HashMap::new();
+    let mut anchors_by_sequence: HashMap<(bool, i64), Vec<usize>> = HashMap::new();
+    for (index, value) in candidate_values.iter().enumerate() {
+        let Some(value) = value else {
+            continue;
+        };
+        if *value > max_plausible_folio || (contextual[index] && !strong_folio_evidence[index]) {
+            continue;
+        }
+        let Some(side) = edge_side(index) else {
+            continue;
+        };
+        let page = items[index].page;
+        let offset = i64::from(*value) - i64::from(page);
+        anchors_by_page
+            .entry((page, side, offset))
+            .or_default()
+            .push(index);
+        anchors_by_sequence
+            .entry((side, offset))
+            .or_default()
+            .push(index);
+    }
+    for anchors in anchors_by_sequence.values_mut() {
+        anchors.sort_by(|&left, &right| items[left].y.total_cmp(&items[right].y));
+    }
+
     for (index, value) in candidate_values.iter().enumerate() {
         let Some(value) = value else {
             continue;
@@ -1261,24 +1284,38 @@ fn mark_adjacent_page_folio_pairs(
         };
 
         let page = items[index].page;
-        let paired = [page.checked_sub(1), page.checked_add(1)]
+        let offset = i64::from(*value) - i64::from(page);
+        let Some(sequence_anchors) = anchors_by_sequence.get(&(!side, offset)) else {
+            continue;
+        };
+        let neighbor = [page.checked_sub(1), page.checked_add(1)]
             .into_iter()
             .flatten()
-            .filter_map(|neighbor_page| candidates_by_page.get(&neighbor_page))
+            .filter_map(|neighbor_page| anchors_by_page.get(&(neighbor_page, !side, offset)))
             .flatten()
-            .any(|&neighbor_index| {
-                if contextual[neighbor_index] && !strong_folio_evidence[neighbor_index] {
-                    return false;
-                }
-                let neighbor_value = candidate_values[neighbor_index].unwrap();
-                let page_delta = items[neighbor_index].page.abs_diff(page);
-                value.abs_diff(neighbor_value) == page_delta
-                    && neighbor_value <= max_plausible_folio
-                    && edge_side(neighbor_index) == Some(!side)
-                    && (items[index].y - items[neighbor_index].y).abs() < PAGE_NUMBER_Y_TOLERANCE
+            .copied()
+            .find(|&neighbor_index| {
+                (items[index].y - items[neighbor_index].y).abs() < PAGE_NUMBER_Y_TOLERANCE
                     && (items[index].font_size - items[neighbor_index].font_size).abs() < 1.0
             });
-        if paired {
+        let Some(neighbor_index) = neighbor else {
+            continue;
+        };
+
+        let first = sequence_anchors.partition_point(|&anchor_index| {
+            items[anchor_index].y <= items[index].y - PAGE_NUMBER_Y_TOLERANCE
+        });
+        let has_second_anchor = sequence_anchors[first..]
+            .iter()
+            .take_while(|&&anchor_index| {
+                items[anchor_index].y < items[index].y + PAGE_NUMBER_Y_TOLERANCE
+            })
+            .any(|&anchor_index| {
+                items[anchor_index].page != page
+                    && items[anchor_index].page != items[neighbor_index].page
+                    && (items[index].font_size - items[anchor_index].font_size).abs() < 1.0
+            });
+        if has_second_anchor {
             explicit_folio[index] = true;
         }
     }

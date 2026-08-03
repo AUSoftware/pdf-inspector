@@ -1992,6 +1992,67 @@ mod tests {
     }
 
     #[test]
+    fn one_isolated_neighbor_does_not_remove_contextual_number() {
+        let mut body_one = make_merge_item("Body text", 50.0, 500.0);
+        body_one.y = 400.0;
+        let mut label = make_merge_item("Report", 450.0, 70.0);
+        label.y = 780.0;
+        let mut contextual = make_merge_item("1", 526.0, 7.0);
+        contextual.y = 780.0;
+
+        let mut body_two = body_one.clone();
+        body_two.page = 2;
+        let mut isolated = make_merge_item("2", 50.0, 7.0);
+        isolated.page = 2;
+        isolated.y = 780.0;
+
+        let filtered =
+            filter_markdown_page_numbers(vec![body_one, label, contextual, body_two, isolated], 2);
+
+        assert!(filtered.iter().any(|item| item.text == "Report"));
+        assert!(filtered.iter().any(|item| item.text == "1"));
+        assert!(filtered.iter().all(|item| item.text != "2"));
+    }
+
+    #[test]
+    fn narrow_content_span_does_not_establish_adjacent_page_edges() {
+        let mut body_one = make_merge_item("Body text", 100.0, 120.0);
+        body_one.y = 400.0;
+        let mut label = make_merge_item("Report", 170.0, 60.0);
+        label.y = 780.0;
+        let mut contextual = make_merge_item("1", 235.0, 7.0);
+        contextual.y = 780.0;
+
+        let mut body_two = body_one.clone();
+        body_two.page = 2;
+        let mut isolated_two = make_merge_item("2", 100.0, 7.0);
+        isolated_two.page = 2;
+        isolated_two.y = 780.0;
+
+        let mut body_four = body_one.clone();
+        body_four.page = 4;
+        let mut isolated_four = make_merge_item("4", 100.0, 7.0);
+        isolated_four.page = 4;
+        isolated_four.y = 780.0;
+
+        let filtered = filter_markdown_page_numbers(
+            vec![
+                body_one,
+                label,
+                contextual,
+                body_two,
+                isolated_two,
+                body_four,
+                isolated_four,
+            ],
+            4,
+        );
+
+        assert!(filtered.iter().any(|item| item.text == "Report"));
+        assert!(filtered.iter().any(|item| item.text == "1"));
+    }
+
+    #[test]
     fn same_edge_number_on_an_adjacent_page_is_not_folio_evidence() {
         let mut body_one = make_merge_item("Body text", 50.0, 500.0);
         body_one.y = 400.0;
