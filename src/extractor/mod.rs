@@ -1610,7 +1610,24 @@ mod tests {
         let lines = group_into_lines(items);
 
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].text(), "Page of 100 Report header");
+        assert_eq!(lines[0].text(), "Report header");
+    }
+
+    #[test]
+    fn page_of_total_expression_is_removed_without_leaving_fragments() {
+        let mut items = vec![
+            make_merge_item("Page", 482.0, 27.0),
+            make_merge_item("1", 513.0, 6.0),
+            make_merge_item("of", 523.0, 10.0),
+            make_merge_item("15", 537.0, 12.0),
+        ];
+        for item in &mut items {
+            item.y = 46.0;
+        }
+
+        let lines = group_into_lines(items);
+
+        assert!(lines.is_empty());
     }
 
     #[test]
@@ -1929,6 +1946,72 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line.text().contains("Company report footer")));
+    }
+
+    #[test]
+    fn contextual_folios_alternating_across_pages_are_removed() {
+        let headers = [
+            "Letter to shareholders",
+            "Corporate governance report",
+            "Business environment overview",
+            "Consolidated financial statements",
+        ];
+        let mut items = Vec::new();
+        for page in 1..=8 {
+            let mut body = make_merge_item("Body text", 50.0, 500.0);
+            body.page = page;
+            body.y = 400.0;
+            items.push(body);
+
+            let mut folio = make_merge_item(&(page + 22).to_string(), 0.0, 14.0);
+            folio.page = page;
+            folio.y = 780.0;
+            if page % 2 == 0 {
+                folio.x = 50.0;
+                items.push(folio);
+            } else {
+                let mut header = make_merge_item(headers[(page / 2) as usize], 350.0, 180.0);
+                header.page = page;
+                header.y = 780.0;
+                folio.x = 536.0;
+                items.extend([header, folio]);
+            }
+        }
+
+        let filtered = filter_markdown_page_numbers(items, 8);
+
+        assert!(filtered.iter().all(|item| {
+            !matches!(
+                item.text.as_str(),
+                "23" | "24" | "25" | "26" | "27" | "28" | "29" | "30"
+            )
+        }));
+        assert!(headers
+            .iter()
+            .all(|header| filtered.iter().any(|item| item.text == *header)));
+    }
+
+    #[test]
+    fn same_edge_number_on_an_adjacent_page_is_not_folio_evidence() {
+        let mut body_one = make_merge_item("Body text", 50.0, 500.0);
+        body_one.y = 400.0;
+        let mut isolated = make_merge_item("42", 50.0, 14.0);
+        isolated.y = 780.0;
+
+        let mut body_two = body_one.clone();
+        body_two.page = 2;
+        let mut contextual = make_merge_item("43", 50.0, 14.0);
+        contextual.page = 2;
+        contextual.y = 780.0;
+        let mut label = make_merge_item("cases reviewed", 70.0, 90.0);
+        label.page = 2;
+        label.y = 780.0;
+
+        let filtered =
+            filter_markdown_page_numbers(vec![body_one, isolated, body_two, contextual, label], 2);
+
+        assert!(filtered.iter().any(|item| item.text == "43"));
+        assert!(filtered.iter().any(|item| item.text == "cases reviewed"));
     }
 
     #[test]

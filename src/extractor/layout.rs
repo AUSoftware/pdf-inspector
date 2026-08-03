@@ -1192,6 +1192,98 @@ fn mark_spread_folio_pairs(
     }
 }
 
+/// Mark a contextual folio that alternates with an isolated folio on the
+/// neighboring PDF page.
+///
+/// Facing pages commonly put folios on opposite outer edges. A running header
+/// can touch the right-hand folio while the next left-hand folio is isolated.
+/// The isolated candidate is strong evidence when the values advance with the
+/// PDF pages, the baselines and font sizes match, and the candidates occupy
+/// opposite page edges.
+fn mark_adjacent_page_folio_pairs(
+    items: &[TextItem],
+    candidate_values: &[Option<u32>],
+    contextual: &[bool],
+    document_page_count: usize,
+    explicit_folio: &mut [bool],
+) {
+    let max_plausible_folio = (document_page_count as u32).saturating_mul(4).max(100);
+    // Do not let newly inferred candidates recursively become evidence for
+    // later candidates; every match must be anchored by evidence established
+    // before this cross-page pass.
+    let strong_folio_evidence = explicit_folio.to_vec();
+    let mut candidates_by_page: HashMap<u32, Vec<usize>> = HashMap::new();
+    let mut page_bounds: HashMap<u32, (f32, f32)> = HashMap::new();
+
+    for (index, value) in candidate_values.iter().enumerate() {
+        if value.is_some() {
+            candidates_by_page
+                .entry(items[index].page)
+                .or_default()
+                .push(index);
+        }
+    }
+    for item in items.iter().filter(|item| !item.text.trim().is_empty()) {
+        let bounds = page_bounds
+            .entry(item.page)
+            .or_insert((f32::INFINITY, f32::NEG_INFINITY));
+        bounds.0 = bounds.0.min(item.x);
+        bounds.1 = bounds.1.max(item.x + effective_width(item));
+    }
+
+    let edge_side = |index: usize| {
+        let &(page_left, page_right) = page_bounds.get(&items[index].page)?;
+        let page_width = page_right - page_left;
+        if page_width <= 0.0 {
+            return None;
+        }
+        let center = items[index].x + effective_width(&items[index]) / 2.0;
+        let left_edge = page_left + page_width * SPREAD_EDGE_FRACTION;
+        let right_edge = page_right - page_width * SPREAD_EDGE_FRACTION;
+        if center <= left_edge {
+            Some(false)
+        } else if center >= right_edge {
+            Some(true)
+        } else {
+            None
+        }
+    };
+
+    for (index, value) in candidate_values.iter().enumerate() {
+        let Some(value) = value else {
+            continue;
+        };
+        if !contextual[index] || explicit_folio[index] || *value > max_plausible_folio {
+            continue;
+        }
+        let Some(side) = edge_side(index) else {
+            continue;
+        };
+
+        let page = items[index].page;
+        let paired = [page.checked_sub(1), page.checked_add(1)]
+            .into_iter()
+            .flatten()
+            .filter_map(|neighbor_page| candidates_by_page.get(&neighbor_page))
+            .flatten()
+            .any(|&neighbor_index| {
+                if contextual[neighbor_index] && !strong_folio_evidence[neighbor_index] {
+                    return false;
+                }
+                let neighbor_value = candidate_values[neighbor_index].unwrap();
+                let page_delta = items[neighbor_index].page.abs_diff(page);
+                value.abs_diff(neighbor_value) == page_delta
+                    && neighbor_value <= max_plausible_folio
+                    && edge_side(neighbor_index) == Some(!side)
+                    && (items[index].y - items[neighbor_index].y).abs() < PAGE_NUMBER_Y_TOLERANCE
+                    && (items[index].font_size - items[neighbor_index].font_size).abs() < 1.0
+            });
+        if paired {
+            explicit_folio[index] = true;
+        }
+    }
+}
+
 /// Identify page-edge numeric items that belong to a nearby content run.
 ///
 /// Numeric candidates on their own do not establish context for one another.
@@ -1375,6 +1467,24 @@ fn page_number_context_masks(
                                     || is_centered_folio);
                         }
                     }
+                    // Remove the complete labeled expression rather than
+                    // leaving fragments such as `Page of 15`. A trailing
+                    // running-header suffix remains untouched.
+                    if group_is_folio
+                        && group.len() >= 4
+                        && items[group[0]].text.trim().eq_ignore_ascii_case("page")
+                        && candidate_values[group[1]].is_some()
+                        && items[group[2]].text.trim().eq_ignore_ascii_case("of")
+                        && items[group[3]]
+                            .text
+                            .trim()
+                            .chars()
+                            .all(|character| character.is_ascii_digit())
+                    {
+                        for &index in &group[..4] {
+                            explicit_folio[index] = true;
+                        }
+                    }
                 }
                 start = end;
             }
@@ -1387,6 +1497,13 @@ fn page_number_context_masks(
         &mut explicit_folio,
     );
     mark_spread_folio_pairs(items, candidate_values, &contextual, &mut explicit_folio);
+    mark_adjacent_page_folio_pairs(
+        items,
+        candidate_values,
+        &contextual,
+        document_page_count,
+        &mut explicit_folio,
+    );
 
     (contextual, explicit_folio)
 }

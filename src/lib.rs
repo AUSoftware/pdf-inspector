@@ -3798,14 +3798,8 @@ fn process_document(
                         struct_roles: struct_roles.as_ref(),
                         struct_tables: &struct_tables,
                         page_count,
-                        prefiltered_page_number_pages: options
-                            .page_filter
-                            .as_ref()
-                            .map(|_| &removed_pages),
-                        prefiltered_page_number_mask: options
-                            .page_filter
-                            .as_ref()
-                            .map(|_| removal_mask.as_slice()),
+                        prefiltered_page_number_pages: Some(&removed_pages),
+                        prefiltered_page_number_mask: Some(removal_mask.as_slice()),
                     },
                 ))
             };
