@@ -1402,7 +1402,7 @@ fn page_number_context_masks(
                     text.chars().any(|character| character.is_numeric())
                         && !text.chars().any(|character| character.is_alphabetic())
                 };
-                let has_structured_numeric_context = group.iter().any(|&index| {
+                let is_structured_numeric_context = |index: usize| {
                     if candidate_values[index].is_some() {
                         return false;
                     }
@@ -1411,7 +1411,10 @@ fn page_number_context_masks(
                         && text
                             .chars()
                             .any(|character| !character.is_numeric() && !character.is_whitespace())
-                });
+                };
+                let has_structured_numeric_context = group
+                    .iter()
+                    .any(|&index| is_structured_numeric_context(index));
                 let numeric_item_count = group
                     .iter()
                     .filter(|&&index| numeric_like(items[index].text.trim()))
@@ -1431,6 +1434,19 @@ fn page_number_context_masks(
                 let has_candidate = row[start..end]
                     .iter()
                     .any(|&index| candidate_values[index].is_some());
+                // Decorative centered folios have no lexical context, so
+                // recognize the complete delimiter-number-delimiter triplet
+                // before the contextual-content gate. This prevents `- 42 -`
+                // from leaving a malformed `- -` line.
+                if group.len() == 3
+                    && items[group[0]].text.trim() == "-"
+                    && candidate_values[group[1]].is_some()
+                    && items[group[2]].text.trim() == "-"
+                {
+                    for &index in group {
+                        explicit_folio[index] = true;
+                    }
+                }
                 if has_context && has_candidate {
                     let group = &row[start..end];
                     let group_text = group
@@ -1452,11 +1468,23 @@ fn page_number_context_masks(
                         .iter()
                         .filter_map(|&index| candidate_values[index].map(|value| (index, value)))
                         .collect();
+                    // Recurrence is only evidence for numeric slots at the
+                    // outer boundary of a contextual run. An embedded number
+                    // in repeated prose such as `Page 42 explains the result`
+                    // is substantive content, not a running folio.
+                    let recurrence_candidates: Vec<(usize, u32)> = candidates
+                        .iter()
+                        .copied()
+                        .filter(|(index, _)| {
+                            group.first() == Some(index) || group.last() == Some(index)
+                        })
+                        .collect();
                     let in_deep_margin = candidates.iter().all(|(index, _)| {
                         items[*index].y < PAGE_NUMBER_BOTTOM_Y
                             || items[*index].y > PAGE_NUMBER_TOP_Y
                     });
                     if in_deep_margin
+                        && !recurrence_candidates.is_empty()
                         && context_text
                             .chars()
                             .filter(|character| character.is_alphanumeric())
@@ -1482,11 +1510,34 @@ fn page_number_context_masks(
                         occurrences_by_signature
                             .entry(signature)
                             .or_default()
-                            .push((items[group[0]].page, items[group[0]].y, candidates));
+                            .push((
+                                items[group[0]].page,
+                                items[group[0]].y,
+                                recurrence_candidates,
+                            ));
                     }
                     for (position, &index) in group.iter().enumerate() {
-                        if candidate_values[index].is_some() {
-                            contextual[index] = true;
+                        if let Some(value) = candidate_values[index] {
+                            let adjacent_context = [position.checked_sub(1), Some(position + 1)]
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|position| group.get(position).copied())
+                                .any(|adjacent| {
+                                    candidate_values[adjacent].is_none()
+                                        && items[adjacent].text.chars().any(|character| {
+                                            !character.is_numeric() && !character.is_whitespace()
+                                        })
+                                });
+                            let max_plausible_folio =
+                                (document_page_count as u32).saturating_mul(4).max(100);
+                            // Large year/identifier-like values stay attached
+                            // to their lexical run even when a smaller numeric
+                            // candidate sits between them and the text.
+                            let implausible_folio_with_lexical_context =
+                                value > max_plausible_folio && has_lexical_context;
+                            contextual[index] = adjacent_context
+                                || has_dense_numeric_context
+                                || implausible_folio_with_lexical_context;
                             let previous = position
                                 .checked_sub(1)
                                 .map(|position| items[group[position]].text.trim());
@@ -1498,7 +1549,7 @@ fn page_number_context_masks(
                             let starts_of_expression =
                                 next.is_some_and(|text| text.eq_ignore_ascii_case("of"));
                             let is_centered_folio = previous == Some("-") && next == Some("-");
-                            explicit_folio[index] = group_is_folio
+                            explicit_folio[index] |= group_is_folio
                                 && (follows_page_label
                                     || starts_of_expression
                                     || is_centered_folio);
@@ -1561,6 +1612,24 @@ fn page_number_removal_mask(items: &[TextItem], document_page_count: usize) -> V
         .enumerate()
         .map(|(index, value)| explicit_folio[index] || (value.is_some() && !contextual[index]))
         .collect()
+}
+
+/// Return whether selected-page extraction contains a page-edge number whose
+/// folio status depends on evidence from other pages. Isolated and explicitly
+/// labeled folios can be decided locally; only contextual candidates require
+/// a document-wide extraction pass.
+pub(super) fn needs_document_page_number_context(
+    items: &[TextItem],
+    document_page_count: usize,
+) -> bool {
+    let candidate_values: Vec<Option<u32>> = items.iter().map(page_number_value).collect();
+    let (contextual, explicit_folio) =
+        page_number_context_masks(items, &candidate_values, document_page_count);
+
+    candidate_values
+        .iter()
+        .enumerate()
+        .any(|(index, value)| value.is_some() && contextual[index] && !explicit_folio[index])
 }
 
 /// Remove numeric folios using complete document context before downstream

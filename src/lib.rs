@@ -462,9 +462,25 @@ pub fn extract_pages_markdown_mem(
     let (doc, page_count) = load_document_from_mem(buffer)?;
     let font_cmaps = FontCMaps::from_doc(&doc);
 
-    // Extract ALL pages to get accurate, document-wide font stats.
+    // Extract ALL pages to get accurate, document-wide font stats. A malformed
+    // unselected page cannot make a valid requested page fail, but errors on a
+    // requested page retain the normal extraction semantics.
+    let required_pages: Option<HashSet<u32>> = pages.map(|pages| {
+        pages
+            .iter()
+            .filter_map(|page| page.checked_add(1))
+            .collect()
+    });
     let ((all_items, all_rects, all_lines), page_thresholds, gid_pages) =
-        extractor::extract_positioned_text_from_doc(&doc, &font_cmaps, None)?;
+        if let Some(required_pages) = required_pages.as_ref() {
+            extractor::extract_positioned_text_for_document_analysis(
+                &doc,
+                &font_cmaps,
+                required_pages,
+            )?
+        } else {
+            extractor::extract_positioned_text_from_doc(&doc, &font_cmaps, None)?
+        };
     let text_quality = analyze_text_quality(&all_items);
 
     // Resolve page numbers with full-document context before partitioning.
@@ -3618,10 +3634,14 @@ fn process_document(
     // Step 2 — Extraction (reuses the already-loaded document)
     let extracted = {
         let font_cmaps = FontCMaps::from_doc(&doc);
-        // Folio recurrence needs the complete document even when the caller
-        // requests selected pages. Page filtering is applied after the
-        // document-level removal mask is computed below.
-        let result = extractor::extract_positioned_text_from_doc(&doc, &font_cmaps, None);
+        // Most page-filtered requests extract only the selected pages. Gather
+        // other pages only when a selected contextual folio needs cross-page
+        // evidence; failures on those context-only pages are non-fatal.
+        let result = extractor::extract_positioned_text_with_folio_context(
+            &doc,
+            &font_cmaps,
+            options.page_filter.as_ref(),
+        );
 
         // For Mixed/template PDFs: if normal extraction produces garbage text
         // (mostly non-alphanumeric), retry with invisible (Tr=3) text included.
@@ -3640,13 +3660,21 @@ fn process_document(
                     .map(|item| item.text.as_str())
                     .collect();
                 if is_garbage_text(&sample) || sample.trim().is_empty() {
-                    extractor::extract_positioned_text_include_invisible(&doc, &font_cmaps, None)
+                    extractor::extract_positioned_text_include_invisible_with_folio_context(
+                        &doc,
+                        &font_cmaps,
+                        options.page_filter.as_ref(),
+                    )
                 } else {
                     result
                 }
             } else {
                 // Normal extraction failed — try invisible as fallback
-                extractor::extract_positioned_text_include_invisible(&doc, &font_cmaps, None)
+                extractor::extract_positioned_text_include_invisible_with_folio_context(
+                    &doc,
+                    &font_cmaps,
+                    options.page_filter.as_ref(),
+                )
             }
         } else {
             result

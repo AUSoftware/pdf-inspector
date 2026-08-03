@@ -143,17 +143,92 @@ pub(crate) fn extract_positioned_text_from_doc(
     font_cmaps: &FontCMaps,
     page_filter: Option<&HashSet<u32>>,
 ) -> Result<(PageExtraction, PageThresholds, HashSet<u32>), PdfError> {
-    extract_positioned_text_impl(doc, font_cmaps, page_filter, false)
+    extract_positioned_text_impl(doc, font_cmaps, page_filter, false, None)
 }
 
-/// Extract with option to include invisible (Tr=3) text.
-/// Used for Mixed/template PDFs where the OCR text layer is invisible.
-pub(crate) fn extract_positioned_text_include_invisible(
+/// Extract selected pages and gather document-wide folio evidence only when a
+/// selected page contains an ambiguous contextual page-edge number. Errors on
+/// selected pages remain fatal; errors on context-only pages are skipped.
+pub(crate) fn extract_positioned_text_with_folio_context(
     doc: &Document,
     font_cmaps: &FontCMaps,
     page_filter: Option<&HashSet<u32>>,
 ) -> Result<(PageExtraction, PageThresholds, HashSet<u32>), PdfError> {
-    extract_positioned_text_impl(doc, font_cmaps, page_filter, true)
+    extract_positioned_text_with_folio_context_impl(doc, font_cmaps, page_filter, false)
+}
+
+/// Invisible-text variant of [`extract_positioned_text_with_folio_context`].
+pub(crate) fn extract_positioned_text_include_invisible_with_folio_context(
+    doc: &Document,
+    font_cmaps: &FontCMaps,
+    page_filter: Option<&HashSet<u32>>,
+) -> Result<(PageExtraction, PageThresholds, HashSet<u32>), PdfError> {
+    extract_positioned_text_with_folio_context_impl(doc, font_cmaps, page_filter, true)
+}
+
+fn extract_positioned_text_with_folio_context_impl(
+    doc: &Document,
+    font_cmaps: &FontCMaps,
+    page_filter: Option<&HashSet<u32>>,
+    include_invisible: bool,
+) -> Result<(PageExtraction, PageThresholds, HashSet<u32>), PdfError> {
+    let Some(required_pages) = page_filter else {
+        return extract_positioned_text_impl(doc, font_cmaps, None, include_invisible, None);
+    };
+
+    let (
+        (mut selected_items, mut selected_rects, mut selected_lines),
+        mut page_thresholds,
+        mut gid_encoded_pages,
+    ) = extract_positioned_text_impl(
+        doc,
+        font_cmaps,
+        Some(required_pages),
+        include_invisible,
+        None,
+    )?;
+    if !layout::needs_document_page_number_context(&selected_items, doc.get_pages().len()) {
+        return Ok((
+            (selected_items, selected_rects, selected_lines),
+            page_thresholds,
+            gid_encoded_pages,
+        ));
+    }
+
+    let context_pages: HashSet<u32> = doc
+        .get_pages()
+        .keys()
+        .copied()
+        .filter(|page| !required_pages.contains(page))
+        .collect();
+    let ((context_items, context_rects, context_lines), context_thresholds, context_gid_pages) =
+        extract_positioned_text_impl(
+            doc,
+            font_cmaps,
+            Some(&context_pages),
+            include_invisible,
+            Some(required_pages),
+        )?;
+    selected_items.extend(context_items);
+    selected_rects.extend(context_rects);
+    selected_lines.extend(context_lines);
+    page_thresholds.extend(context_thresholds);
+    gid_encoded_pages.extend(context_gid_pages);
+    Ok((
+        (selected_items, selected_rects, selected_lines),
+        page_thresholds,
+        gid_encoded_pages,
+    ))
+}
+
+/// Extract all pages for document-wide analysis while allowing malformed
+/// unselected pages to be skipped. Any requested page still fails normally.
+pub(crate) fn extract_positioned_text_for_document_analysis(
+    doc: &Document,
+    font_cmaps: &FontCMaps,
+    required_pages: &HashSet<u32>,
+) -> Result<(PageExtraction, PageThresholds, HashSet<u32>), PdfError> {
+    extract_positioned_text_impl(doc, font_cmaps, None, false, Some(required_pages))
 }
 
 fn extract_positioned_text_impl(
@@ -161,6 +236,7 @@ fn extract_positioned_text_impl(
     font_cmaps: &FontCMaps,
     page_filter: Option<&HashSet<u32>>,
     include_invisible: bool,
+    required_pages: Option<&HashSet<u32>>,
 ) -> Result<(PageExtraction, PageThresholds, HashSet<u32>), PdfError> {
     let pages = doc.get_pages();
     let mut all_items = Vec::new();
@@ -182,15 +258,25 @@ fn extract_positioned_text_impl(
                 continue;
             }
         }
-        let ((mut items, mut rects, mut lines), has_gid_fonts, coords_rotated) =
-            extract_page_text_items(
-                doc,
-                page_id,
-                *page_num,
-                font_cmaps,
-                include_invisible,
-                &mut style_cache,
-            )?;
+        let page_result = extract_page_text_items(
+            doc,
+            page_id,
+            *page_num,
+            font_cmaps,
+            include_invisible,
+            &mut style_cache,
+        );
+        let ((mut items, mut rects, mut lines), has_gid_fonts, coords_rotated) = match page_result {
+            Ok(extraction) => extraction,
+            Err(error) if required_pages.is_some_and(|required| !required.contains(page_num)) => {
+                debug!(
+                    "page {}: skipping context-only extraction error: {}",
+                    page_num, error
+                );
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         // Clip to the visible page box: single-page extracts and imposed
         // spreads keep neighboring pages' content in the stream, positioned
         // outside the CropBox. Extracting it interleaves invisible text into
@@ -320,7 +406,9 @@ fn extract_positioned_text_impl(
     }
 
     // Extract AcroForm field values
-    let form_items = extract_form_fields(doc, &page_id_to_num);
+    let form_items = extract_form_fields(doc, &page_id_to_num)
+        .into_iter()
+        .filter(|item| page_filter.is_none_or(|filter| filter.contains(&item.page)));
     all_items.extend(form_items);
 
     Ok((
@@ -1745,6 +1833,78 @@ mod tests {
         assert!(lines
             .iter()
             .all(|line| line.text() == "Company report footer"));
+    }
+
+    #[test]
+    fn repeated_substantive_page_number_prose_is_preserved() {
+        let mut items = Vec::new();
+        for (page, value) in [(1, "42"), (2, "43"), (3, "44"), (4, "45")] {
+            let mut page_label = make_merge_item("Page", 25.0, 28.0);
+            page_label.page = page;
+            page_label.y = 30.0;
+            let mut number = make_merge_item(value, 57.0, 12.0);
+            number.page = page;
+            number.y = 30.0;
+            let mut explanation = make_merge_item("explains the result", 73.0, 108.0);
+            explanation.page = page;
+            explanation.y = 30.0;
+            items.extend([page_label, number, explanation]);
+        }
+
+        let lines = group_into_lines(items);
+
+        assert_eq!(lines.len(), 4);
+        for (line, value) in lines.iter().zip(["42", "43", "44", "45"]) {
+            assert_eq!(line.text(), format!("Page {value} explains the result"));
+        }
+    }
+
+    #[test]
+    fn numeric_candidates_do_not_bridge_lexical_context() {
+        let mut report = make_merge_item("Report", 25.0, 40.0);
+        report.y = 30.0;
+        let mut year = make_merge_item("2026", 69.0, 24.0);
+        year.y = 30.0;
+        let mut folio = make_merge_item("42", 97.0, 12.0);
+        folio.y = 30.0;
+
+        let lines = group_into_lines(vec![report, year, folio]);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text(), "Report 2026");
+    }
+
+    #[test]
+    fn centered_folio_delimiters_are_removed_with_the_number() {
+        let mut left = make_merge_item("-", 270.0, 6.0);
+        left.y = 30.0;
+        let mut number = make_merge_item("42", 280.0, 12.0);
+        number.y = 30.0;
+        let mut right = make_merge_item("-", 296.0, 6.0);
+        right.y = 30.0;
+
+        let lines = group_into_lines(vec![left, number, right]);
+
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn centered_delimiters_inside_substantive_text_are_preserved() {
+        let mut items = vec![
+            make_merge_item("Result", 240.0, 36.0),
+            make_merge_item("-", 280.0, 6.0),
+            make_merge_item("42", 290.0, 12.0),
+            make_merge_item("-", 306.0, 6.0),
+            make_merge_item("approved", 316.0, 48.0),
+        ];
+        for item in &mut items {
+            item.y = 30.0;
+        }
+
+        let lines = group_into_lines(items);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text(), "Result-42-approved");
     }
 
     #[test]
