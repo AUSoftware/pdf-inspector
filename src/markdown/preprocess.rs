@@ -212,9 +212,13 @@ pub(crate) fn merge_drop_caps(lines: Vec<TextLine>, base_size: f32) -> Vec<TextL
                 // Only the IMMEDIATELY preceding line qualifies: the
                 // paragraph's first line sits directly above, in the same
                 // column, indented past the cap glyph by roughly the cap's
-                // width. Anything else (other columns, distant content)
-                // must not receive the character.
+                // width. It must also read as a paragraph first line —
+                // substantive body text starting with a letter — so
+                // headings, labels, or table fragments that merely fall in
+                // the geometric window are never rewritten.
                 let target = result.last_mut().filter(|prev| {
+                    let prev_text = prev.text();
+                    let prev_trimmed = prev_text.trim();
                     prev.page == line.page
                         && prev.y > line_y
                         && prev.y - line_y <= cap_span
@@ -222,10 +226,25 @@ pub(crate) fn merge_drop_caps(lines: Vec<TextLine>, base_size: f32) -> Vec<TextL
                             .items
                             .first()
                             .is_some_and(|i| i.x > cap_x && i.x - cap_x <= first.font_size * 2.5)
+                        && prev_trimmed
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_alphabetic())
+                        && prev_trimmed.chars().filter(|c| c.is_alphabetic()).count() >= 8
                 });
                 if let Some(prev_line) = target {
                     if let Some(first_item) = prev_line.items.first_mut() {
-                        first_item.text = format!("{}{}", drop_char, first_item.text);
+                        // A mid-word cap ("T" + "HE recent…") joins directly.
+                        // Leading whitespace on the remainder means the cap
+                        // is a standalone word ("A" + " long time ago…") —
+                        // preserve exactly one separating space.
+                        let had_leading_ws = first_item.text.starts_with(char::is_whitespace);
+                        let rest = first_item.text.trim_start().to_string();
+                        first_item.text = if had_leading_ws {
+                            format!("{} {}", drop_char, rest)
+                        } else {
+                            format!("{}{}", drop_char, rest)
+                        };
                     }
                     let mut line = line.clone();
                     line.items.remove(0);

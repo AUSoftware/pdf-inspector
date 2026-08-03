@@ -15,6 +15,14 @@
 /// char has no glyph in its AFM.
 pub(crate) fn base14_char_width(base_font: &str, c: char) -> Option<u16> {
     let table = base14_table(base_font)?;
+    // AFM tables key visible glyphs only; alias the invisible variants the
+    // cp1252 fallback can produce so they get the metric of their visible
+    // counterpart instead of the generic default.
+    let c = match c {
+        '\u{00A0}' => ' ', // no-break space -> space
+        '\u{00AD}' => '-', // soft hyphen -> hyphen
+        _ => c,
+    };
     table
         .binary_search_by_key(&c, |&(ch, _)| ch)
         .ok()
@@ -41,7 +49,7 @@ fn base14_table(base_font: &str) -> Option<&'static [(char, u16)]> {
     let lower = name.to_ascii_lowercase();
     let bold = lower.contains("bold");
     let italic = lower.contains("italic") || lower.contains("oblique");
-    if lower.contains("courier") || lower.contains("mono") && lower.contains("courier") {
+    if lower.contains("courier") {
         return Some(match (bold, italic) {
             (false, false) => COURIER,
             (true, false) => COURIER_BOLD,

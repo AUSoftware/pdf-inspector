@@ -173,7 +173,12 @@ impl<'a> ScriptBodyIndex<'a> {
     /// 3-column table). A genuine baseline offset is required so same-line
     /// table neighbors (a small cell beside a larger label cell) are never
     /// classified as scripts.
-    fn is_script_attachment(&self, small: &TextItem) -> bool {
+    /// `min_anchor_size` additionally constrains what counts as an
+    /// attachment target: the small-font pass accepts any sufficiently
+    /// larger item (0.0), while the body-font pass requires a heading-sized
+    /// anchor so a body-size table cell beside a slightly larger label with
+    /// baseline jitter is never treated as a script.
+    fn is_script_attachment(&self, small: &TextItem, min_anchor_size: f32) -> bool {
         let attach_gap = small.font_size.max(4.0) * 0.6;
         let lo = self
             .by_y
@@ -184,6 +189,7 @@ impl<'a> ScriptBodyIndex<'a> {
             .any(|(_, body)| {
                 let dy = (small.y - body.y).abs();
                 body.font_size >= small.font_size * 1.2
+                    && body.font_size >= min_anchor_size
                     && dy > body.font_size * 0.05
                     && dy <= body.font_size * 0.8
                     && {
@@ -220,7 +226,7 @@ pub fn detect_tables(items: &[TextItem], base_font_size: f32, skip_body_font: bo
         .iter()
         .enumerate()
         .filter(|(_, item)| item.font_size <= table_font_threshold && item.font_size >= 6.0)
-        .filter(|(_, item)| !script_index.is_script_attachment(item))
+        .filter(|(_, item)| !script_index.is_script_attachment(item, 0.0))
         .collect();
 
     if table_candidates.len() >= 6 {
@@ -278,6 +284,11 @@ pub fn detect_tables(items: &[TextItem], base_font_size: f32, skip_body_font: bo
         let body_font_low = base_font_size * 0.85;
         let body_font_high = base_font_size * 1.05;
 
+        // The script exclusion applies here too — a sub/superscript attached
+        // to a heading-size run can land in the body-font band and would
+        // otherwise re-enter table detection through this pass — but only
+        // for heading-sized anchors (>= 1.15x base): body-size table cells
+        // beside slightly larger labels must never be filtered.
         let body_candidates: Vec<(usize, &TextItem)> = items
             .iter()
             .enumerate()
@@ -287,6 +298,7 @@ pub fn detect_tables(items: &[TextItem], base_font_size: f32, skip_body_font: bo
                     && item.font_size <= body_font_high
                     && item.font_size >= 6.0
             })
+            .filter(|(_, item)| !script_index.is_script_attachment(item, base_font_size * 1.15))
             .collect();
 
         log::debug!(
@@ -1773,7 +1785,7 @@ mod tests {
         let body = make_item("log", 100.0, 500.0, 10.0, 15.0);
         let sub = make_item("10", 115.5, 497.0, 7.0, 7.0);
         let items = vec![body, sub.clone()];
-        assert!(ScriptBodyIndex::new(&items).is_script_attachment(&sub));
+        assert!(ScriptBodyIndex::new(&items).is_script_attachment(&sub, 0.0));
     }
 
     #[test]
@@ -1782,7 +1794,7 @@ mod tests {
         let body = make_item("Hartley", 200.0, 500.0, 10.0, 35.0);
         let sup = make_item("2", 235.8, 504.0, 6.6, 3.5);
         let items = vec![body, sup.clone()];
-        assert!(ScriptBodyIndex::new(&items).is_script_attachment(&sup));
+        assert!(ScriptBodyIndex::new(&items).is_script_attachment(&sup, 0.0));
     }
 
     #[test]
@@ -1792,7 +1804,7 @@ mod tests {
         let body = make_item("Revenue", 100.0, 500.0, 10.0, 40.0);
         let cell = make_item("1,234", 180.0, 500.0, 7.0, 20.0);
         let items = vec![body, cell.clone()];
-        assert!(!ScriptBodyIndex::new(&items).is_script_attachment(&cell));
+        assert!(!ScriptBodyIndex::new(&items).is_script_attachment(&cell, 0.0));
     }
 
     #[test]
@@ -1803,7 +1815,7 @@ mod tests {
         let label = make_item("Total", 100.0, 500.0, 10.0, 25.0);
         let cell = make_item("42", 127.0, 500.0, 7.5, 9.0);
         let items = vec![label, cell.clone()];
-        assert!(!ScriptBodyIndex::new(&items).is_script_attachment(&cell));
+        assert!(!ScriptBodyIndex::new(&items).is_script_attachment(&cell, 0.0));
     }
 
     #[test]
@@ -1812,7 +1824,7 @@ mod tests {
         let body = make_item("Header", 100.0, 500.0, 10.0, 30.0);
         let cell = make_item("42", 131.0, 486.0, 7.0, 10.0);
         let items = vec![body, cell.clone()];
-        assert!(!ScriptBodyIndex::new(&items).is_script_attachment(&cell));
+        assert!(!ScriptBodyIndex::new(&items).is_script_attachment(&cell, 0.0));
     }
 
     /// The equation-subscript + footnote layout from Shannon entropy.pdf
