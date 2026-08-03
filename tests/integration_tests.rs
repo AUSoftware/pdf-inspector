@@ -8,7 +8,7 @@ use pdf_inspector::{
     detect_pdf_type, detect_vector_grid_in_region_mem, extract_pages_markdown,
     extract_pages_markdown_mem, extract_tables_in_regions_mem, extract_text,
     extract_text_in_regions_mem, extract_text_with_positions, extract_text_with_positions_mem,
-    process_pdf_mem, process_pdf_with_options, to_markdown,
+    process_pdf_mem, process_pdf_mem_with_options, process_pdf_with_options, to_markdown,
     to_markdown_from_items_with_rects_and_page_count, MarkdownOptions, PdfError, PdfOptions,
     PdfType, TextItem,
 };
@@ -3076,6 +3076,18 @@ fn test_extract_pages_markdown_uses_document_wide_folio_context() {
             page.markdown
         );
     }
+}
+
+#[test]
+fn test_process_pdf_page_filter_uses_document_wide_folio_context() {
+    let pdf = make_recurring_contextual_folio_pdf();
+    let result = process_pdf_mem_with_options(&pdf, PdfOptions::new().pages([1])).unwrap();
+    let markdown = result.markdown.unwrap();
+
+    assert!(markdown.contains("Company report footer"));
+    assert!(!markdown.contains("1 Company report footer"), "{markdown}");
+    assert!(markdown.contains("Body page 1"));
+    assert!(!markdown.contains("Body page 2"));
 }
 
 #[test]

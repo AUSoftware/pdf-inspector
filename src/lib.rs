@@ -3618,34 +3618,35 @@ fn process_document(
     // Step 2 — Extraction (reuses the already-loaded document)
     let extracted = {
         let font_cmaps = FontCMaps::from_doc(&doc);
-        let result = extractor::extract_positioned_text_from_doc(
-            &doc,
-            &font_cmaps,
-            options.page_filter.as_ref(),
-        );
+        // Folio recurrence needs the complete document even when the caller
+        // requests selected pages. Page filtering is applied after the
+        // document-level removal mask is computed below.
+        let result = extractor::extract_positioned_text_from_doc(&doc, &font_cmaps, None);
 
         // For Mixed/template PDFs: if normal extraction produces garbage text
         // (mostly non-alphanumeric), retry with invisible (Tr=3) text included.
         // This unlocks OCR text layers behind scanned images.
         if pdf_type == PdfType::Mixed {
             if let Ok((ref items, _, _)) = result.as_ref().map(|(e, _, _)| e) {
-                let sample: String = items.iter().take(200).map(|i| i.text.as_str()).collect();
+                let sample: String = items
+                    .iter()
+                    .filter(|item| {
+                        options
+                            .page_filter
+                            .as_ref()
+                            .is_none_or(|filter| filter.contains(&item.page))
+                    })
+                    .take(200)
+                    .map(|item| item.text.as_str())
+                    .collect();
                 if is_garbage_text(&sample) || sample.trim().is_empty() {
-                    extractor::extract_positioned_text_include_invisible(
-                        &doc,
-                        &font_cmaps,
-                        options.page_filter.as_ref(),
-                    )
+                    extractor::extract_positioned_text_include_invisible(&doc, &font_cmaps, None)
                 } else {
                     result
                 }
             } else {
                 // Normal extraction failed — try invisible as fallback
-                extractor::extract_positioned_text_include_invisible(
-                    &doc,
-                    &font_cmaps,
-                    options.page_filter.as_ref(),
-                )
+                extractor::extract_positioned_text_include_invisible(&doc, &font_cmaps, None)
             }
         } else {
             result
@@ -3705,6 +3706,13 @@ fn process_document(
                     let mut garbage_pages: std::collections::HashSet<u32> =
                         std::collections::HashSet::new();
                     for &pg in &ocr_set {
+                        if options
+                            .page_filter
+                            .as_ref()
+                            .is_some_and(|filter| !filter.contains(&pg))
+                        {
+                            continue;
+                        }
                         let page_text: String = items
                             .iter()
                             .filter(|i| i.page == pg)
@@ -3744,12 +3752,37 @@ fn process_document(
                     }
                 };
 
+            let selected_page = |page: u32| {
+                options
+                    .page_filter
+                    .as_ref()
+                    .is_none_or(|filter| filter.contains(&page))
+            };
+            let rects: Vec<_> = rects
+                .into_iter()
+                .filter(|rect| selected_page(rect.page))
+                .collect();
+            let lines: Vec<_> = lines
+                .into_iter()
+                .filter(|line| selected_page(line.page))
+                .collect();
+            let gid_encoded_pages: HashSet<_> = gid_encoded_pages
+                .into_iter()
+                .filter(|page| selected_page(*page))
+                .collect();
+            let FolioFilteredItems {
+                items,
+                layout_items,
+                removal_mask,
+                removed_pages,
+            } = select_items_with_document_folio_context(
+                items,
+                page_count,
+                options.page_filter.as_ref(),
+            );
+
             let text_quality = analyze_text_quality(&items);
             merge_ocr_reasons(&mut ocr_reasons_by_page, text_quality.reasons_by_page);
-            let (layout_items, _, _) = extractor::filter_markdown_page_numbers_with_removed_pages(
-                items.clone(),
-                page_count,
-            );
             let layout = compute_layout_complexity(&items, &layout_items, &rects, &lines);
 
             let md = if options.mode == ProcessMode::Analyze {
@@ -3765,8 +3798,14 @@ fn process_document(
                         struct_roles: struct_roles.as_ref(),
                         struct_tables: &struct_tables,
                         page_count,
-                        prefiltered_page_number_pages: None,
-                        prefiltered_page_number_mask: None,
+                        prefiltered_page_number_pages: options
+                            .page_filter
+                            .as_ref()
+                            .map(|_| &removed_pages),
+                        prefiltered_page_number_mask: options
+                            .page_filter
+                            .as_ref()
+                            .map(|_| removal_mask.as_slice()),
                     },
                 ))
             };
@@ -5526,6 +5565,46 @@ mod looks_like_partial_table_tests {
     }
 }
 
+struct FolioFilteredItems {
+    items: Vec<types::TextItem>,
+    layout_items: Vec<types::TextItem>,
+    removal_mask: Vec<bool>,
+    removed_pages: HashSet<u32>,
+}
+
+/// Resolve folios with complete document context, then select the caller's
+/// requested pages without losing those decisions.
+fn select_items_with_document_folio_context(
+    all_items: Vec<types::TextItem>,
+    page_count: u32,
+    page_filter: Option<&HashSet<u32>>,
+) -> FolioFilteredItems {
+    let (all_layout_items, all_removed_pages, all_removal_mask) =
+        extractor::filter_markdown_page_numbers_with_removed_pages(all_items.clone(), page_count);
+    let selected_page = |page: u32| page_filter.is_none_or(|filter| filter.contains(&page));
+
+    let (items, removal_mask) = all_items
+        .into_iter()
+        .zip(all_removal_mask)
+        .filter(|(item, _)| selected_page(item.page))
+        .unzip();
+    let layout_items = all_layout_items
+        .into_iter()
+        .filter(|item| selected_page(item.page))
+        .collect();
+    let removed_pages = all_removed_pages
+        .into_iter()
+        .filter(|page| selected_page(*page))
+        .collect();
+
+    FolioFilteredItems {
+        items,
+        layout_items,
+        removal_mask,
+        removed_pages,
+    }
+}
+
 /// Analyse extracted items and rects for layout complexity.
 fn compute_layout_complexity(
     items: &[types::TextItem],
@@ -5841,6 +5920,51 @@ mod tests {
         assert!(!filtered.is_complex);
         assert!(filtered.pages_with_tables.is_empty());
         assert!(filtered.pages_with_columns.is_empty());
+    }
+
+    #[test]
+    fn page_selection_keeps_document_wide_folio_layout_decisions() {
+        let mut items = Vec::new();
+        for page in 1..=4 {
+            for row in 0..8 {
+                let y = 20.0 + row as f32 * 8.0;
+                let mut folio = test_item(&(row * 10 + page).to_string(), 25.0, y, 12.0, 10.0);
+                folio.page = page;
+                let mut footer =
+                    test_item(&format!("Footer row {row} summary"), 43.0, y, 470.0, 10.0);
+                footer.page = page;
+                let mut body = test_item(&format!("Body{row}"), 530.0, y, 55.0, 10.0);
+                body.page = page;
+                items.extend([folio, footer, body]);
+            }
+        }
+
+        let page_one_items: Vec<_> = items
+            .iter()
+            .filter(|item| item.page == 1)
+            .cloned()
+            .collect();
+        let (page_local_layout, _, _) =
+            extractor::filter_markdown_page_numbers_with_removed_pages(page_one_items.clone(), 4);
+        let page_local = compute_layout_complexity(&page_one_items, &page_local_layout, &[], &[]);
+        assert!(
+            page_local.pages_with_columns.contains(&1),
+            "fixture must reproduce page-local folio column evidence"
+        );
+
+        let selected =
+            select_items_with_document_folio_context(items, 4, Some(&HashSet::from([1])));
+        assert_eq!(
+            selected
+                .removal_mask
+                .iter()
+                .filter(|remove| **remove)
+                .count(),
+            8
+        );
+        let document_wide =
+            compute_layout_complexity(&selected.items, &selected.layout_items, &[], &[]);
+        assert!(!document_wide.pages_with_columns.contains(&1));
     }
 
     #[test]
