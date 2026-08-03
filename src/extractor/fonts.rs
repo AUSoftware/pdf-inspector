@@ -138,6 +138,64 @@ pub(crate) fn build_font_widths(
     widths
 }
 
+/// Visual-size scale factors for Type3 fonts, keyed by resource name.
+///
+/// A Type3 font's glyph space maps to text space through FontMatrix, so the
+/// visual height of its glyphs is `nominal_size × |matrix_y| × FontBBox
+/// height`. For a well-behaved font (matrix 0.001, bbox ≈ 1000 units) that
+/// factor is ≈ 1.0 and the nominal size is already right. TeX PK bitmap
+/// fonts (dvips → Distiller) instead use FontMatrix [1 0 0 -1 0 0] with
+/// nominal sizes like 0.12, which makes every downstream font-size heuristic
+/// (drop caps, sub/superscripts, small-font tables, line heights) see
+/// nonsense. Fonts without a usable FontBBox are omitted (treated as 1.0).
+pub(crate) fn build_type3_scales(
+    doc: &Document,
+    fonts: &std::collections::BTreeMap<Vec<u8>, &lopdf::Dictionary>,
+) -> HashMap<String, f32> {
+    let mut scales = HashMap::new();
+    for (font_name, font_dict) in fonts {
+        let is_type3 = font_dict
+            .get(b"Subtype")
+            .ok()
+            .and_then(|o| o.as_name().ok())
+            .is_some_and(|n| n == b"Type3");
+        if !is_type3 {
+            continue;
+        }
+        let num = |o: &Object| match o {
+            Object::Integer(i) => *i as f32,
+            Object::Real(r) => *r,
+            _ => 0.0,
+        };
+        let Some(matrix) = font_dict
+            .get(b"FontMatrix")
+            .ok()
+            .and_then(|o| resolve_array(doc, o))
+        else {
+            continue;
+        };
+        let Some(bbox) = font_dict
+            .get(b"FontBBox")
+            .ok()
+            .and_then(|o| resolve_array(doc, o))
+        else {
+            continue;
+        };
+        if matrix.len() < 4 || bbox.len() < 4 {
+            continue;
+        }
+        let scale_y = (num(&matrix[2]).powi(2) + num(&matrix[3]).powi(2)).sqrt();
+        let bbox_h = (num(&bbox[3]) - num(&bbox[1])).abs();
+        let scale = bbox_h * scale_y;
+        // Only store meaningful scales; degenerate bboxes ([0 0 0 0] is legal)
+        // and near-1.0 factors keep the nominal size.
+        if scale > 0.01 && (scale - 1.0).abs() > 0.05 {
+            scales.insert(String::from_utf8_lossy(font_name).to_string(), scale);
+        }
+    }
+    scales
+}
+
 /// Parse font widths from a font dictionary, dispatching by Subtype
 pub(crate) fn parse_font_widths(
     doc: &Document,
@@ -149,9 +207,62 @@ pub(crate) fn parse_font_widths(
 
     match subtype_name {
         b"Type0" => parse_type0_widths(doc, font_dict),
-        b"Type1" | b"TrueType" | b"MMType1" | b"Type3" => parse_simple_font_widths(doc, font_dict),
+        b"Type1" | b"TrueType" | b"MMType1" => parse_simple_font_widths(doc, font_dict)
+            .or_else(|| base14_fallback_widths(doc, font_dict)),
+        b"Type3" => parse_simple_font_widths(doc, font_dict),
         _ => None,
     }
+}
+
+/// Fallback metrics for non-embedded base-14 fonts whose dictionary omits
+/// `/FirstChar`/`/Widths` (legal per the PDF spec — the reader must supply
+/// standard-font metrics). Without this, every glyph advances 0 and all
+/// downstream gap-based logic (space synthesis, script detection, table
+/// columns) collapses — common in 1990s dvips/Distiller PDFs.
+///
+/// Widths are resolved per code through the font's Differences encoding when
+/// present, falling back to Latin-1 — the same order the text decoder uses —
+/// so the width of a code always matches the char we extract for it.
+fn base14_fallback_widths(doc: &Document, font_dict: &lopdf::Dictionary) -> Option<FontWidthInfo> {
+    let base_font = font_dict
+        .get(b"BaseFont")
+        .ok()
+        .and_then(|o| o.as_name().ok())
+        .map(|n| String::from_utf8_lossy(n).to_string())?;
+    if !crate::extractor::base14::is_base14_font(&base_font) {
+        return None;
+    }
+
+    let enc_map = parse_font_encoding(doc, font_dict)
+        .map(|r| r.map)
+        .unwrap_or_default();
+
+    let mut widths = HashMap::new();
+    for code in 0u16..=255 {
+        let ch = enc_map
+            .get(&(code as u8))
+            .copied()
+            .unwrap_or(code as u8 as char);
+        if let Some(w) = crate::extractor::base14::base14_char_width(&base_font, ch) {
+            widths.insert(code, w);
+        }
+    }
+    let space_width = widths.get(&32).copied().unwrap_or(250);
+
+    debug!(
+        "  base14 fallback widths for {} ({} codes mapped)",
+        base_font,
+        widths.len()
+    );
+
+    Some(FontWidthInfo {
+        widths,
+        default_width: 500,
+        space_width,
+        is_cid: false,
+        units_scale: 0.001,
+        wmode: 0,
+    })
 }
 
 /// Parse widths for simple fonts (Type1, TrueType, MMType1, Type3)

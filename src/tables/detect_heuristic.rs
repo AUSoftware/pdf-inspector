@@ -137,6 +137,26 @@ fn expand_consolidated_items(items: &[TextItem]) -> (Vec<TextItem>, Vec<usize>) 
     (expanded, index_map)
 }
 
+/// True when a small-font item is horizontally attached to a larger-font item
+/// on the same visual line — a sub/superscript in running text or math
+/// (equation subscripts, footnote markers). Script attachments are not table
+/// cells; without this filter, display equations with sub/superscripts form
+/// phantom small-font table regions (e.g. TeX papers where log₁₀ subscripts
+/// cluster with footnote lines into a fake 3-column table).
+fn is_script_attachment(small: &TextItem, all_items: &[TextItem]) -> bool {
+    let attach_gap = small.font_size.max(4.0) * 0.6;
+    all_items.iter().any(|body| {
+        body.font_size >= small.font_size * 1.2
+            && (small.y - body.y).abs() <= body.font_size * 0.8
+            && {
+                let gap_after_body = small.x - (body.x + body.width);
+                let gap_before_body = body.x - (small.x + small.width);
+                (-attach_gap..=attach_gap).contains(&gap_after_body)
+                    || (-attach_gap..=attach_gap).contains(&gap_before_body)
+            }
+    })
+}
+
 /// Detect tables in a set of text items from a single page
 pub fn detect_tables(items: &[TextItem], base_font_size: f32, skip_body_font: bool) -> Vec<Table> {
     if items.len() < 6 {
@@ -160,6 +180,7 @@ pub fn detect_tables(items: &[TextItem], base_font_size: f32, skip_body_font: bo
         .iter()
         .enumerate()
         .filter(|(_, item)| item.font_size <= table_font_threshold && item.font_size >= 6.0)
+        .filter(|(_, item)| !is_script_attachment(item, items))
         .collect();
 
     if table_candidates.len() >= 6 {
@@ -174,6 +195,18 @@ pub fn detect_tables(items: &[TextItem], base_font_size: f32, skip_body_font: bo
 
             if region_items.len() < 6 {
                 continue;
+            }
+
+            for (_, it) in &region_items {
+                log::debug!(
+                    "  region item: {:?} x={:.1} y={:.1} w={:.1} fs={:.1} font={}",
+                    it.text,
+                    it.x,
+                    it.y,
+                    it.width,
+                    it.font_size,
+                    it.font
+                );
             }
 
             if let Some(mut table) =
@@ -578,6 +611,25 @@ fn detect_table_in_region(items: &[(usize, &TextItem)], mode: TableDetectionMode
             row_cells.push(text);
         }
         cells.push(row_cells);
+    }
+
+    // Validation 0: reject tiny all-numeric fragments. A ≤2-row grid whose
+    // every cell is a bare 1-2 digit number carries no tabular information —
+    // in practice these are exponent/subscript clusters from display math
+    // (e.g. the W^-2, W^-4 determinant superscripts in TeX papers) that
+    // happen to align. Emitting them as plain text lines is strictly better.
+    let nonempty_cells: Vec<&String> = cells.iter().flatten().filter(|c| !c.is_empty()).collect();
+    if rows.len() <= 2
+        && !nonempty_cells.is_empty()
+        && nonempty_cells
+            .iter()
+            .all(|c| c.len() <= 2 && c.chars().all(|ch| ch.is_ascii_digit()))
+    {
+        log::debug!(
+            "  validation 0 fail: tiny all-numeric fragment ({} cells)",
+            nonempty_cells.len()
+        );
+        return None;
     }
 
     // Validation 1: some rows should have content in first column.
@@ -1646,6 +1698,99 @@ fn try_add_label_column(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ItemType;
+
+    fn make_item(text: &str, x: f32, y: f32, font_size: f32, width: f32) -> TextItem {
+        TextItem {
+            text: text.to_string(),
+            x,
+            y,
+            width,
+            height: font_size,
+            font: "TestFont".to_string(),
+            font_size,
+            page: 1,
+            is_bold: false,
+            is_italic: false,
+            is_underline: false,
+            is_strikeout: false,
+            item_type: ItemType::Text,
+            mcid: None,
+        }
+    }
+
+    #[test]
+    fn script_attachment_detects_subscript_after_body_text() {
+        // "log" at 10pt followed immediately by subscript "10" at 7pt,
+        // slightly below the baseline (TeX display math pattern).
+        let body = make_item("log", 100.0, 500.0, 10.0, 15.0);
+        let sub = make_item("10", 115.5, 497.0, 7.0, 7.0);
+        let items = vec![body, sub.clone()];
+        assert!(is_script_attachment(&sub, &items));
+    }
+
+    #[test]
+    fn script_attachment_detects_superscript_footnote_marker() {
+        // "Hartley" at 10pt with superscript "2" raised above the baseline.
+        let body = make_item("Hartley", 200.0, 500.0, 10.0, 35.0);
+        let sup = make_item("2", 235.8, 504.0, 6.6, 3.5);
+        let items = vec![body, sup.clone()];
+        assert!(is_script_attachment(&sup, &items));
+    }
+
+    #[test]
+    fn script_attachment_ignores_small_cell_far_from_body_text() {
+        // A small-font table cell 40pt away from body text in another column
+        // must NOT be treated as a script attachment.
+        let body = make_item("Revenue", 100.0, 500.0, 10.0, 40.0);
+        let cell = make_item("1,234", 180.0, 500.0, 7.0, 20.0);
+        let items = vec![body, cell.clone()];
+        assert!(!is_script_attachment(&cell, &items));
+    }
+
+    #[test]
+    fn script_attachment_ignores_neighbor_on_different_line() {
+        // Small item directly below a body item (next row) is not a script.
+        let body = make_item("Header", 100.0, 500.0, 10.0, 30.0);
+        let cell = make_item("42", 131.0, 486.0, 7.0, 10.0);
+        let items = vec![body, cell.clone()];
+        assert!(!is_script_attachment(&cell, &items));
+    }
+
+    #[test]
+    fn equation_scripts_do_not_form_phantom_table() {
+        // Regression: display equations with sub/superscripts plus footnote
+        // lines used to form a fake small-font table (Shannon entropy.pdf p.1).
+        let mut items = Vec::new();
+        // Display equation: log2 M = log10 M / log10 2 with small subscripts
+        for (text, x, sub_x) in [("log", 200.0, 215.5), ("log", 260.0, 275.5)] {
+            items.push(make_item(text, x, 500.0, 10.0, 15.0));
+            items.push(make_item("10", sub_x, 497.0, 7.0, 7.0));
+        }
+        items.push(make_item("log", 200.0, 480.0, 10.0, 15.0));
+        items.push(make_item("2", 215.5, 477.0, 7.0, 3.5));
+        items.push(make_item("M", 230.0, 480.0, 10.0, 9.0));
+        // Footnote block below (single wide column of small text)
+        items.push(make_item(
+            "1 Nyquist, H., Certain Factors Affecting Telegraph Speed",
+            72.0,
+            440.0,
+            8.0,
+            300.0,
+        ));
+        items.push(make_item(
+            "2 Hartley, R. V. L., Transmission of Information",
+            72.0,
+            430.0,
+            8.0,
+            280.0,
+        ));
+        let tables = detect_tables(&items, 10.0, false);
+        assert!(
+            tables.is_empty(),
+            "equation scripts + footnotes must not become a table: {tables:?}"
+        );
+    }
 
     #[test]
     fn is_table_of_contents_rejects_toc() {

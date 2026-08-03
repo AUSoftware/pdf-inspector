@@ -368,6 +368,40 @@ pub(crate) fn compute_paragraph_threshold(lines: &[TextLine], base_size: f32) ->
 /// Discover distinct heading font-size tiers in the document.
 /// Returns tiers sorted largest-first (tier 0 = H1, tier 1 = H2, …).
 /// Sizes within 0.5pt are clustered into the same tier. Capped at 4 tiers.
+/// Dominant font size of a line: the size cluster (0.5pt tolerance) covering
+/// the most alphanumeric characters. A line led by an oversized ornament
+/// (drop cap, Type3 display-math delimiter) must be classified by its body
+/// text, not its first glyph — and operators/delimiters don't get a vote,
+/// so a display equation whose parens and plus signs render larger than its
+/// variables still classifies at the variables' size. Falls back to counting
+/// all non-whitespace chars for lines with no alphanumerics. Returns `None`
+/// for lines with no text.
+pub(crate) fn line_dominant_font_size(line: &TextLine) -> Option<f32> {
+    fn dominant(line: &TextLine, count_chars: fn(&str) -> usize) -> Option<f32> {
+        let mut clusters: Vec<(f32, usize)> = Vec::new();
+        for item in &line.items {
+            let chars = count_chars(&item.text);
+            if chars == 0 {
+                continue;
+            }
+            if let Some((_, count)) = clusters
+                .iter_mut()
+                .find(|(s, _)| (*s - item.font_size).abs() < 0.5)
+            {
+                *count += chars;
+            } else {
+                clusters.push((item.font_size, chars));
+            }
+        }
+        clusters
+            .into_iter()
+            .max_by_key(|&(_, count)| count)
+            .map(|(size, _)| size)
+    }
+    dominant(line, |t| t.chars().filter(|c| c.is_alphanumeric()).count())
+        .or_else(|| dominant(line, |t| t.chars().filter(|c| !c.is_whitespace()).count()))
+}
+
 pub(crate) fn compute_heading_tiers(lines: &[TextLine], base_size: f32) -> Vec<f32> {
     let mut heading_sizes: Vec<f32> = Vec::new();
 
@@ -383,6 +417,38 @@ pub(crate) fn compute_heading_tiers(lines: &[TextLine], base_size: f32) -> Vec<f
                 if !t.is_empty() && t.chars().all(|c| !c.is_alphabetic()) {
                     continue;
                 }
+                // Near-empty lines (oversized glyph runs — display-math
+                // operators like ∫∫, ⟨⟩ or √ that decode as "ZZ"/"h i"/"p p"
+                // in TeX bitmap fonts, drop caps) must not define tiers
+                // either. Real headings have at least three letters, two of
+                // them distinct.
+                let mut letters: Vec<char> = t
+                    .chars()
+                    .filter(|c| c.is_alphabetic())
+                    .flat_map(|c| c.to_lowercase())
+                    .collect();
+                let total_letters = letters.len();
+                letters.sort_unstable();
+                letters.dedup();
+                if total_letters < 3 || letters.len() < 2 {
+                    continue;
+                }
+                // A heading line is uniformly large. Mixed-size lines (a
+                // drop cap or large math glyph followed by body-size text)
+                // are body content, not headings.
+                let uniform = line
+                    .items
+                    .iter()
+                    .all(|i| i.font_size >= first.font_size * 0.8);
+                if !uniform {
+                    continue;
+                }
+                log::debug!(
+                    "heading tier candidate: fs={:.1} page={} {:?}",
+                    first.font_size,
+                    line.page,
+                    &t[..t.len().min(60)]
+                );
                 heading_sizes.push(first.font_size);
             }
         }

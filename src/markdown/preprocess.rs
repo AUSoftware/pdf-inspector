@@ -40,8 +40,9 @@ fn effective_heading_level(
         }
     }
 
-    // Fall back to font-size heuristic
-    let font = line.items.first().map(|i| i.font_size).unwrap_or(base_size);
+    // Fall back to font-size heuristic (dominant size, so a leading drop cap
+    // or oversized math delimiter doesn't reclassify a body line)
+    let font = crate::markdown::analysis::line_dominant_font_size(line).unwrap_or(base_size);
     detect_header_level(
         font,
         base_size,
@@ -168,6 +169,54 @@ pub(crate) fn merge_drop_caps(lines: Vec<TextLine>, base_size: f32) -> Vec<TextL
                 .next()
                 .map(|c| c.is_uppercase())
                 .unwrap_or(false);
+
+        // Embedded drop cap: a two-line drop cap's baseline aligns with the
+        // paragraph's SECOND line, so Y-grouping puts the glyph at the start
+        // of that line instead of on its own line. Left in place, the cap
+        // ends up mid-sentence after paragraph joining ("...which exchange T
+        // bandwidth..."). Detect it, prepend the char to the previous line
+        // (the paragraph's first line, typeset beside the cap), and drop it.
+        // The size gate is 1.8x (not 2.5x): bitmap (Type3) caps measure their
+        // glyph bbox, not the em box, so a two-line cap can be as small as
+        // ~1.9x the body size.
+        if line.items.len() > 1 {
+            let first = &line.items[0];
+            let is_embedded_cap = first.font_size >= base_size * 1.8
+                && first.text.trim().len() == 1
+                && first
+                    .text
+                    .trim()
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_uppercase())
+                && line.items[1..]
+                    .iter()
+                    .all(|i| i.font_size < base_size * 1.5)
+                && line.items[1..].iter().any(|i| i.x > first.x);
+            if is_embedded_cap {
+                let drop_char = first.text.trim().chars().next().unwrap();
+                let cap_x = first.x;
+                let cap_span = first.font_size * 1.5;
+                let line_y = line.y;
+                // The paragraph's first line sits just above, indented past
+                // the cap glyph.
+                let target = result.iter_mut().rev().find(|prev| {
+                    prev.page == line.page
+                        && prev.y > line_y
+                        && prev.y - line_y <= cap_span
+                        && prev.items.first().is_some_and(|i| i.x > cap_x)
+                });
+                if let Some(prev_line) = target {
+                    if let Some(first_item) = prev_line.items.first_mut() {
+                        first_item.text = format!("{}{}", drop_char, first_item.text);
+                    }
+                    let mut line = line.clone();
+                    line.items.remove(0);
+                    result.push(line);
+                    continue;
+                }
+            }
+        }
 
         if is_drop_cap {
             let drop_char = trimmed.chars().next().unwrap();
@@ -596,6 +645,51 @@ mod tests {
             page,
             adaptive_threshold: 0.10,
         }
+    }
+
+    fn make_item_at(text: &str, font_size: f32, x: f32) -> TextItem {
+        let mut item = make_item(text, font_size, None);
+        item.x = x;
+        item.width = text.len() as f32 * font_size * 0.5;
+        item
+    }
+
+    #[test]
+    fn test_embedded_drop_cap_moves_to_paragraph_start() {
+        // Two-line drop cap: the big "T" baseline-aligns with the paragraph's
+        // second line, so it lands as that line's first item (Shannon
+        // entropy.pdf page 1 pattern).
+        let first_line = TextLine {
+            items: vec![make_item_at(
+                "HE recent development which exchange",
+                10.0,
+                90.0,
+            )],
+            y: 712.0,
+            page: 1,
+            adaptive_threshold: 0.10,
+        };
+        let second_line = TextLine {
+            items: vec![
+                make_item_at("T", 25.0, 72.0),
+                make_item_at("bandwidth for signal-to-noise ratio", 10.0, 90.0),
+            ],
+            y: 700.0,
+            page: 1,
+            adaptive_threshold: 0.10,
+        };
+        let result = merge_drop_caps(vec![first_line, second_line], 10.0);
+        assert_eq!(result.len(), 2);
+        assert!(
+            result[0].text().starts_with("THE recent"),
+            "cap should prepend to paragraph start: {}",
+            result[0].text()
+        );
+        assert!(
+            result[1].text().starts_with("bandwidth"),
+            "cap item should be removed from second line: {}",
+            result[1].text()
+        );
     }
 
     #[test]
