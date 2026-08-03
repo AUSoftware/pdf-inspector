@@ -999,6 +999,9 @@ fn mark_repeated_folio_candidates(
     document_page_count: usize,
     explicit_folio: &mut [bool],
 ) {
+    // Both thresholds are evidence floors: short documents still need four
+    // occurrences, while long documents also need meaningful coverage. Using
+    // `min` here would make one occurrence sufficient in a one-page document.
     let min_pages = 4usize.max((document_page_count * 30).div_ceil(100));
 
     for occurrences in occurrences_by_signature.into_values() {

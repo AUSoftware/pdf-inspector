@@ -1719,6 +1719,37 @@ mod tests {
     }
 
     #[test]
+    fn sparse_repeated_margin_numbers_do_not_meet_the_folio_evidence_floor() {
+        let mut items = Vec::new();
+        for page in 1..=4 {
+            if page <= 2 {
+                let value = if page == 1 { "2" } else { "4" };
+                let mut number = make_merge_item(value, 25.0, 12.0);
+                number.page = page;
+                number.y = 30.0;
+                let mut footer = make_merge_item("Company report footer", 41.0, 120.0);
+                footer.page = page;
+                footer.y = 30.0;
+                items.extend([number, footer]);
+            } else {
+                let mut body = make_merge_item("Body text", 72.0, 54.0);
+                body.page = page;
+                body.y = 400.0;
+                items.push(body);
+            }
+        }
+
+        let lines = group_into_lines(items);
+
+        assert!(lines
+            .iter()
+            .any(|line| line.text() == "2 Company report footer"));
+        assert!(lines
+            .iter()
+            .any(|line| line.text() == "4 Company report footer"));
+    }
+
+    #[test]
     fn separated_content_is_not_treated_as_a_spread_folio_pair() {
         let mut value = make_merge_item("12", 100.0, 12.0);
         value.y = 30.0;
