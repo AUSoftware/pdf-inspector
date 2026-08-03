@@ -240,9 +240,15 @@ fn base14_fallback_widths(doc: &Document, font_dict: &lopdf::Dictionary) -> Opti
 
     let mut widths = HashMap::new();
     for code in 0u16..=255 {
+        // Resolution order: Differences override, then the font's BUILT-IN
+        // encoding (Symbol/ZapfDingbats glyphs live at positions unrelated
+        // to cp1252 — the renderer draws α for Symbol 0x61 no matter how
+        // the text decoder transliterates it, so the advance must be α's),
+        // then the cp1252-style fallback used by the text decoder.
         let ch = enc_map
             .get(&(code as u8))
             .copied()
+            .or_else(|| crate::extractor::base14::builtin_encoding_char(&base_font, code as u8))
             .unwrap_or_else(|| decode_single_byte_fallback_char(code as u8, true));
         if let Some(w) = crate::extractor::base14::base14_char_width(&base_font, ch) {
             widths.insert(code, w);
