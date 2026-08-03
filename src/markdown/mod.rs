@@ -1003,6 +1003,7 @@ pub fn to_markdown_from_items_with_rects_and_page_count(
             struct_tables: &[],
             page_count: document_page_count,
             prefiltered_page_number_pages: None,
+            prefiltered_page_number_mask: None,
         },
     )
 }
@@ -1013,9 +1014,13 @@ pub(crate) struct MarkdownDocumentContext<'a> {
         Option<&'a HashMap<u32, HashMap<i64, crate::structure_tree::StructRole>>>,
     pub(crate) struct_tables: &'a [crate::structure_tree::StructTable],
     pub(crate) page_count: u32,
-    /// Pages where an upstream document-level pass removed folios. When this
-    /// is `None`, this converter owns the filtering pass.
+    /// Pages where an upstream document-level pass removed folios. This keeps
+    /// table-continuation classification consistent after masked items drop.
     pub(crate) prefiltered_page_number_pages: Option<&'a HashSet<u32>>,
+    /// Document-level removal decisions aligned with this call's input items.
+    /// Table detection consumes the original items; the mask is applied only
+    /// after table claims have been established.
+    pub(crate) prefiltered_page_number_mask: Option<&'a [bool]>,
 }
 
 /// Convert positioned text items to markdown, using rectangles and line segments for table detection.
@@ -1041,6 +1046,7 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
         struct_tables,
         page_count: document_page_count,
         prefiltered_page_number_pages,
+        prefiltered_page_number_mask,
     } = context;
 
     if items.is_empty() {
@@ -1049,10 +1055,10 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
 
     // Table detection must retain the original collection because short
     // numeric table cells can be indistinguishable from folios until
-    // structural context is available. Callers that already filtered with
-    // full-document context provide the removed-page set so the final
-    // non-table path does not reconsider a page-local partition.
-    let items_are_prefiltered = prefiltered_page_number_pages.is_some();
+    // structural context is available. A precomputed mask carries the
+    // document-wide decision without removing items before table claims.
+    debug_assert!(prefiltered_page_number_mask.is_none_or(|mask| mask.len() == items.len()));
+    let has_precomputed_page_number_mask = prefiltered_page_number_mask.is_some();
     let removed_page_number_pages = prefiltered_page_number_pages.cloned().unwrap_or_default();
 
     // Separate images and links from text items
@@ -1060,8 +1066,9 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
     let mut page_image_regions: HashMap<u32, Vec<(f32, f32, f32, f32)>> = HashMap::new();
     let mut links: Vec<TextItem> = Vec::new();
     let mut text_items: Vec<TextItem> = Vec::new();
+    let mut text_item_page_number_mask: Vec<bool> = Vec::new();
 
-    for item in items {
+    for (input_index, item) in items.into_iter().enumerate() {
         match &item.item_type {
             ItemType::Image => {
                 page_image_regions.entry(item.page).or_default().push((
@@ -1080,6 +1087,12 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
                 }
             }
             ItemType::Text | ItemType::FormField => {
+                text_item_page_number_mask.push(
+                    prefiltered_page_number_mask
+                        .and_then(|mask| mask.get(input_index))
+                        .copied()
+                        .unwrap_or(false),
+                );
                 text_items.push(item);
             }
         }
@@ -1681,16 +1694,16 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
     };
 
     // Filter out table items and process the rest
-    let non_table_items: Vec<TextItem> = text_items
+    let non_table_items: Vec<(usize, TextItem)> = text_items
         .into_iter()
         .enumerate()
         .filter(|(idx, _)| !table_items.contains(idx))
-        .map(|(_, item)| item)
         .collect();
 
     // Find pages that are table-only (no remaining non-table text)
     let table_only_pages: HashSet<u32> = {
-        let mut pages_with_text: HashSet<u32> = non_table_items.iter().map(|i| i.page).collect();
+        let mut pages_with_text: HashSet<u32> =
+            non_table_items.iter().map(|(_, item)| item.page).collect();
         // Preserve the pre-filter continuation classification: a page that
         // originally also contained a folio does not become table-only merely
         // because an upstream document-level pass removed it.
@@ -1709,11 +1722,15 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
     // column detection on pages where table column gaps would be misidentified.
     let table_page_set: HashSet<u32> = page_tables.keys().copied().collect();
 
-    let non_table_items = if items_are_prefiltered {
+    let non_table_items = if has_precomputed_page_number_mask {
         non_table_items
+            .into_iter()
+            .filter(|(index, _)| !text_item_page_number_mask[*index])
+            .map(|(_, item)| item)
+            .collect()
     } else {
         crate::extractor::filter_markdown_page_numbers_with_removed_pages(
-            non_table_items,
+            non_table_items.into_iter().map(|(_, item)| item).collect(),
             document_page_count,
         )
         .0
@@ -1981,6 +1998,53 @@ mod tests {
         let mut it = make_item(x, y, page);
         it.width = width;
         it
+    }
+
+    #[test]
+    fn precomputed_folio_mask_preserves_numeric_table_cells() {
+        let mut items = Vec::new();
+        let mut rects = Vec::new();
+        for row in 0..4 {
+            for column in 0..2 {
+                let mut item = make_item_w(
+                    110.0 + column as f32 * 100.0,
+                    30.0 + row as f32 * 20.0,
+                    20.0,
+                    1,
+                );
+                item.text = (row * 2 + column + 1).to_string();
+                items.push(item);
+                rects.push(PdfRect {
+                    x: 100.0 + column as f32 * 100.0,
+                    y: 20.0 + row as f32 * 20.0,
+                    width: 100.0,
+                    height: 20.0,
+                    page: 1,
+                });
+            }
+        }
+
+        // Simulate document-level folio decisions that would remove every
+        // short numeric item if applied before structural table detection.
+        let removal_mask = vec![true; items.len()];
+        let removed_pages = HashSet::from([1]);
+        let markdown = to_markdown_from_items_with_rects_and_lines(
+            items,
+            MarkdownOptions::default(),
+            &rects,
+            &[],
+            MarkdownDocumentContext {
+                page_thresholds: &HashMap::new(),
+                struct_roles: None,
+                struct_tables: &[],
+                page_count: 1,
+                prefiltered_page_number_pages: Some(&removed_pages),
+                prefiltered_page_number_mask: Some(&removal_mask),
+            },
+        );
+
+        assert!(markdown.contains("|1|2|"), "{markdown}");
+        assert!(markdown.contains("|7|8|"), "{markdown}");
     }
 
     #[test]

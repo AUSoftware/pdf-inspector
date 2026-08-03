@@ -1428,12 +1428,12 @@ pub(crate) fn filter_markdown_page_numbers(
 pub(crate) fn filter_markdown_page_numbers_with_removed_pages(
     items: Vec<TextItem>,
     document_page_count: u32,
-) -> (Vec<TextItem>, HashSet<u32>) {
+) -> (Vec<TextItem>, HashSet<u32>, Vec<bool>) {
     let remove = page_number_removal_mask(&items, document_page_count as usize);
     let mut removed_pages = HashSet::new();
     let items = items
         .into_iter()
-        .zip(remove)
+        .zip(remove.iter().copied())
         .filter_map(|(item, remove)| {
             if remove {
                 removed_pages.insert(item.page);
@@ -1443,7 +1443,7 @@ pub(crate) fn filter_markdown_page_numbers_with_removed_pages(
             }
         })
         .collect();
-    (items, removed_pages)
+    (items, removed_pages, remove)
 }
 
 /// Group text items into lines, with multi-column support

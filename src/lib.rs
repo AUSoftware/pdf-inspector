@@ -467,10 +467,10 @@ pub fn extract_pages_markdown_mem(
         extractor::extract_positioned_text_from_doc(&doc, &font_cmaps, None)?;
     let text_quality = analyze_text_quality(&all_items);
 
-    // Resolve page numbers before any structural analysis. Keep the removed
-    // page set so per-page Markdown conversion can preserve document-wide
-    // decisions without re-filtering a partition.
-    let (filtered_items, removed_page_number_pages) =
+    // Resolve page numbers with full-document context before partitioning.
+    // Per-page Markdown receives the original items plus these decisions so
+    // table detection can retain legitimate numeric cells.
+    let (filtered_items, removed_page_number_pages, page_number_removal_mask) =
         extractor::filter_markdown_page_numbers_with_removed_pages(all_items.clone(), page_count);
 
     // Tables need the original numeric cells; columns use folio-cleaned
@@ -479,7 +479,6 @@ pub fn extract_pages_markdown_mem(
 
     // Compute font stats from full document (cross-page consistency).
     let font_stats = markdown::analysis::calculate_font_stats_from_items(&filtered_items);
-    let all_items = filtered_items;
 
     // When caller doesn't specify pages, return every page in document order.
     let all_pages: Vec<u32>;
@@ -510,12 +509,13 @@ pub fn extract_pages_markdown_mem(
 
         let page_1idx = page_0idx + 1;
 
-        // Filter items/rects for this page only
-        let page_items: Vec<TextItem> = all_items
+        // Partition items, removal decisions, and rects for this page only.
+        let (page_items, page_number_removal_mask): (Vec<TextItem>, Vec<bool>) = all_items
             .iter()
-            .filter(|i| i.page == page_1idx)
-            .cloned()
-            .collect();
+            .zip(&page_number_removal_mask)
+            .filter(|(item, _)| item.page == page_1idx)
+            .map(|(item, remove)| (item.clone(), *remove))
+            .unzip();
 
         let page_rects: Vec<PdfRect> = all_rects
             .iter()
@@ -548,6 +548,7 @@ pub fn extract_pages_markdown_mem(
                     struct_tables: &[],
                     page_count,
                     prefiltered_page_number_pages: Some(&removed_page_number_pages),
+                    prefiltered_page_number_mask: Some(&page_number_removal_mask),
                 },
             )
         };
@@ -3745,7 +3746,7 @@ fn process_document(
 
             let text_quality = analyze_text_quality(&items);
             merge_ocr_reasons(&mut ocr_reasons_by_page, text_quality.reasons_by_page);
-            let (layout_items, _) = extractor::filter_markdown_page_numbers_with_removed_pages(
+            let (layout_items, _, _) = extractor::filter_markdown_page_numbers_with_removed_pages(
                 items.clone(),
                 page_count,
             );
@@ -3765,6 +3766,7 @@ fn process_document(
                         struct_tables: &struct_tables,
                         page_count,
                         prefiltered_page_number_pages: None,
+                        prefiltered_page_number_mask: None,
                     },
                 ))
             };
@@ -5830,7 +5832,7 @@ mod tests {
             test_item("1", 25.0, 20.0, 12.0, 10.0),
             test_item("2", 520.0, 60.0, 12.0, 10.0),
         ];
-        let (filtered, _) =
+        let (filtered, _, _) =
             extractor::filter_markdown_page_numbers_with_removed_pages(items.clone(), 1);
         assert!(filtered.is_empty());
 
