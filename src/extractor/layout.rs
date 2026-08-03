@@ -962,6 +962,10 @@ fn spans_multiple_columns(item: &TextItem, columns: &[ColumnRegion]) -> bool {
 
 const PAGE_NUMBER_Y_TOLERANCE: f32 = 3.0;
 const PAGE_NUMBER_CONTEXT_GAP_EM: f32 = 1.5;
+const REPEATED_FOLIO_MARGIN_Y: f32 = 60.0;
+const REPEATED_FOLIO_TOP_Y: f32 = 760.0;
+
+type ContextualCandidateOccurrence = (u32, f32, Vec<(usize, u32)>);
 
 fn page_number_value(item: &TextItem) -> Option<u32> {
     let text = item.text.trim();
@@ -980,6 +984,133 @@ fn page_number_value(item: &TextItem) -> Option<u32> {
     text.parse().ok()
 }
 
+/// Mark numeric slots that advance inside a repeated deep-margin line.
+///
+/// A folio can be emitted as part of a footer text run (for example,
+/// `42 Company report`) and therefore look contextual on a single page. Across
+/// the document, however, the surrounding text and Y position repeat while the
+/// numeric slot advances. Require that full signal before treating the slot as
+/// a folio so constant metadata and substantive rows near the page edge remain
+/// untouched.
+fn mark_repeated_folio_candidates(
+    occurrences_by_signature: HashMap<String, Vec<ContextualCandidateOccurrence>>,
+    document_page_count: usize,
+    explicit_folio: &mut [bool],
+) {
+    let min_pages = 4usize.max((document_page_count * 30).div_ceil(100));
+
+    for occurrences in occurrences_by_signature.into_values() {
+        if occurrences.len() < min_pages {
+            continue;
+        }
+
+        let distinct_pages: HashSet<u32> = occurrences.iter().map(|(page, _, _)| *page).collect();
+        // Repeated table rows or duplicated drawing labels can share a
+        // signature multiple times on one page. They are not running folios.
+        if distinct_pages.len() != occurrences.len() || distinct_pages.len() < min_pages {
+            continue;
+        }
+
+        let min_y = occurrences
+            .iter()
+            .map(|(_, y, _)| *y)
+            .fold(f32::INFINITY, f32::min);
+        let max_y = occurrences
+            .iter()
+            .map(|(_, y, _)| *y)
+            .fold(f32::NEG_INFINITY, f32::max);
+        if max_y - min_y >= PAGE_NUMBER_Y_TOLERANCE {
+            continue;
+        }
+
+        let slot_count = occurrences[0].2.len();
+        if slot_count == 0
+            || occurrences
+                .iter()
+                .any(|(_, _, candidates)| candidates.len() != slot_count)
+        {
+            continue;
+        }
+
+        for slot in 0..slot_count {
+            let mut values: Vec<(u32, u32, usize)> = occurrences
+                .iter()
+                .map(|(page, _, candidates)| {
+                    let (index, value) = candidates[slot];
+                    (*page, value, index)
+                })
+                .collect();
+            values.sort_by_key(|(page, _, _)| *page);
+
+            let unique_values: HashSet<u32> = values.iter().map(|(_, value, _)| *value).collect();
+            let mostly_unique = unique_values.len() * 5 >= values.len() * 4;
+            let increasing_pairs = values
+                .windows(2)
+                .filter(|pair| pair[1].1 > pair[0].1)
+                .count();
+            let mostly_increasing = increasing_pairs * 5 >= (values.len() - 1) * 4;
+
+            if mostly_unique && mostly_increasing {
+                for (_, _, index) in values {
+                    explicit_folio[index] = true;
+                }
+            }
+        }
+    }
+}
+
+/// Mark the contextual half of a facing-page folio pair.
+///
+/// A landscape PDF can contain two printed pages per PDF page. One folio may be
+/// isolated while the other touches footer text; they remain a pair because
+/// they are consecutive, share a deep-margin baseline, and sit on opposite
+/// sides of the spread. The isolated half is strong evidence that the touching
+/// half is also a folio.
+fn mark_spread_folio_pairs(
+    items: &[TextItem],
+    candidate_values: &[Option<u32>],
+    contextual: &[bool],
+    explicit_folio: &mut [bool],
+) {
+    let mut candidates_by_page: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (index, value) in candidate_values.iter().enumerate() {
+        if value.is_some() {
+            candidates_by_page
+                .entry(items[index].page)
+                .or_default()
+                .push(index);
+        }
+    }
+
+    for page_candidates in candidates_by_page.into_values() {
+        let known_folios: Vec<usize> = page_candidates
+            .iter()
+            .copied()
+            .filter(|&index| !contextual[index] || explicit_folio[index])
+            .collect();
+
+        for index in page_candidates {
+            if !contextual[index] || explicit_folio[index] {
+                continue;
+            }
+            let Some(value) = candidate_values[index] else {
+                continue;
+            };
+            let paired = known_folios.iter().any(|&other| {
+                let other_value = candidate_values[other].unwrap();
+                let same_baseline =
+                    (items[index].y - items[other].y).abs() < PAGE_NUMBER_Y_TOLERANCE;
+                let opposite_sides = (items[index].x - items[other].x).abs()
+                    > items[index].font_size.max(items[other].font_size) * 10.0;
+                same_baseline && opposite_sides && value.abs_diff(other_value) == 1
+            });
+            if paired {
+                explicit_folio[index] = true;
+            }
+        }
+    }
+}
+
 /// Identify page-edge numeric items that belong to a nearby content run.
 ///
 /// Numeric candidates on their own do not establish context for one another.
@@ -992,12 +1123,15 @@ fn page_number_context_masks(
 ) -> (Vec<bool>, Vec<bool>) {
     let mut contextual = vec![false; items.len()];
     let mut explicit_folio = vec![false; items.len()];
+    let mut occurrences_by_signature: HashMap<String, Vec<ContextualCandidateOccurrence>> =
+        HashMap::new();
     let mut indices_by_page: HashMap<u32, Vec<usize>> = HashMap::new();
     for (index, item) in items.iter().enumerate() {
         if !item.text.trim().is_empty() {
             indices_by_page.entry(item.page).or_default().push(index);
         }
     }
+    let document_page_count = indices_by_page.len();
 
     for mut page_indices in indices_by_page.into_values() {
         page_indices.sort_by(|&left, &right| {
@@ -1038,9 +1172,13 @@ fn page_number_context_masks(
                     end += 1;
                 }
 
-                let has_context = row[start..end]
-                    .iter()
-                    .any(|&index| candidate_values[index].is_none());
+                let has_context = row[start..end].iter().any(|&index| {
+                    candidate_values[index].is_none()
+                        && items[index]
+                            .text
+                            .chars()
+                            .any(|character| character.is_alphanumeric())
+                });
                 let has_candidate = row[start..end]
                     .iter()
                     .any(|&index| candidate_values[index].is_some());
@@ -1054,6 +1192,49 @@ fn page_number_context_masks(
                         .join(" ");
                     let group_is_folio =
                         crate::text_utils::is_explicit_page_number_expression(&group_text);
+                    let context_text = group
+                        .iter()
+                        .filter(|&&index| candidate_values[index].is_none())
+                        .map(|&index| items[index].text.trim())
+                        .filter(|text| !text.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let candidates: Vec<(usize, u32)> = group
+                        .iter()
+                        .filter_map(|&index| candidate_values[index].map(|value| (index, value)))
+                        .collect();
+                    let in_deep_margin = candidates.iter().all(|(index, _)| {
+                        items[*index].y < REPEATED_FOLIO_MARGIN_Y
+                            || items[*index].y > REPEATED_FOLIO_TOP_Y
+                    });
+                    if in_deep_margin
+                        && context_text
+                            .chars()
+                            .filter(|character| character.is_alphanumeric())
+                            .count()
+                            >= 8
+                    {
+                        let signature = group
+                            .iter()
+                            .map(|&index| {
+                                if candidate_values[index].is_some() {
+                                    "{number}".to_string()
+                                } else {
+                                    items[index]
+                                        .text
+                                        .split_whitespace()
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
+                                        .to_lowercase()
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        occurrences_by_signature
+                            .entry(signature)
+                            .or_default()
+                            .push((items[group[0]].page, items[group[0]].y, candidates));
+                    }
                     for (position, &index) in group.iter().enumerate() {
                         if candidate_values[index].is_some() {
                             contextual[index] = true;
@@ -1079,6 +1260,13 @@ fn page_number_context_masks(
             }
         }
     }
+
+    mark_repeated_folio_candidates(
+        occurrences_by_signature,
+        document_page_count,
+        &mut explicit_folio,
+    );
+    mark_spread_folio_pairs(items, candidate_values, &contextual, &mut explicit_folio);
 
     (contextual, explicit_folio)
 }

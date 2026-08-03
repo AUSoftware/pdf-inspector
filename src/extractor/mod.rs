@@ -1563,6 +1563,23 @@ mod tests {
     }
 
     #[test]
+    fn decorative_marker_does_not_contextualize_numeric_page_footer() {
+        let mut marker = make_merge_item("•", 19.0, 6.0);
+        marker.y = 30.0;
+        let mut page_number = make_merge_item("42", 37.0, 10.0);
+        page_number.y = 30.0;
+        let mut footer_label = make_merge_item("Company report footer", 68.0, 120.0);
+        footer_label.y = 30.0;
+
+        let lines = group_into_lines(vec![marker, page_number, footer_label]);
+
+        assert!(lines.iter().all(|line| !line.text().contains("42")));
+        assert!(lines
+            .iter()
+            .any(|line| line.text().contains("Company report footer")));
+    }
+
+    #[test]
     fn labeled_page_number_is_removed_in_a_short_document() {
         let mut label = make_merge_item("Page", 25.0, 28.0);
         label.y = 50.0;
@@ -1658,6 +1675,67 @@ mod tests {
         assert_eq!(lines[0].text(), "13 Person");
         assert_eq!(lines[1].text(), "14 Person");
         assert_eq!(lines[2].text(), "15 Person");
+    }
+
+    #[test]
+    fn advancing_number_in_repeated_deep_margin_footer_is_removed() {
+        let mut items = Vec::new();
+        for (page, value) in [(1, "2"), (2, "4"), (3, "6"), (4, "8")] {
+            let mut page_number = make_merge_item(value, 25.0, 12.0);
+            page_number.page = page;
+            page_number.y = 30.0;
+            let mut footer = make_merge_item("Company report footer", 41.0, 120.0);
+            footer.page = page;
+            footer.y = 30.0;
+            items.extend([page_number, footer]);
+        }
+
+        let lines = group_into_lines(items);
+
+        assert_eq!(lines.len(), 4);
+        assert!(lines
+            .iter()
+            .all(|line| line.text() == "Company report footer"));
+    }
+
+    #[test]
+    fn contextual_folio_on_facing_page_spread_is_removed() {
+        let mut marker = make_merge_item("•", 19.0, 6.0);
+        marker.y = 30.0;
+        let mut left_folio = make_merge_item("326", 35.0, 17.0);
+        left_folio.y = 30.0;
+        let mut footer = make_merge_item("Company report footer", 61.0, 120.0);
+        footer.y = 30.0;
+        let mut right_folio = make_merge_item("327", 1148.0, 17.0);
+        right_folio.y = 30.0;
+
+        let lines = group_into_lines(vec![marker, left_folio, footer, right_folio]);
+
+        assert!(lines
+            .iter()
+            .all(|line| !line.text().contains("326") && !line.text().contains("327")));
+        assert!(lines
+            .iter()
+            .any(|line| line.text().contains("Company report footer")));
+    }
+
+    #[test]
+    fn constant_number_in_repeated_deep_margin_header_is_preserved() {
+        let mut items = Vec::new();
+        for page in 1..=4 {
+            let mut year = make_merge_item("2026", 25.0, 24.0);
+            year.page = page;
+            year.y = 780.0;
+            let mut header = make_merge_item("Annual report", 53.0, 78.0);
+            header.page = page;
+            header.y = 780.0;
+            items.extend([year, header]);
+        }
+
+        let lines = group_into_lines(items);
+
+        assert_eq!(lines.len(), 4);
+        assert!(lines.iter().all(|line| line.text() == "2026 Annual report"));
     }
 
     #[test]
