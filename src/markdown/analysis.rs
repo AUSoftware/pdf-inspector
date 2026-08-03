@@ -368,23 +368,95 @@ pub(crate) fn compute_paragraph_threshold(lines: &[TextLine], base_size: f32) ->
 /// Discover distinct heading font-size tiers in the document.
 /// Returns tiers sorted largest-first (tier 0 = H1, tier 1 = H2, …).
 /// Sizes within 0.5pt are clustered into the same tier. Capped at 4 tiers.
+/// Dominant font size of a line: the size cluster (0.5pt tolerance) covering
+/// the most alphanumeric characters. A line led by an oversized ornament
+/// (drop cap, Type3 display-math delimiter) must be classified by its body
+/// text, not its first glyph — and operators/delimiters don't get a vote,
+/// so a display equation whose parens and plus signs render larger than its
+/// variables still classifies at the variables' size. Falls back to counting
+/// all non-whitespace chars for lines with no alphanumerics. Returns `None`
+/// for lines with no text.
+pub(crate) fn line_dominant_font_size(line: &TextLine) -> Option<f32> {
+    fn dominant(line: &TextLine, count_chars: fn(&str) -> usize) -> Option<f32> {
+        let mut clusters: Vec<(f32, usize)> = Vec::new();
+        for item in &line.items {
+            let chars = count_chars(&item.text);
+            if chars == 0 {
+                continue;
+            }
+            if let Some((_, count)) = clusters
+                .iter_mut()
+                .find(|(s, _)| (*s - item.font_size).abs() < 0.5)
+            {
+                *count += chars;
+            } else {
+                clusters.push((item.font_size, chars));
+            }
+        }
+        clusters
+            .into_iter()
+            .max_by_key(|&(_, count)| count)
+            .map(|(size, _)| size)
+    }
+    dominant(line, |t| t.chars().filter(|c| c.is_alphanumeric()).count())
+        .or_else(|| dominant(line, |t| t.chars().filter(|c| !c.is_whitespace()).count()))
+}
+
 pub(crate) fn compute_heading_tiers(lines: &[TextLine], base_size: f32) -> Vec<f32> {
     let mut heading_sizes: Vec<f32> = Vec::new();
 
     for line in lines {
-        if let Some(first) = line.items.first() {
-            if first.font_size / base_size >= 1.2 {
-                // Digit-only lines (page numbers, issue numbers) must not
-                // define heading tiers: a large bold folio claims tier 0 and
-                // blocks the bold-size fallback for the document's real
-                // same-size headings.
-                let text = line.text();
-                let t = text.trim();
-                if !t.is_empty() && t.chars().all(|c| !c.is_alphabetic()) {
-                    continue;
-                }
-                heading_sizes.push(first.font_size);
+        // Use the dominant (alphanumeric-weighted) size — the same notion
+        // heading DETECTION matches against tiers — so a large leading
+        // ornament or section marker can't register a tier at a size no
+        // line will ever be classified with.
+        let Some(dominant) = line_dominant_font_size(line) else {
+            continue;
+        };
+        if dominant / base_size >= 1.2 {
+            // Digit-only lines (page numbers, issue numbers) must not
+            // define heading tiers: a large bold folio claims tier 0 and
+            // blocks the bold-size fallback for the document's real
+            // same-size headings.
+            let text = line.text();
+            let t = text.trim();
+            if !t.is_empty() && t.chars().all(|c| !c.is_alphabetic()) {
+                continue;
             }
+            // Near-empty lines (oversized glyph runs — display-math
+            // operators like ∫∫, ⟨⟩ or √ that decode as "ZZ"/"h i"/"p p"
+            // in TeX bitmap fonts, drop caps) must not define tiers
+            // either. Real headings have at least three letters, two of
+            // them distinct.
+            let mut letters: Vec<char> = t
+                .chars()
+                .filter(|c| c.is_alphabetic())
+                .flat_map(|c| c.to_lowercase())
+                .collect();
+            let total_letters = letters.len();
+            letters.sort_unstable();
+            letters.dedup();
+            if total_letters < 3 || letters.len() < 2 {
+                continue;
+            }
+            // A heading line is uniformly sized: every item within ±20% of
+            // the dominant size. Mixed-size lines (a drop cap or oversized
+            // math glyph anywhere in the line — leading OR trailing) are
+            // body content, not headings.
+            let uniform = line
+                .items
+                .iter()
+                .all(|i| (i.font_size - dominant).abs() <= dominant * 0.2);
+            if !uniform {
+                continue;
+            }
+            log::debug!(
+                "heading tier candidate: fs={:.1} page={} {:?}",
+                dominant,
+                line.page,
+                t.chars().take(60).collect::<String>()
+            );
+            heading_sizes.push(dominant);
         }
     }
 

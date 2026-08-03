@@ -458,6 +458,83 @@ fn is_body_size_all_bold_line(line: &TextLine, base_size: f32) -> bool {
             .all(|item| item.is_bold && (item.font_size - first.font_size).abs() < 0.5)
 }
 
+/// First-line-indent paragraph break. Justified documents (TeX/dvips output)
+/// often separate paragraphs only by indenting the first line — the vertical
+/// gap stays at normal line spacing, so the Y-gap rule never fires and whole
+/// sections merge into one wall of text.
+///
+/// Fires only when all of:
+/// - the line advance is a normal in-paragraph step (`0 < y_gap <= para_threshold`)
+/// - the left margin is established (2+ consecutive lines at the same X), so
+///   list continuations and ragged layouts don't trigger
+/// - this line starts 0.8–4 em deeper than that margin (a first-line indent,
+///   not a column jump)
+/// - the previous line ended short of the established right edge (a paragraph's
+///   last line is ragged; hanging-indent wraps like bibliography continuation
+///   lines follow a full-width line and must not split) — OR ended at a
+///   sentence boundary, which covers paragraphs whose justified last line
+///   happens to run flush (a citation's first line almost never wraps exactly
+///   at a sentence end)
+#[allow(clippy::too_many_arguments)]
+fn is_indent_paragraph_break(
+    line_x: f32,
+    y_gap: f32,
+    para_threshold: f32,
+    base_size: f32,
+    margin_x: f32,
+    margin_run: u32,
+    prev_right: f32,
+    max_right: f32,
+    prev_ends_sentence: bool,
+) -> bool {
+    let indent = line_x - margin_x;
+    margin_run >= 2
+        && y_gap > 0.0
+        && y_gap <= para_threshold
+        && indent >= base_size * 0.8
+        && indent <= base_size * 4.0
+        && (prev_right <= max_right - base_size || prev_ends_sentence)
+}
+
+/// True when a line's text ends at a sentence boundary: terminal punctuation,
+/// optionally followed by a closing quote/bracket.
+fn line_ends_sentence(text: &str) -> bool {
+    let trimmed = text.trim_end();
+    let trimmed = trimmed.trim_end_matches(['"', '\u{201D}', '\u{2019}', ')', ']']);
+    trimmed.ends_with(['.', '!', '?'])
+}
+
+/// True when math/operator symbols rival the alphanumeric content of a line —
+/// the signature of a display equation rather than prose or a heading.
+fn is_symbol_dominated(text: &str) -> bool {
+    let alnum = text.chars().filter(|c| c.is_alphanumeric()).count();
+    // Grouping characters are deliberately excluded: parenthesized short
+    // headings like "(R-12)" or "[DRAFT]" are common and are not math.
+    let mathy = text
+        .chars()
+        .filter(|c| {
+            matches!(
+                c,
+                '+' | '\u{2212}'
+                    | '='
+                    | '/'
+                    | '^'
+                    | '|'
+                    | '<'
+                    | '>'
+                    | '\u{00B1}'
+                    | '\u{00D7}'
+                    | '\u{00B7}'
+                    | '\u{2211}'
+                    | '\u{222B}'
+                    | '\u{221A}'
+                    | '\u{221E}'
+            )
+        })
+        .count();
+    mathy >= 2 && mathy * 2 >= alnum.max(1)
+}
+
 fn is_wrapped_same_style_line(prev: &TextLine, next: &TextLine, para_threshold: f32) -> bool {
     if prev.page != next.page {
         return false;
@@ -777,6 +854,12 @@ pub(super) fn to_markdown_from_lines_with_tables_and_images(
     let mut toc_suppress_page: Option<u32> = None;
     let mut inserted_tables: HashSet<(u32, usize)> = HashSet::new();
     let mut inserted_images: HashSet<(u32, usize)> = HashSet::new();
+    // First-line-indent paragraph detection state
+    let mut left_margin_x = f32::MAX;
+    let mut left_margin_run = 0u32;
+    let mut prev_right = 0.0f32;
+    let mut page_max_right = 0.0f32;
+    let mut prev_ends_sentence = false;
 
     // Collect all pages that have tables or images (including image-only pages)
     let mut all_content_pages: Vec<u32> = page_tables
@@ -851,6 +934,11 @@ pub(super) fn to_markdown_from_lines_with_tables_and_images(
             prev_y = f32::MAX;
             prev_x = 0.0;
             paragraph_in_wrapped_bold_run = false;
+            left_margin_x = f32::MAX;
+            left_margin_run = 0;
+            prev_right = 0.0;
+            page_max_right = 0.0;
+            prev_ends_sentence = false;
 
             if options.include_page_numbers {
                 output.push_str(&format!("<!-- Page {} -->\n\n", current_page));
@@ -907,7 +995,22 @@ pub(super) fn to_markdown_from_lines_with_tables_and_images(
             && !line_all_bold
             && y_gap > base_size * 1.2
             && y_gap <= para_threshold;
-        if (is_para_break || is_band_switch || is_bold_to_regular_break) && in_paragraph {
+        let is_indent_break = in_paragraph
+            && !in_list
+            && is_indent_paragraph_break(
+                line_x,
+                y_gap,
+                para_threshold,
+                base_size,
+                left_margin_x,
+                left_margin_run,
+                prev_right,
+                page_max_right,
+                prev_ends_sentence,
+            );
+        if (is_para_break || is_band_switch || is_bold_to_regular_break || is_indent_break)
+            && in_paragraph
+        {
             output.push_str("\n\n");
             in_paragraph = false;
             paragraph_in_wrapped_bold_run = false;
@@ -916,6 +1019,21 @@ pub(super) fn to_markdown_from_lines_with_tables_and_images(
         // Let the continuation check below decide if we're still in a list
         prev_y = line.y;
         prev_x = line_x;
+        // Track the stable left margin and line right edges for
+        // first-line-indent paragraph detection
+        if (line_x - left_margin_x).abs() <= 2.0 {
+            left_margin_run += 1;
+        } else {
+            left_margin_x = line_x;
+            left_margin_run = 1;
+        }
+        prev_right = line
+            .items
+            .iter()
+            .map(|i| i.x + i.width)
+            .fold(0.0f32, f32::max);
+        page_max_right = page_max_right.max(prev_right);
+        prev_ends_sentence = line_ends_sentence(&line.text());
 
         // Get text with optional bold/italic formatting
         let text = line.text_with_formatting(
@@ -1007,8 +1125,15 @@ pub(super) fn to_markdown_from_lines_with_tables_and_images(
             && !is_toc_entry_line(plain_trimmed)
             && !is_heading_fragment(plain_trimmed)
             && toc_suppress_page != Some(line.page)
+            // Display equations must never become headings — through the
+            // font-tier path or the rarity fallback. They are standalone and
+            // isolated by construction, so without this gate they score
+            // straight past both.
+            && !plain_trimmed.contains('=')
+            && !is_symbol_dominated(plain_trimmed)
         {
-            let line_font_size = line.items.first().map(|i| i.font_size).unwrap_or(base_size);
+            let line_font_size =
+                crate::markdown::analysis::line_dominant_font_size(line).unwrap_or(base_size);
             detect_header_level(
                 line_font_size,
                 base_size,
@@ -1289,6 +1414,12 @@ pub fn to_markdown_from_lines(lines: Vec<TextLine>, options: MarkdownOptions) ->
     let mut prev_had_dot_leaders = false;
     let mut paragraph_in_wrapped_bold_run = false;
     let mut toc_suppress_page: Option<u32> = None;
+    // First-line-indent paragraph detection state
+    let mut left_margin_x = f32::MAX;
+    let mut left_margin_run = 0u32;
+    let mut prev_right = 0.0f32;
+    let mut page_max_right = 0.0f32;
+    let mut prev_ends_sentence = false;
 
     for (line_idx, line) in lines.iter().enumerate() {
         // Page break
@@ -1306,6 +1437,11 @@ pub fn to_markdown_from_lines(lines: Vec<TextLine>, options: MarkdownOptions) ->
             last_list_x = None;
             prev_had_dot_leaders = false;
             paragraph_in_wrapped_bold_run = false;
+            left_margin_x = f32::MAX;
+            left_margin_run = 0;
+            prev_right = 0.0;
+            page_max_right = 0.0;
+            prev_ends_sentence = false;
 
             if options.include_page_numbers {
                 output.push_str(&format!("<!-- Page {} -->\n\n", current_page));
@@ -1315,6 +1451,7 @@ pub fn to_markdown_from_lines(lines: Vec<TextLine>, options: MarkdownOptions) ->
         // Paragraph break: large forward Y gap (normal) or large backward jump
         // (newspaper columns emitted sequentially on the same page).
         let y_gap = prev_y - line.y;
+        let line_x = line.items.first().map(|i| i.x).unwrap_or(0.0);
         let is_para_break = y_gap.abs() > para_threshold;
         let line_all_bold = !line.items.is_empty() && line.items.iter().all(|item| item.is_bold);
         let line_in_wrapped_bold_run = wrapped_bold_paragraph_lines.contains(&line_idx);
@@ -1324,7 +1461,20 @@ pub fn to_markdown_from_lines(lines: Vec<TextLine>, options: MarkdownOptions) ->
             && !line_all_bold
             && y_gap > base_size * 1.2
             && y_gap <= para_threshold;
-        if (is_para_break || is_bold_to_regular_break) && in_paragraph {
+        let is_indent_break = in_paragraph
+            && !in_list
+            && is_indent_paragraph_break(
+                line_x,
+                y_gap,
+                para_threshold,
+                base_size,
+                left_margin_x,
+                left_margin_run,
+                prev_right,
+                page_max_right,
+                prev_ends_sentence,
+            );
+        if (is_para_break || is_bold_to_regular_break || is_indent_break) && in_paragraph {
             output.push_str("\n\n");
             in_paragraph = false;
             paragraph_in_wrapped_bold_run = false;
@@ -1332,6 +1482,21 @@ pub fn to_markdown_from_lines(lines: Vec<TextLine>, options: MarkdownOptions) ->
         // Don't immediately end list on paragraph break
         // Let the continuation check below decide if we're still in a list
         prev_y = line.y;
+        // Track the stable left margin and line right edges for
+        // first-line-indent paragraph detection
+        if (line_x - left_margin_x).abs() <= 2.0 {
+            left_margin_run += 1;
+        } else {
+            left_margin_x = line_x;
+            left_margin_run = 1;
+        }
+        prev_right = line
+            .items
+            .iter()
+            .map(|i| i.x + i.width)
+            .fold(0.0f32, f32::max);
+        page_max_right = page_max_right.max(prev_right);
+        prev_ends_sentence = line_ends_sentence(&line.text());
 
         // Get text with optional bold/italic formatting
         let text = line.text_with_formatting(
@@ -1371,8 +1536,12 @@ pub fn to_markdown_from_lines(lines: Vec<TextLine>, options: MarkdownOptions) ->
             && !is_heading_fragment(plain_trimmed)
             && toc_suppress_page != Some(line.page)
             && !(options.detect_code && line.items.iter().any(|i| is_monospace_font(&i.font)))
+            // Display equations must never become headings (see main path).
+            && !plain_trimmed.contains('=')
+            && !is_symbol_dominated(plain_trimmed)
         {
-            let line_font_size = line.items.first().map(|i| i.font_size).unwrap_or(base_size);
+            let line_font_size =
+                crate::markdown::analysis::line_dominant_font_size(line).unwrap_or(base_size);
             if let Some(header_level) = detect_header_level(
                 line_font_size,
                 base_size,
