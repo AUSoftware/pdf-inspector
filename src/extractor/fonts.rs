@@ -198,9 +198,27 @@ pub(crate) fn build_type3_scales(
         let scale_y = (num(&matrix[2]).powi(2) + num(&matrix[3]).powi(2)).sqrt();
         let bbox_h = (num(&bbox[3]) - num(&bbox[1])).abs();
         let scale = bbox_h * scale_y;
-        // Only store meaningful scales; degenerate bboxes ([0 0 0 0] is legal)
-        // and near-1.0 factors keep the nominal size.
-        if scale > 0.01 && (scale - 1.0).abs() > 0.05 {
+
+        // `scale` is the glyph box measured in text-space units. For a
+        // self-consistent font it lands near 1.0 — the FontMatrix is the
+        // reciprocal of the glyph-space em by construction — so the Tf
+        // operand is already the rendered size and must be left alone.
+        // A modest deviation is normal and must NOT trigger rescaling:
+        // FontBBox is the glyph bounding box, not the em box, so it is
+        // routinely somewhat smaller (descender..ascender ≈ 0.7) or larger
+        // (tall accents > 1.0).
+        //
+        // Only a wildly inconsistent font gets renormalized. dvips/PK
+        // bitmap fonts declare [1 0 0 -1 0 0] with glyphs spanning
+        // hundreds of units, giving scale ≈ 159 against a nominal size of
+        // 0.12pt — there the declared size carries no information. The
+        // band is deliberately wide so that only that class qualifies,
+        // while any matrix scale (including non-standard ones like 0.005
+        // with a full-em bbox, scale = 5.0) is judged on the product
+        // rather than on the matrix alone.
+        const CONSISTENT_LO: f32 = 0.25;
+        const CONSISTENT_HI: f32 = 4.0;
+        if scale.is_finite() && scale > 0.0 && !(CONSISTENT_LO..=CONSISTENT_HI).contains(&scale) {
             scales.insert(String::from_utf8_lossy(font_name).to_string(), scale);
         }
     }
@@ -1634,6 +1652,55 @@ mod tests {
             (scale - 159.0).abs() < 0.5,
             "scale should use resolved indirect values, got {scale}"
         );
+    }
+
+    /// Build a one-font Type3 document and return its computed scale, if any.
+    #[cfg(test)]
+    fn type3_scale_for(matrix_y: f32, bbox_lo: i64, bbox_hi: i64) -> Option<f32> {
+        use lopdf::{dictionary, Document, Object};
+        let doc = Document::with_version("1.4");
+        let font_dict = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type3",
+            "FontMatrix" => vec![
+                Object::Real(matrix_y), Object::Integer(0), Object::Integer(0),
+                Object::Real(matrix_y), Object::Integer(0), Object::Integer(0),
+            ],
+            "FontBBox" => vec![
+                Object::Integer(0), Object::Integer(bbox_lo),
+                Object::Integer(600), Object::Integer(bbox_hi),
+            ],
+        };
+        let mut fonts = std::collections::BTreeMap::new();
+        fonts.insert(b"T9".to_vec(), &font_dict);
+        super::build_type3_scales(&doc, &fonts).get("T9").copied()
+    }
+
+    #[test]
+    fn type3_scale_skips_self_consistent_fonts() {
+        // Conventional 1/1000 matrix with a descender..ascender bbox of 700
+        // units: scale 0.7. The Tf operand is already the rendered size, so
+        // renormalizing would report every size at 0.7x.
+        assert_eq!(type3_scale_for(0.001, -200, 500), None);
+        // Tall-accent bbox slightly over the em (1100 units, scale 1.1).
+        assert_eq!(type3_scale_for(0.001, -100, 1000), None);
+    }
+
+    #[test]
+    fn type3_scale_applies_to_inconsistent_fonts_at_any_matrix_scale() {
+        // Non-standard but valid matrix (0.005) with a full-em bbox:
+        // scale 5.0, so the declared size is off by 5x and must be fixed.
+        let s = type3_scale_for(0.005, 0, 1000).expect("0.005 matrix should rescale");
+        assert!((s - 5.0).abs() < 0.01, "got {s}");
+        // dvips/PK bitmap pattern: unit matrix, glyphs spanning ~159 units.
+        let s = type3_scale_for(1.0, -156, 3).expect("PK pattern should rescale");
+        assert!((s - 159.0).abs() < 0.5, "got {s}");
+    }
+
+    #[test]
+    fn type3_scale_ignores_degenerate_bbox() {
+        // [0 0 0 0] is legal and carries no size information.
+        assert_eq!(type3_scale_for(0.001, 0, 0), None);
     }
 
     #[test]
