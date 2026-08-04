@@ -50,7 +50,7 @@ const TABULAR_RULE_GAP_EM: f32 = 2.0;
 const STRIKE_OWNER_PAD_EM: f32 = 0.75;
 const STRIKE_OWNER_MIN_PAD: f32 = 4.0;
 const STRIKE_ROW_Y_TOLERANCE_EM: f32 = 0.15;
-const STRIKE_ROW_Y_TOLERANCE_MIN: f32 = 1.5;
+const STRIKE_ROW_Y_TOLERANCE_MIN: f32 = 5.0;
 const GRAPHIC_CONNECTION_EPS: f32 = 2.0;
 const GRAPHIC_CONNECTOR_MAX_THICKNESS: f32 = 4.0;
 
@@ -901,6 +901,19 @@ mod tests {
         let mut items = vec![
             item("deleted", 100.0, 500.0, 40.0, 10.0),
             item("text", 142.0, 500.0, 25.0, 10.0),
+        ];
+        let lines = vec![hline(99.0, 168.0, 503.0)];
+
+        mark_underlined_items(&mut items, &[], &lines, 1);
+
+        assert!(items.iter().all(|item| item.is_strikeout));
+    }
+
+    #[test]
+    fn snug_rule_groups_split_runs_with_baseline_drift() {
+        let mut items = vec![
+            item("deleted", 100.0, 500.0, 40.0, 10.0),
+            item("text", 142.0, 498.0, 25.0, 10.0),
         ];
         let lines = vec![hline(99.0, 168.0, 503.0)];
 
