@@ -396,64 +396,139 @@ fn rule_strikes_item(rule: &Rule, item: &TextItem) -> bool {
     overlap >= min_overlap
 }
 
-fn is_list_bullet(text: &str) -> bool {
+fn is_bare_list_marker(text: &str) -> bool {
     matches!(
         text.trim(),
-        "•" | "◦" | "▪" | "▫" | "‣" | "⁃" | "●" | "○" | "■" | "□"
+        "•" | "◦" | "▪" | "▫" | "‣" | "⁃" | "●" | "○" | "■" | "□" | "-" | "*"
     )
 }
 
-/// True when a mid-glyph rule is owned by the text row it intersects.
+fn same_strike_row(left: &TextItem, right: &TextItem) -> bool {
+    let font_size = left.font_size.max(right.font_size);
+    let tolerance = (font_size * STRIKE_ROW_Y_TOLERANCE_EM).max(STRIKE_ROW_Y_TOLERANCE_MIN);
+    (left.y - right.y).abs() <= tolerance
+}
+
+fn is_inline_script(rule: &Rule, candidate: &TextItem, parent: &TextItem) -> bool {
+    if !is_underline_candidate(candidate)
+        || is_bare_list_marker(&candidate.text)
+        || candidate.font_size <= 0.0
+        || candidate.font_size >= parent.font_size * 0.75
+        || candidate.text.len() > 4
+        || !candidate.text.chars().all(|c| c.is_ascii_digit())
+        || (candidate.y - parent.y).abs() > 5.0
+    {
+        return false;
+    }
+
+    let parent_ends_with_letter = parent.text.chars().last().is_some_and(char::is_alphabetic);
+    if !parent_ends_with_letter {
+        return false;
+    }
+
+    let parent_right = parent.x + parent.width;
+    let gap = candidate.x - parent_right;
+    if gap >= parent.font_size * 0.2 || gap <= -parent.font_size * 0.3 {
+        return false;
+    }
+
+    let overlap = rule.x2.min(candidate.x + candidate.width) - rule.x1.max(candidate.x);
+    overlap >= candidate.width * MIN_X_OVERLAP
+}
+
+/// Return the items owned by a snug mid-glyph rule.
 ///
 /// Real strikeout decorations track the width of the deleted text, including
-/// runs split by font/style changes. Non-text graphics can cross the same
-/// vertical window, but arrow shafts, signature lines, fraction bars, and
-/// chart rules extend materially beyond the intersected glyphs. Requiring the
-/// rule to stay within a small em-sized pad of the contiguous matched row
-/// separates those cases without relying on document-specific fonts or
-/// coordinates.
-fn has_snug_strike_owner(rule: &Rule, item: &TextItem, items: &[TextItem]) -> bool {
-    if is_list_bullet(&item.text) {
-        return false;
-    }
-
-    let y_tolerance = (item.font_size * STRIKE_ROW_Y_TOLERANCE_EM).max(STRIKE_ROW_Y_TOLERANCE_MIN);
-    let mut matched: Vec<&TextItem> = items
+/// runs split by font/style changes and adjacent numeric super/subscripts.
+/// Non-text graphics can cross the same vertical window, but arrow shafts,
+/// signature lines, fraction bars, and chart rules extend materially beyond
+/// the intersected glyphs. Requiring the rule to stay within a small em-sized
+/// pad of a contiguous matched row separates those cases without relying on
+/// document-specific fonts or coordinates.
+///
+/// Ownership is computed once per rule. This keeps the strikeout pass at the
+/// same rule-by-item scale as underline detection instead of rescanning the
+/// whole page for every matching item.
+fn snug_strike_owner_indices(rule: &Rule, items: &[TextItem]) -> Vec<usize> {
+    let mut struck_indices: Vec<usize> = items
         .iter()
-        .filter(|candidate| {
-            is_underline_candidate(candidate)
-                && !is_list_bullet(&candidate.text)
-                && (candidate.y - item.y).abs() <= y_tolerance
-                && rule_strikes_item(rule, candidate)
+        .enumerate()
+        .filter_map(|(index, candidate)| {
+            (is_underline_candidate(candidate)
+                && !is_bare_list_marker(&candidate.text)
+                && rule_strikes_item(rule, candidate))
+            .then_some(index)
         })
         .collect();
-    if matched.is_empty() {
-        return false;
+    if struck_indices.is_empty() {
+        return Vec::new();
+    }
+    struck_indices.sort_by(|&left, &right| items[left].y.total_cmp(&items[right].y));
+
+    let mut rows: Vec<Vec<usize>> = Vec::new();
+    for index in struck_indices {
+        if let Some(row) = rows
+            .last_mut()
+            .filter(|row| same_strike_row(&items[row[0]], &items[index]))
+        {
+            row.push(index);
+        } else {
+            rows.push(vec![index]);
+        }
     }
 
-    matched.sort_by(|a, b| a.x.total_cmp(&b.x));
-    let x1 = matched
-        .iter()
-        .map(|candidate| candidate.x)
-        .fold(f32::INFINITY, f32::min);
-    let x2 = matched
-        .iter()
-        .map(|candidate| candidate.x + candidate.width)
-        .fold(f32::NEG_INFINITY, f32::max);
-    let max_font_size = matched
-        .iter()
-        .map(|candidate| candidate.font_size)
-        .fold(0.0, f32::max);
-    let pad = (max_font_size * STRIKE_OWNER_PAD_EM).max(STRIKE_OWNER_MIN_PAD);
+    let mut owned_indices = Vec::new();
+    for mut row in rows {
+        row.sort_by(|&left, &right| items[left].x.total_cmp(&items[right].x));
 
-    if rule.x1 < x1 - pad || rule.x2 > x2 + pad {
-        return false;
+        // Underline detection runs before the extractor's script-merging
+        // pass. Include the same tightly adjacent numeric script shape here
+        // when the rule spans it, so the owner width and semantic mark both
+        // survive that later merge.
+        let scripts: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, candidate)| {
+                let parent_pos =
+                    row.partition_point(|&row_index| items[row_index].x <= candidate.x);
+                let parent_index = parent_pos.checked_sub(1).map(|pos| row[pos])?;
+                is_inline_script(rule, candidate, &items[parent_index]).then_some(index)
+            })
+            .collect();
+        row.extend(scripts);
+        row.sort_by(|&left, &right| items[left].x.total_cmp(&items[right].x));
+        row.dedup();
+
+        let x1 = row
+            .iter()
+            .map(|&index| items[index].x)
+            .fold(f32::INFINITY, f32::min);
+        let x2 = row
+            .iter()
+            .map(|&index| items[index].x + items[index].width)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let max_font_size = row
+            .iter()
+            .map(|&index| items[index].font_size)
+            .fold(0.0, f32::max);
+        let pad = (max_font_size * STRIKE_OWNER_PAD_EM).max(STRIKE_OWNER_MIN_PAD);
+
+        if rule.x1 < x1 - pad || rule.x2 > x2 + pad {
+            continue;
+        }
+
+        let contiguous = row.windows(2).all(|pair| {
+            let gap = items[pair[1]].x - (items[pair[0]].x + items[pair[0]].width);
+            gap <= (max_font_size * 2.0).max(12.0)
+        });
+        if contiguous {
+            owned_indices.extend(row);
+        }
     }
 
-    matched.windows(2).all(|pair| {
-        let gap = pair[1].x - (pair[0].x + pair[0].width);
-        gap <= (max_font_size * 2.0).max(12.0)
-    })
+    owned_indices.sort_unstable();
+    owned_indices.dedup();
+    owned_indices
 }
 
 /// Diagram and table rules participate in larger path geometry. A vertical
@@ -541,16 +616,27 @@ pub(crate) fn mark_underlined_items(
         .map(|(i, _)| i)
         .collect();
 
-    let strikeout_items: HashSet<usize> = items
+    let mut strikeout_items = vec![false; items.len()];
+    for (rule_idx, rule) in rules.iter().enumerate() {
+        if tabular_rules.contains(&rule_idx)
+            || has_connected_nonhorizontal_segment(rule, lines, page)
+        {
+            continue;
+        }
+        for item_idx in snug_strike_owner_indices(rule, items) {
+            strikeout_items[item_idx] = true;
+        }
+    }
+
+    let underlined_items: HashSet<usize> = items
         .iter()
         .enumerate()
         .filter(|(_, item)| {
             is_underline_candidate(item)
                 && rules.iter().enumerate().any(|(rule_idx, rule)| {
                     !tabular_rules.contains(&rule_idx)
-                        && rule_strikes_item(rule, item)
-                        && has_snug_strike_owner(rule, item, items)
-                        && !has_connected_nonhorizontal_segment(rule, lines, page)
+                        && !fraction_rules.contains(&rule_idx)
+                        && rule_matches_item(rule, item)
                 })
         })
         .map(|(item_idx, _)| item_idx)
@@ -561,23 +647,11 @@ pub(crate) fn mark_underlined_items(
             continue;
         }
 
-        if strikeout_items.contains(&item_idx) {
+        if strikeout_items[item_idx] {
             item.is_strikeout = true;
         }
-
-        for (rule_idx, rule) in rules.iter().enumerate() {
-            if tabular_rules.contains(&rule_idx) {
-                continue;
-            }
-            // The fraction guard only gates UNDERLINE marking — a rule that
-            // reads as a fraction bar from below can still legitimately
-            // strike through a line above it.
-            if !fraction_rules.contains(&rule_idx) && rule_matches_item(rule, item) {
-                item.is_underline = true;
-            }
-            if item.is_underline && item.is_strikeout {
-                break;
-            }
+        if underlined_items.contains(&item_idx) {
+            item.is_underline = true;
         }
     }
 }
@@ -739,12 +813,14 @@ mod tests {
 
     #[test]
     fn list_bullet_is_not_a_strikeout() {
-        let mut items = vec![item("•", 100.0, 500.0, 6.0, 10.0)];
-        let lines = vec![hline(99.0, 107.0, 503.0)];
+        for marker in ["•", "-", "*"] {
+            let mut items = vec![item(marker, 100.0, 500.0, 6.0, 10.0)];
+            let lines = vec![hline(99.0, 107.0, 503.0)];
 
-        mark_underlined_items(&mut items, &[], &lines, 1);
+            mark_underlined_items(&mut items, &[], &lines, 1);
 
-        assert!(!items[0].is_strikeout);
+            assert!(!items[0].is_strikeout, "marker {marker:?}");
+        }
     }
 
     #[test]
@@ -754,6 +830,32 @@ mod tests {
             item("text", 142.0, 500.0, 25.0, 10.0),
         ];
         let lines = vec![hline(99.0, 168.0, 503.0)];
+
+        mark_underlined_items(&mut items, &[], &lines, 1);
+
+        assert!(items.iter().all(|item| item.is_strikeout));
+    }
+
+    #[test]
+    fn snug_rule_keeps_inline_superscript_in_strike_owner() {
+        let mut items = vec![
+            item("deleted", 100.0, 500.0, 40.0, 10.0),
+            item("2", 140.5, 503.0, 4.0, 6.0),
+        ];
+        let lines = vec![hline(99.0, 145.0, 503.0)];
+
+        mark_underlined_items(&mut items, &[], &lines, 1);
+
+        assert!(items.iter().all(|item| item.is_strikeout));
+    }
+
+    #[test]
+    fn snug_rule_keeps_inline_subscript_in_strike_owner() {
+        let mut items = vec![
+            item("deleted", 100.0, 500.0, 40.0, 10.0),
+            item("2", 140.5, 497.0, 4.0, 6.0),
+        ];
+        let lines = vec![hline(99.0, 145.0, 503.0)];
 
         mark_underlined_items(&mut items, &[], &lines, 1);
 
