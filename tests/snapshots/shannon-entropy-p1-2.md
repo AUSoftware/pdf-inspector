@@ -22,7 +22,7 @@ J. W. Tukey. A device with two stable positions, such as a relay or a flip-flop 
 
 log₂*M* = log₁₀*M*= log₁₀2 = 3:32 log₁₀*M*;
 
-1 Nyquist, H., “Certain Factors Affecting Telegraph Speed,” *Bell System Technical Journal,* April 1924, p. 324; “Certain Topics in Telegraph Transmission Theory,” *A.I.E.E. Trans.,* v. 47, April 1928, p. 617. Hartley, R. V. L., “Transmission of Information,” *Bell System Technical Journal,* July 1928, p. 535.
+1 Nyquist, H., “Certain Factors Affecting Telegraph Speed,” *Bell System Technical Journal,* April 1924, p. 324; “Certain Topics in Telegraph Transmission Theory,” *A.I.E.E. Trans.,* v. 47, April 1928, p. 617. 2 Hartley, R. V. L., “Transmission of Information,” *Bell System Technical Journal,* July 1928, p. 535.
 
 INFORMATION SOURCE TRANSMITTER RECEIVER DESTINATION
 
