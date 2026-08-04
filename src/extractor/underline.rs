@@ -44,6 +44,15 @@ const MIN_TABULAR_RULE_ITEMS: usize = 3;
 const MIN_TABULAR_RULE_GAPS: usize = 2;
 const TABULAR_RULE_GAP_EM: f32 = 2.0;
 
+/// Strikeout decorations are text-sized. Diagram connectors, signature
+/// lines, and chart rules often cross glyphs too, but extend well beyond the
+/// text they happen to intersect.
+const STRIKE_OWNER_PAD_EM: f32 = 0.75;
+const STRIKE_OWNER_MIN_PAD: f32 = 4.0;
+const STRIKE_ROW_Y_TOLERANCE_EM: f32 = 0.15;
+const STRIKE_ROW_Y_TOLERANCE_MIN: f32 = 1.5;
+const GRAPHIC_CONNECTION_EPS: f32 = 2.0;
+
 #[derive(Clone)]
 pub(crate) struct UnderlineLine {
     pub(crate) x1: f32,
@@ -387,6 +396,98 @@ fn rule_strikes_item(rule: &Rule, item: &TextItem) -> bool {
     overlap >= min_overlap
 }
 
+fn is_list_bullet(text: &str) -> bool {
+    matches!(
+        text.trim(),
+        "•" | "◦" | "▪" | "▫" | "‣" | "⁃" | "●" | "○" | "■" | "□"
+    )
+}
+
+/// True when a mid-glyph rule is owned by the text row it intersects.
+///
+/// Real strikeout decorations track the width of the deleted text, including
+/// runs split by font/style changes. Non-text graphics can cross the same
+/// vertical window, but arrow shafts, signature lines, fraction bars, and
+/// chart rules extend materially beyond the intersected glyphs. Requiring the
+/// rule to stay within a small em-sized pad of the contiguous matched row
+/// separates those cases without relying on document-specific fonts or
+/// coordinates.
+fn has_snug_strike_owner(rule: &Rule, item: &TextItem, items: &[TextItem]) -> bool {
+    if is_list_bullet(&item.text) {
+        return false;
+    }
+
+    let y_tolerance = (item.font_size * STRIKE_ROW_Y_TOLERANCE_EM).max(STRIKE_ROW_Y_TOLERANCE_MIN);
+    let mut matched: Vec<&TextItem> = items
+        .iter()
+        .filter(|candidate| {
+            is_underline_candidate(candidate)
+                && !is_list_bullet(&candidate.text)
+                && (candidate.y - item.y).abs() <= y_tolerance
+                && rule_strikes_item(rule, candidate)
+        })
+        .collect();
+    if matched.is_empty() {
+        return false;
+    }
+
+    matched.sort_by(|a, b| a.x.total_cmp(&b.x));
+    let x1 = matched
+        .iter()
+        .map(|candidate| candidate.x)
+        .fold(f32::INFINITY, f32::min);
+    let x2 = matched
+        .iter()
+        .map(|candidate| candidate.x + candidate.width)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let max_font_size = matched
+        .iter()
+        .map(|candidate| candidate.font_size)
+        .fold(0.0, f32::max);
+    let pad = (max_font_size * STRIKE_OWNER_PAD_EM).max(STRIKE_OWNER_MIN_PAD);
+
+    if rule.x1 < x1 - pad || rule.x2 > x2 + pad {
+        return false;
+    }
+
+    matched.windows(2).all(|pair| {
+        let gap = pair[1].x - (pair[0].x + pair[0].width);
+        gap <= (max_font_size * 2.0).max(12.0)
+    })
+}
+
+/// Diagram and table rules participate in larger path geometry. A vertical
+/// or diagonal segment meeting the candidate rule is strong evidence that
+/// the horizontal segment is a connector, border, arrow, or symbol rather
+/// than an isolated text decoration.
+fn has_connected_nonhorizontal_segment(rule: &Rule, lines: &[UnderlineLine], page: u32) -> bool {
+    lines.iter().any(|line| {
+        if line.page != page {
+            return false;
+        }
+
+        let dx = line.x2 - line.x1;
+        let dy = line.y2 - line.y1;
+        if dy.abs() <= MAX_RULE_THICKNESS {
+            return false;
+        }
+
+        let y_min = line.y1.min(line.y2) - GRAPHIC_CONNECTION_EPS;
+        let y_max = line.y1.max(line.y2) + GRAPHIC_CONNECTION_EPS;
+        if rule.y < y_min || rule.y > y_max {
+            return false;
+        }
+
+        let t = (rule.y - line.y1) / dy;
+        if !(-0.05..=1.05).contains(&t) {
+            return false;
+        }
+        let intersection_x = line.x1 + t * dx;
+        intersection_x >= rule.x1 - GRAPHIC_CONNECTION_EPS
+            && intersection_x <= rule.x2 + GRAPHIC_CONNECTION_EPS
+    })
+}
+
 /// Mark `is_underline` on text items that have a horizontal rule just
 /// below their baseline, and `is_strikeout` on items whose glyphs a rule
 /// crosses at mid x-height. `items`, `rects`, and `lines` are a single
@@ -440,9 +541,28 @@ pub(crate) fn mark_underlined_items(
         .map(|(i, _)| i)
         .collect();
 
-    for item in items.iter_mut() {
+    let strikeout_items: HashSet<usize> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| {
+            is_underline_candidate(item)
+                && rules.iter().enumerate().any(|(rule_idx, rule)| {
+                    !tabular_rules.contains(&rule_idx)
+                        && rule_strikes_item(rule, item)
+                        && has_snug_strike_owner(rule, item, items)
+                        && !has_connected_nonhorizontal_segment(rule, lines, page)
+                })
+        })
+        .map(|(item_idx, _)| item_idx)
+        .collect();
+
+    for (item_idx, item) in items.iter_mut().enumerate() {
         if !is_underline_candidate(item) {
             continue;
+        }
+
+        if strikeout_items.contains(&item_idx) {
+            item.is_strikeout = true;
         }
 
         for (rule_idx, rule) in rules.iter().enumerate() {
@@ -454,9 +574,6 @@ pub(crate) fn mark_underlined_items(
             // strike through a line above it.
             if !fraction_rules.contains(&rule_idx) && rule_matches_item(rule, item) {
                 item.is_underline = true;
-            }
-            if rule_strikes_item(rule, item) {
-                item.is_strikeout = true;
             }
             if item.is_underline && item.is_strikeout {
                 break;
@@ -578,6 +695,69 @@ mod tests {
         mark_underlined_items(&mut items, &[], &lines, 1);
         assert!(items[0].is_strikeout);
         assert!(!items[0].is_underline);
+    }
+
+    #[test]
+    fn long_connector_crossing_text_is_not_a_strikeout() {
+        let mut items = vec![item("diagram label", 160.0, 500.0, 60.0, 10.0)];
+        let lines = vec![hline(100.0, 280.0, 503.0)];
+
+        mark_underlined_items(&mut items, &[], &lines, 1);
+
+        assert!(!items[0].is_strikeout);
+    }
+
+    #[test]
+    fn chart_rule_ending_inside_short_label_is_not_a_strikeout() {
+        let mut items = vec![item("T 18", 300.0, 500.0, 20.0, 10.0)];
+        let lines = vec![hline(100.0, 315.0, 503.0)];
+
+        mark_underlined_items(&mut items, &[], &lines, 1);
+
+        assert!(!items[0].is_strikeout);
+    }
+
+    #[test]
+    fn connected_diagram_segment_is_not_a_strikeout() {
+        let mut items = vec![item("V8", 100.0, 500.0, 12.0, 10.0)];
+        let lines = vec![
+            hline(99.0, 113.0, 503.0),
+            UnderlineLine {
+                x1: 106.0,
+                y1: 496.0,
+                x2: 109.0,
+                y2: 510.0,
+                stroke_width: 1.0,
+                page: 1,
+            },
+        ];
+
+        mark_underlined_items(&mut items, &[], &lines, 1);
+
+        assert!(!items[0].is_strikeout);
+    }
+
+    #[test]
+    fn list_bullet_is_not_a_strikeout() {
+        let mut items = vec![item("•", 100.0, 500.0, 6.0, 10.0)];
+        let lines = vec![hline(99.0, 107.0, 503.0)];
+
+        mark_underlined_items(&mut items, &[], &lines, 1);
+
+        assert!(!items[0].is_strikeout);
+    }
+
+    #[test]
+    fn snug_rule_marks_adjacent_split_runs_as_strikeout() {
+        let mut items = vec![
+            item("deleted", 100.0, 500.0, 40.0, 10.0),
+            item("text", 142.0, 500.0, 25.0, 10.0),
+        ];
+        let lines = vec![hline(99.0, 168.0, 503.0)];
+
+        mark_underlined_items(&mut items, &[], &lines, 1);
+
+        assert!(items.iter().all(|item| item.is_strikeout));
     }
 
     #[test]
