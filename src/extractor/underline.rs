@@ -52,6 +52,7 @@ const STRIKE_OWNER_MIN_PAD: f32 = 4.0;
 const STRIKE_ROW_Y_TOLERANCE_EM: f32 = 0.15;
 const STRIKE_ROW_Y_TOLERANCE_MIN: f32 = 1.5;
 const GRAPHIC_CONNECTION_EPS: f32 = 2.0;
+const GRAPHIC_CONNECTOR_MAX_THICKNESS: f32 = 4.0;
 
 #[derive(Clone)]
 pub(crate) struct UnderlineLine {
@@ -563,6 +564,39 @@ fn has_connected_nonhorizontal_segment(rule: &Rule, lines: &[UnderlineLine], pag
     })
 }
 
+/// Filled diagrams often build connectors from intersecting thin rectangles
+/// instead of stroked path segments. Treat only narrow, vertically elongated
+/// rectangles as connector geometry; broad fills can legitimately sit behind
+/// struck text and must not veto its decoration.
+fn has_connected_nonhorizontal_rect(rule: &Rule, rects: &[PdfRect], page: u32) -> bool {
+    rects.iter().any(|rect| {
+        if rect.page != page {
+            return false;
+        }
+
+        let (x1, x2) = if rect.width >= 0.0 {
+            (rect.x, rect.x + rect.width)
+        } else {
+            (rect.x + rect.width, rect.x)
+        };
+        let (y1, y2) = if rect.height >= 0.0 {
+            (rect.y, rect.y + rect.height)
+        } else {
+            (rect.y + rect.height, rect.y)
+        };
+        let width = x2 - x1;
+        let height = y2 - y1;
+
+        width > 0.0
+            && width <= GRAPHIC_CONNECTOR_MAX_THICKNESS
+            && height > width * 2.0
+            && rule.y >= y1 - GRAPHIC_CONNECTION_EPS
+            && rule.y <= y2 + GRAPHIC_CONNECTION_EPS
+            && x2 >= rule.x1 - GRAPHIC_CONNECTION_EPS
+            && x1 <= rule.x2 + GRAPHIC_CONNECTION_EPS
+    })
+}
+
 /// Mark `is_underline` on text items that have a horizontal rule just
 /// below their baseline, and `is_strikeout` on items whose glyphs a rule
 /// crosses at mid x-height. `items`, `rects`, and `lines` are a single
@@ -620,6 +654,7 @@ pub(crate) fn mark_underlined_items(
     for (rule_idx, rule) in rules.iter().enumerate() {
         if tabular_rules.contains(&rule_idx)
             || has_connected_nonhorizontal_segment(rule, lines, page)
+            || has_connected_nonhorizontal_rect(rule, rects, page)
         {
             continue;
         }
@@ -809,6 +844,44 @@ mod tests {
         mark_underlined_items(&mut items, &[], &lines, 1);
 
         assert!(!items[0].is_strikeout);
+    }
+
+    #[test]
+    fn connected_filled_rect_is_not_a_strikeout() {
+        let mut items = vec![item("V8", 100.0, 500.0, 12.0, 10.0)];
+        let rects = vec![
+            thin_rect(99.0, 502.6, 14.0),
+            PdfRect {
+                x: 106.0,
+                y: 496.0,
+                width: 2.0,
+                height: 14.0,
+                page: 1,
+            },
+        ];
+
+        mark_underlined_items(&mut items, &rects, &[], 1);
+
+        assert!(!items[0].is_strikeout);
+    }
+
+    #[test]
+    fn broad_fill_behind_text_does_not_block_strikeout() {
+        let mut items = vec![item("deleted", 100.0, 500.0, 40.0, 10.0)];
+        let rects = vec![
+            thin_rect(99.0, 502.6, 42.0),
+            PdfRect {
+                x: 90.0,
+                y: 490.0,
+                width: 100.0,
+                height: 20.0,
+                page: 1,
+            },
+        ];
+
+        mark_underlined_items(&mut items, &rects, &[], 1);
+
+        assert!(items[0].is_strikeout);
     }
 
     #[test]
