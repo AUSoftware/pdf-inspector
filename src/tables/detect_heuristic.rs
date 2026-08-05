@@ -549,12 +549,26 @@ pub(crate) fn detect_tables_with_page_width(
     // === Pass 1: Small-font tables (existing behavior) ===
     let table_font_threshold = base_font_size * 0.90;
 
-    // Mark sub/superscript attachments once. They stay candidates — the mask
-    // only removes them from column/row geometry inside a region.
+    // Mark sub/superscript attachments once per pass. They stay candidates —
+    // the masks only remove them from region qualification and column/row
+    // geometry.
+    //
+    // The two passes need different anchor thresholds. In the small-font pass
+    // any sufficiently larger neighbour is a plausible base for a script. In
+    // the body-font pass the candidates are themselves body-sized
+    // (0.85..1.05x), so a merely "slightly larger" neighbour is usually a bold
+    // label or an adjacent column header, not the base of a superscript —
+    // treating it as one would strip real cells out of the geometry and lose
+    // the table. Requiring a heading-sized anchor (>= 1.15x base) keeps the
+    // body pass to genuine scripts hanging off headings.
     let script_index = ScriptBodyIndex::new(items);
     let script_flags: Vec<bool> = items
         .iter()
         .map(|item| script_index.is_script_attachment(item, 0.0))
+        .collect();
+    let body_script_flags: Vec<bool> = items
+        .iter()
+        .map(|item| script_index.is_script_attachment(item, base_font_size * 1.15))
         .collect();
     let table_candidates: Vec<(usize, &TextItem)> = items
         .iter()
@@ -645,7 +659,7 @@ pub(crate) fn detect_tables_with_page_width(
             // regions, but remain available for cell assignment within one.
             let region_evidence: Vec<(usize, &TextItem)> = body_candidates
                 .iter()
-                .filter(|(idx, _)| !script_flags[*idx])
+                .filter(|(idx, _)| !body_script_flags[*idx])
                 .cloned()
                 .collect();
             let regions = find_table_regions_strict(&region_evidence);
@@ -675,7 +689,7 @@ pub(crate) fn detect_tables_with_page_width(
 
                 if let Some(table) =
                     detect_table_in_region(&region_items, TableDetectionMode::BodyFont, &|i| {
-                        script_flags[i]
+                        body_script_flags[i]
                     })
                 {
                     tables.push(table);
@@ -2163,6 +2177,42 @@ mod tests {
         let cell = make_item("1,234", 180.0, 500.0, 7.0, 20.0);
         let items = vec![body, cell.clone()];
         assert!(!ScriptBodyIndex::new(&items).is_script_attachment(&cell, 0.0));
+    }
+
+    #[test]
+    fn body_pass_anchor_spares_cells_beside_slightly_larger_labels() {
+        // A body-font table cell (10pt) sitting beside a slightly larger,
+        // NON-heading label (12.5pt) with a little baseline jitter. The
+        // small-font pass treats any larger neighbour as a possible script
+        // base, but the body pass must not: at body sizes a slightly larger
+        // neighbour is a bold label or column header, and flagging the cell
+        // would strip it out of the table geometry and lose the table.
+        // Cell at the low end of the body band (0.85x base) beside a 10.5pt
+        // label. 10.5 clears the inherent 1.2x-of-cell rule (10.2) but falls
+        // below the body pass's heading anchor (11.5), which is exactly the
+        // band where the two masks must disagree.
+        let label = make_item("Revenue", 100.0, 500.0, 10.5, 40.0);
+        let cell = make_item("1,234", 141.0, 496.5, 8.5, 22.0);
+        let items = vec![label, cell.clone()];
+        let index = ScriptBodyIndex::new(&items);
+        let base = 10.0;
+        assert!(
+            index.is_script_attachment(&cell, 0.0),
+            "small-font pass anchor should still see this as an attachment"
+        );
+        assert!(
+            !index.is_script_attachment(&cell, base * 1.15),
+            "body pass must not treat a cell beside a slightly larger label \
+             as a script — that removes real cells from the geometry"
+        );
+        // A genuine heading-sized anchor still qualifies in the body pass.
+        let heading = make_item("Section", 100.0, 500.0, 20.0, 60.0);
+        let sup = make_item("3", 161.0, 508.0, 10.0, 5.0);
+        let h_items = vec![heading, sup.clone()];
+        assert!(
+            ScriptBodyIndex::new(&h_items).is_script_attachment(&sup, base * 1.15),
+            "script hanging off a heading must still be excluded in the body pass"
+        );
     }
 
     #[test]
