@@ -549,7 +549,13 @@ pub(crate) fn detect_tables_with_page_width(
     // === Pass 1: Small-font tables (existing behavior) ===
     let table_font_threshold = base_font_size * 0.90;
 
+    // Mark sub/superscript attachments once. They stay candidates — the mask
+    // only removes them from column/row geometry inside a region.
     let script_index = ScriptBodyIndex::new(items);
+    let script_flags: Vec<bool> = items
+        .iter()
+        .map(|item| script_index.is_script_attachment(item, 0.0))
+        .collect();
     let table_candidates: Vec<(usize, &TextItem)> = items
         .iter()
         .enumerate()
@@ -558,11 +564,17 @@ pub(crate) fn detect_tables_with_page_width(
                 && item.font_size <= table_font_threshold
                 && item.font_size >= 6.0
         })
-        .filter(|(_, item)| !script_index.is_script_attachment(item, 0.0))
         .collect();
 
     if table_candidates.len() >= 6 {
-        let regions = find_table_regions(&table_candidates);
+        // Qualify regions from non-script items: a cluster of sub/superscripts
+        // must not, on its own, mark out a table region.
+        let region_evidence: Vec<(usize, &TextItem)> = table_candidates
+            .iter()
+            .filter(|(idx, _)| !script_flags[*idx])
+            .cloned()
+            .collect();
+        let regions = find_table_regions(&region_evidence);
 
         for (y_min, y_max) in regions {
             let region_items: Vec<(usize, &TextItem)> = table_candidates
@@ -576,7 +588,9 @@ pub(crate) fn detect_tables_with_page_width(
             }
 
             if let Some(mut table) =
-                detect_table_in_region(&region_items, TableDetectionMode::SmallFont)
+                detect_table_in_region(&region_items, TableDetectionMode::SmallFont, &|i| {
+                    script_flags[i]
+                })
             {
                 // Try to recover body-font header row above the small-font table
                 recover_header_row(&mut table, items, table_font_threshold);
@@ -627,7 +641,14 @@ pub(crate) fn detect_tables_with_page_width(
             body_font_high,
         );
         if body_candidates.len() >= 6 {
-            let regions = find_table_regions_strict(&body_candidates);
+            // Same reasoning as the small-font pass: scripts do not qualify
+            // regions, but remain available for cell assignment within one.
+            let region_evidence: Vec<(usize, &TextItem)> = body_candidates
+                .iter()
+                .filter(|(idx, _)| !script_flags[*idx])
+                .cloned()
+                .collect();
+            let regions = find_table_regions_strict(&region_evidence);
             log::debug!("body-font: {} strict regions found", regions.len());
 
             for (y_min, y_max, _x_min, _x_max) in &regions {
@@ -653,7 +674,9 @@ pub(crate) fn detect_tables_with_page_width(
                 }
 
                 if let Some(table) =
-                    detect_table_in_region(&region_items, TableDetectionMode::BodyFont)
+                    detect_table_in_region(&region_items, TableDetectionMode::BodyFont, &|i| {
+                        script_flags[i]
+                    })
                 {
                     tables.push(table);
                 }
@@ -881,10 +904,30 @@ fn find_table_regions_strict(items: &[(usize, &TextItem)]) -> Vec<(f32, f32, f32
     regions
 }
 
-/// Detect a table within a specific region
-fn detect_table_in_region(items: &[(usize, &TextItem)], mode: TableDetectionMode) -> Option<Table> {
-    // Find column boundaries
-    let columns = find_column_boundaries(items, mode);
+/// Detect a table within a specific region.
+///
+/// `is_script` marks items that are sub/superscript attachments. Those are
+/// excluded from the *geometry* — they must not be able to create a column,
+/// which is how equation subscript clusters used to fabricate phantom grids —
+/// but they remain eligible for cell assignment, so legitimate cell content
+/// (exponents in an engineering-notation table, footnote markers) stays in
+/// the cell it belongs to instead of leaking out into the reading order.
+fn detect_table_in_region(
+    items: &[(usize, &TextItem)],
+    mode: TableDetectionMode,
+    is_script: &dyn Fn(usize) -> bool,
+) -> Option<Table> {
+    // Column geometry from non-script items only.
+    let geometry_items: Vec<(usize, &TextItem)> = items
+        .iter()
+        .filter(|(idx, _)| !is_script(*idx))
+        .cloned()
+        .collect();
+    // A region that is *entirely* scripts has no table structure at all.
+    if geometry_items.is_empty() {
+        return None;
+    }
+    let columns = find_column_boundaries(&geometry_items, mode);
     let min_cols = 2;
     if columns.len() < min_cols || columns.len() > 25 {
         log::debug!(
@@ -895,8 +938,8 @@ fn detect_table_in_region(items: &[(usize, &TextItem)], mode: TableDetectionMode
         return None;
     }
 
-    // Find row boundaries
-    let rows = find_row_boundaries(items);
+    // Find row boundaries (geometry items only, same reasoning)
+    let rows = find_row_boundaries(&geometry_items);
     let min_rows = 2;
     if rows.len() < min_rows {
         log::debug!(
@@ -915,6 +958,11 @@ fn detect_table_in_region(items: &[(usize, &TextItem)], mode: TableDetectionMode
     );
 
     // Verify this looks like a table: multiple items should align to columns
+    // Validate against ALL items, including scripts. Columns are derived from
+    // non-script geometry so scripts cannot *create* a column, but excluding
+    // them from validation too would let a region manufacture alignment: drop
+    // the awkward items and whatever remains looks like a tidy grid. Block
+    // diagrams did exactly that. Everything in the region must fit.
     let col_alignment = check_column_alignment(items, &columns, mode);
     let min_alignment = match mode {
         TableDetectionMode::SmallFont => 0.5,
