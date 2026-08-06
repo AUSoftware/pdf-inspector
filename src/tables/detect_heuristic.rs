@@ -640,11 +640,6 @@ pub(crate) fn detect_tables_with_page_width(
                     && item.font_size <= body_font_high
                     && item.font_size >= 6.0
             })
-            // The script exclusion applies here too — a sub/superscript
-            // attached to a heading-size run can land in the body-font band —
-            // but only for heading-sized anchors (>= 1.15x base): body-size
-            // table cells beside slightly larger labels must never be filtered.
-            .filter(|(_, item)| !script_index.is_script_attachment(item, base_font_size * 1.15))
             .collect();
 
         log::debug!(
@@ -654,6 +649,11 @@ pub(crate) fn detect_tables_with_page_width(
             body_font_low,
             body_font_high,
         );
+        // Scripts are NOT filtered out of the candidate set here, mirroring
+        // the small-font pass: they must stay eligible for cell assignment so
+        // a sub/superscript that belongs inside a table cell keeps its text.
+        // The heading-anchored `body_script_flags` mask removes them from
+        // geometry only.
         if body_candidates.len() >= 6 {
             // Same reasoning as the small-font pass: scripts do not qualify
             // regions, but remain available for cell assignment within one.
