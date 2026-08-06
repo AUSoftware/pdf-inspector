@@ -199,15 +199,15 @@ fn starts_with_numbering_prefix(t: &str) -> bool {
         // number ("3 apples") is not — that is ordinary prose.
         return has_delimiter || parts.len() >= 2;
     }
-    // Roman numerals only with a delimiter: a bare leading "I" is the
-    // pronoun far more often than a section number.
-    has_delimiter
-        && token.chars().all(|c| {
-            matches!(
-                c.to_ascii_uppercase(),
-                'I' | 'V' | 'X' | 'L' | 'C' | 'D' | 'M'
-            )
-        })
+    // Roman numerals go through the heading parser's own grammar so the two
+    // agree: uppercase I/V/X/L/C only, at most 8 characters. A looser rule
+    // here would exempt markers the parser rejects — "iv)" or "d)" from an
+    // alphabetical list — letting an ordinary list item bypass the veto and
+    // reach heading promotion.
+    //
+    // A delimiter is also required: a bare leading "I" is the pronoun far
+    // more often than a section number.
+    has_delimiter && crate::markdown::heading::roman_value(token).is_some()
 }
 
 /// True when the line reads as a title rather than a sentence: every
@@ -399,6 +399,15 @@ mod fragment_heading_tests {
         // A bare leading number or pronoun is prose, not numbering.
         assert!(is_heading_fragment("3 apples and what that implies"));
         assert!(is_heading_fragment("I think the model implies"));
+        // Markers heading::parse_numbering rejects must not be exempted
+        // either, or an ordinary list item bypasses the veto: lowercase
+        // roman, alphabetical markers, and over-long tokens.
+        assert!(is_heading_fragment("iv) the estimator satisfies"));
+        assert!(is_heading_fragment("d) the value implies"));
+        assert!(is_heading_fragment("MMMM. the value implies"));
+        // Uppercase roman within the parser's grammar is still exempt.
+        assert!(!is_heading_fragment("IV. What this denotes"));
+        assert!(!is_heading_fragment("XII) What this implies"));
     }
 
     #[test]
