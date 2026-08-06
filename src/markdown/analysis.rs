@@ -404,7 +404,13 @@ mod fragment_heading_tests {
         // roman, alphabetical markers, and over-long tokens.
         assert!(is_heading_fragment("iv) the estimator satisfies"));
         assert!(is_heading_fragment("d) the value implies"));
+        // Unsupported character (M is outside the parser's I/V/X/L/C set).
         assert!(is_heading_fragment("MMMM. the value implies"));
+        // Over-long token: nine valid characters, so this exercises the
+        // 8-character bound rather than the character set.
+        assert!(is_heading_fragment("IIIIIIIII. the value implies"));
+        // Eight is still within the bound and stays exempt.
+        assert!(!is_heading_fragment("IIIIIIII. What this implies"));
         // Uppercase roman within the parser's grammar is still exempt.
         assert!(!is_heading_fragment("IV. What this denotes"));
         assert!(!is_heading_fragment("XII) What this implies"));
