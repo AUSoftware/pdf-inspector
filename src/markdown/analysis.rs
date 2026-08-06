@@ -244,7 +244,106 @@ pub(crate) fn is_heading_fragment(text: &str) -> bool {
     if t.ends_with(':') && t.split_whitespace().any(is_equation_number) {
         return true;
     }
+
+    // Dangling clause: a heading never ends on a word that demands a
+    // continuation. Combined with no terminal punctuation, that is the first
+    // half of a sentence some upstream split left behind — "Note that the
+    // exact error equals" stranded ahead of its formula when a phantom table
+    // dissolved. Real headings end on a content word ("Introduction", "Error
+    // Analysis") or on punctuation.
+    //
+    // Deliberately a closed list of verbs: a genuine title ending in
+    // "equals" or "is" is vanishingly rare, whereas guessing from
+    // part-of-speech would misfire on terse headings.
+    if !t.ends_with(['.', '!', '?', ':', ';', ')', ']']) {
+        if let Some(last) = t.split_whitespace().next_back() {
+            let word: String = last
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase();
+            // Verbs and copulas only. Articles, prepositions and
+            // conjunctions were tried and had to be removed: a heading that
+            // WRAPS across two lines ends on exactly those words, so
+            // suppressing them destroyed real headings ("Casualty and" ->
+            // "Casualty and Theft Losses", "Rule 10. You Must Be at" ->
+            // "... At Least Age 25" in IRS Publication 17). A wrapped
+            // heading never breaks after its verb, so this list is safe.
+            // Technical relational verbs ONLY. Copulas and auxiliaries
+            // (is/are/be/have) were tried and had to be dropped: a heading
+            // that wraps across lines ends on exactly those words, and
+            // suppressing them destroyed real headings in IRS Publication 17
+            // ("Rule 15. Your AGI Must Be" -> "... Less Than ...",
+            // "What Medical Expenses Are" -> "... Deductible?",
+            // "When Can a Roth IRA Be" -> "... Opened?"). The same trailing
+            // word appears in genuine body fragments ("the tax burden should
+            // be"), so the tail alone cannot separate the two — that needs
+            // the following line's context, which this text-only predicate
+            // does not have.
+            //
+            // The verbs below never end a heading in any register, so they
+            // are safe without context.
+            const DANGLING_TAIL: &[&str] = &[
+                "equals",
+                "denotes",
+                "implies",
+                "satisfies",
+                "yields",
+                "becomes",
+                "signifies",
+            ];
+            if DANGLING_TAIL.contains(&word.as_str()) {
+                return true;
+            }
+        }
+    }
     false
+}
+
+#[cfg(test)]
+mod fragment_heading_tests {
+    use super::is_heading_fragment;
+
+    #[test]
+    fn dangling_tail_marks_stranded_clause() {
+        // opendataloader 01030000000144: left behind when a phantom table
+        // dissolved, ahead of its formula on the next line.
+        assert!(is_heading_fragment("Note that the exact error equals"));
+        assert!(is_heading_fragment("The remainder term satisfies"));
+    }
+
+    #[test]
+    fn real_headings_survive() {
+        assert!(!is_heading_fragment("Introduction"));
+        assert!(!is_heading_fragment("Error Analysis"));
+        assert!(!is_heading_fragment("Materials and Methods"));
+        assert!(!is_heading_fragment("Results"));
+        assert!(!is_heading_fragment("3.2 Richardson Extrapolation"));
+        assert!(!is_heading_fragment("Discussion and Conclusions"));
+        // Terminal punctuation means the clause is complete.
+        assert!(!is_heading_fragment("What is a Derivative?"));
+        assert!(!is_heading_fragment("Procedure:"));
+        assert!(!is_heading_fragment("Note that this is important."));
+    }
+
+    #[test]
+    fn wrapped_headings_are_not_fragments() {
+        // A heading that wraps across lines ends on a function word. These
+        // are real headings from IRS Publication 17 and must survive.
+        assert!(!is_heading_fragment("Casualty and"));
+        assert!(!is_heading_fragment("Rule 10. You Must Be at"));
+        assert!(!is_heading_fragment("Higher Standard Deduction for"));
+        assert!(!is_heading_fragment("Qualifying Child of"));
+        assert!(!is_heading_fragment("When Can I Withdraw or"));
+        // Copulas and auxiliaries also end real wrapped headings.
+        assert!(!is_heading_fragment("Rule 15. Your AGI Must Be"));
+        assert!(!is_heading_fragment("What Medical Expenses Are"));
+        assert!(!is_heading_fragment("Rule 13. You Must Have"));
+        assert!(!is_heading_fragment("When Can a Roth IRA Be"));
+    }
+
+    #[test]
+    fn dangling_check_is_case_insensitive() {
+        assert!(is_heading_fragment("THE REMAINDER EQUALS"));
+    }
 }
 
 /// Compute the Y-gap threshold for paragraph break detection.
