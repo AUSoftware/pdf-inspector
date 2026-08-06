@@ -171,6 +171,35 @@ pub(crate) fn is_toc_marker_heading(text: &str) -> bool {
 /// equation and absent from name-plus-number headings. A bare trailing colon
 /// is NOT a fragment signal either: real headings frequently end with colons
 /// ("Procedure:", "Steps for Using the Microscope:").
+/// True when the line reads as a title rather than a sentence: every
+/// content word (ignoring minor words) starts uppercase. Used to spare real
+/// headings from the dangling-verb veto — "Bond Yields" is a section title,
+/// "the method yields" is a stranded clause, and only the casing tells them
+/// apart.
+fn looks_title_case(t: &str) -> bool {
+    const MINOR: &[&str] = &[
+        "a", "an", "the", "of", "and", "or", "for", "to", "in", "on", "at", "by", "with", "from",
+        "as", "is", "are", "that", "than", "into",
+    ];
+    let mut content = 0usize;
+    let mut capitalized = 0usize;
+    for w in t.split_whitespace() {
+        let cleaned: String = w.chars().filter(|c| c.is_alphabetic()).collect();
+        if cleaned.is_empty() {
+            continue;
+        }
+        if MINOR.contains(&cleaned.to_lowercase().as_str()) {
+            continue;
+        }
+        content += 1;
+        if cleaned.chars().next().is_some_and(char::is_uppercase) {
+            capitalized += 1;
+        }
+    }
+    // A single content word ("Yields") is a title by default.
+    content == 0 || capitalized == content
+}
+
 pub(crate) fn is_heading_fragment(text: &str) -> bool {
     let t = text.trim_end();
 
@@ -245,51 +274,29 @@ pub(crate) fn is_heading_fragment(text: &str) -> bool {
         return true;
     }
 
-    // Dangling clause: a heading never ends on a word that demands a
-    // continuation. Combined with no terminal punctuation, that is the first
-    // half of a sentence some upstream split left behind — "Note that the
-    // exact error equals" stranded ahead of its formula when a phantom table
-    // dissolved. Real headings end on a content word ("Introduction", "Error
-    // Analysis") or on punctuation.
+    // Dangling clause: a stranded sentence lead-in ends on a relational
+    // verb with no terminal punctuation — "Note that the exact error equals"
+    // left ahead of its formula when a phantom table dissolved.
     //
-    // Deliberately a closed list of verbs: a genuine title ending in
-    // "equals" or "is" is vanishingly rare, whereas guessing from
-    // part-of-speech would misfire on terse headings.
-    if !t.ends_with(['.', '!', '?', ':', ';', ')', ']']) {
+    // Gated on the line reading as prose rather than a title. Case is the
+    // discriminator the trailing word alone cannot provide: a heading is
+    // title case ("Bond Yields", "The Method Yields") while a stranded
+    // lead-in is sentence case ("the method yields"). Without this gate the
+    // veto eats real headings — "Bond Yields", "Crop Yields" and any wrapped
+    // title-case heading the preprocessor failed to merge.
+    if !t.ends_with(['.', '!', '?', ':', ';', ')', ']']) && !looks_title_case(t) {
         if let Some(last) = t.split_whitespace().next_back() {
             let word: String = last
                 .trim_matches(|c: char| !c.is_alphanumeric())
                 .to_lowercase();
-            // Verbs and copulas only. Articles, prepositions and
-            // conjunctions were tried and had to be removed: a heading that
-            // WRAPS across two lines ends on exactly those words, so
-            // suppressing them destroyed real headings ("Casualty and" ->
-            // "Casualty and Theft Losses", "Rule 10. You Must Be at" ->
-            // "... At Least Age 25" in IRS Publication 17). A wrapped
-            // heading never breaks after its verb, so this list is safe.
-            // Technical relational verbs ONLY. Copulas and auxiliaries
-            // (is/are/be/have) were tried and had to be dropped: a heading
-            // that wraps across lines ends on exactly those words, and
-            // suppressing them destroyed real headings in IRS Publication 17
-            // ("Rule 15. Your AGI Must Be" -> "... Less Than ...",
-            // "What Medical Expenses Are" -> "... Deductible?",
-            // "When Can a Roth IRA Be" -> "... Opened?"). The same trailing
-            // word appears in genuine body fragments ("the tax burden should
-            // be"), so the tail alone cannot separate the two — that needs
-            // the following line's context, which this text-only predicate
-            // does not have.
-            //
-            // The verbs below never end a heading in any register, so they
-            // are safe without context.
-            const DANGLING_TAIL: &[&str] = &[
-                "equals",
-                "denotes",
-                "implies",
-                "satisfies",
-                "yields",
-                "becomes",
-                "signifies",
-            ];
+            // Relational verbs only, and only those with no common noun
+            // sense. "yields" was dropped for exactly that reason: "Bond
+            // Yields" is a real section title. Function words, copulas and
+            // auxiliaries were measured and rejected outright — a heading
+            // that wraps across lines ends on those, and suppressing them
+            // destroyed real IRS Publication 17 headings.
+            const DANGLING_TAIL: &[&str] =
+                &["equals", "denotes", "implies", "satisfies", "signifies"];
             if DANGLING_TAIL.contains(&word.as_str()) {
                 return true;
             }
@@ -308,6 +315,7 @@ mod fragment_heading_tests {
         // dissolved, ahead of its formula on the next line.
         assert!(is_heading_fragment("Note that the exact error equals"));
         assert!(is_heading_fragment("The remainder term satisfies"));
+        assert!(is_heading_fragment("we conclude that the sum equals"));
     }
 
     #[test]
@@ -322,6 +330,19 @@ mod fragment_heading_tests {
         assert!(!is_heading_fragment("What is a Derivative?"));
         assert!(!is_heading_fragment("Procedure:"));
         assert!(!is_heading_fragment("Note that this is important."));
+    }
+
+    #[test]
+    fn title_case_headings_ending_in_a_verb_survive() {
+        // "yields" is also a plural noun; these are real section titles.
+        assert!(!is_heading_fragment("Bond Yields"));
+        assert!(!is_heading_fragment("Crop Yields"));
+        assert!(!is_heading_fragment("Dividend Yields"));
+        assert!(!is_heading_fragment("Yields"));
+        // A wrapped title-case heading whose first line ends on a listed
+        // verb must survive even if the preprocessor failed to merge it.
+        assert!(!is_heading_fragment("The Theorem Implies"));
+        assert!(!is_heading_fragment("What This Denotes"));
     }
 
     #[test]
@@ -342,7 +363,8 @@ mod fragment_heading_tests {
 
     #[test]
     fn dangling_check_is_case_insensitive() {
-        assert!(is_heading_fragment("THE REMAINDER EQUALS"));
+        // All-caps is not sentence case, so the veto must not fire there.
+        assert!(!is_heading_fragment("THE REMAINDER EQUALS"));
     }
 }
 
