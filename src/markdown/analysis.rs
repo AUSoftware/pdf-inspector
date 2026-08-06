@@ -171,6 +171,45 @@ pub(crate) fn is_toc_marker_heading(text: &str) -> bool {
 /// equation and absent from name-plus-number headings. A bare trailing colon
 /// is NOT a fragment signal either: real headings frequently end with colons
 /// ("Procedure:", "Steps for Using the Microscope:").
+/// True when the line opens with a section number ("3.", "2.1.4", "IV)").
+///
+/// Mirrors the acceptance of `heading::parse_numbering` rather than the
+/// stricter `convert::starts_with_section_number`, which deliberately
+/// requires two components because it bypasses isolation checks. Here a
+/// single "1." counts: numbering is independent evidence of a heading, and
+/// `heading.rs` applies its numbered-prefix allowance *after* consulting
+/// `is_heading_fragment`, so without this exemption a numbered
+/// sentence-case heading would be vetoed before that allowance can run.
+fn starts_with_numbering_prefix(t: &str) -> bool {
+    let Some(first) = t.split_whitespace().next() else {
+        return false;
+    };
+    let has_delimiter = first.ends_with(['.', ')', ':']);
+    let token = first.trim_end_matches(['.', ')', ':']);
+    if token.is_empty() {
+        return false;
+    }
+    let parts: Vec<&str> = token.split('.').collect();
+    let decimal = parts
+        .iter()
+        .all(|p| !p.is_empty() && p.len() <= 3 && p.chars().all(|c| c.is_ascii_digit()));
+    if decimal {
+        // "1." / "2.1." carry a delimiter; "2.3 Title" is written without
+        // one, so a multi-component number is accepted bare. A bare single
+        // number ("3 apples") is not — that is ordinary prose.
+        return has_delimiter || parts.len() >= 2;
+    }
+    // Roman numerals only with a delimiter: a bare leading "I" is the
+    // pronoun far more often than a section number.
+    has_delimiter
+        && token.chars().all(|c| {
+            matches!(
+                c.to_ascii_uppercase(),
+                'I' | 'V' | 'X' | 'L' | 'C' | 'D' | 'M'
+            )
+        })
+}
+
 /// True when the line reads as a title rather than a sentence: every
 /// content word (ignoring minor words) starts uppercase. Used to spare real
 /// headings from the dangling-verb veto — "Bond Yields" is a section title,
@@ -284,7 +323,10 @@ pub(crate) fn is_heading_fragment(text: &str) -> bool {
     // lead-in is sentence case ("the method yields"). Without this gate the
     // veto eats real headings — "Bond Yields", "Crop Yields" and any wrapped
     // title-case heading the preprocessor failed to merge.
-    if !t.ends_with(['.', '!', '?', ':', ';', ')', ']']) && !looks_title_case(t) {
+    if !t.ends_with(['.', '!', '?', ':', ';', ')', ']'])
+        && !looks_title_case(t)
+        && !starts_with_numbering_prefix(t)
+    {
         if let Some(last) = t.split_whitespace().next_back() {
             let word: String = last
                 .trim_matches(|c: char| !c.is_alphanumeric())
@@ -343,6 +385,20 @@ mod fragment_heading_tests {
         // verb must survive even if the preprocessor failed to merge it.
         assert!(!is_heading_fragment("The Theorem Implies"));
         assert!(!is_heading_fragment("What This Denotes"));
+    }
+
+    #[test]
+    fn numbered_sentence_case_headings_survive() {
+        // heading.rs consults is_heading_fragment BEFORE applying its
+        // numbered-prefix allowance, so the veto must not pre-empt it.
+        assert!(!is_heading_fragment("1. What the model implies"));
+        assert!(!is_heading_fragment("2.3 How the estimator satisfies"));
+        assert!(!is_heading_fragment("IV) What this denotes"));
+        // Without numbering the same wording is still a stranded clause.
+        assert!(is_heading_fragment("What the model implies"));
+        // A bare leading number or pronoun is prose, not numbering.
+        assert!(is_heading_fragment("3 apples and what that implies"));
+        assert!(is_heading_fragment("I think the model implies"));
     }
 
     #[test]
