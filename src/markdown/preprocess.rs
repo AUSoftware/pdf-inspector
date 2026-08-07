@@ -212,10 +212,52 @@ pub(crate) fn merge_drop_caps(lines: Vec<TextLine>, base_size: f32) -> Vec<TextL
                 // must itself read as body text. Headings, labels and table
                 // fragments that merely fall in the geometric window are
                 // never rewritten.
+                // The line before the candidate target tells us whether the
+                // target starts a paragraph or continues one. A continuation
+                // must never receive the cap: in polkuja_ylakoulu the cap
+                // belongs to "rilaiset" but the line below it continues a
+                // hyphenated word ("yläkou-" + "lulaisten"), and prepending
+                // there produced "Elulaisten".
+                let before_target = result
+                    .len()
+                    .checked_sub(2)
+                    .and_then(|i| result.get(i))
+                    .map(|l| l.text().trim_end().to_string());
                 let target = result.last_mut().filter(|prev| {
                     let prev_text = prev.text();
                     let prev_trimmed = prev_text.trim();
-                    prev.page == line.page
+                    // A hyphen on the line above means the target resumes a
+                    // split word, so it is a continuation and must not take
+                    // the cap (polkuja_ylakoulu: "yläkou-" + "lulaisten").
+                    //
+                    // Case cannot be used as a continuation signal here: the
+                    // target legitimately starts lowercase in the common
+                    // case, because the cap removes the word's first letter
+                    // and leaves "ver the course..." for "Over".
+                    let continues_previous =
+                        before_target.as_deref().is_some_and(|b| b.ends_with('-'));
+                    // Both lines of a two-line cap clear the glyph, so they
+                    // share a left edge. An ordinary continuation line sits at
+                    // the paragraph margin instead, which is how the cap in
+                    // polkuja_ylakoulu reached "tulla" mid-sentence.
+                    let shares_left_edge = prev
+                        .items
+                        .first()
+                        .zip(line.items.get(1))
+                        .is_some_and(|(p, c)| (p.x - c.x).abs() <= 2.0);
+                    // A two-line cap spans both baselines, so the step
+                    // between them is a large fraction of the cap's height.
+                    // A taller cap (polkuja_ylakoulu uses a 47pt initial over
+                    // ~13pt leading) covers four or five lines, and the
+                    // paragraph's first line is then several lines up rather
+                    // than immediately above — we cannot identify it here, so
+                    // leave that cap alone rather than attach it to whichever
+                    // continuation happens to sit above.
+                    let spans_two_lines = prev.y - line_y >= first.font_size * 0.5;
+                    !continues_previous
+                        && shares_left_edge
+                        && spans_two_lines
+                        && prev.page == line.page
                         && prev.y > line_y
                         && prev.y - line_y <= cap_span
                         && prev
@@ -230,7 +272,16 @@ pub(crate) fn merge_drop_caps(lines: Vec<TextLine>, base_size: f32) -> Vec<TextL
                         // A mid-word cap ("T" + "HE recent") joins directly;
                         // leading whitespace means the cap is its own word
                         // ("A" + " long time ago"), so keep one space.
-                        let had_leading_ws = first_item.text.starts_with(char::is_whitespace);
+                        // Leading whitespace alone is not proof of a word
+                        // boundary: the paragraph's first line is indented to
+                        // clear the cap, and that indent can arrive as leading
+                        // whitespace in the text run. Treat it as a boundary
+                        // only when the cap is itself a single-letter word, so
+                        // an indented mid-word cap cannot produce "T HE recent"
+                        // — the very defect this change removes.
+                        const SINGLE_LETTER_WORDS: &[char] = &['A', 'I', 'O', 'U', 'Y', 'E'];
+                        let had_leading_ws = first_item.text.starts_with(char::is_whitespace)
+                            && SINGLE_LETTER_WORDS.contains(&drop_char);
                         let rest = first_item.text.trim_start().to_string();
                         first_item.text = if had_leading_ws {
                             format!("{} {}", drop_char, rest)
@@ -692,7 +743,8 @@ mod tests {
                 10.0,
                 90.0,
             )],
-            y: 712.0,
+            // 16pt baseline step under a 25pt cap: a genuine two-line cap.
+            y: 716.0,
             page: 1,
             adaptive_threshold: 0.10,
         };
@@ -725,7 +777,7 @@ mod tests {
         // body text, so it must not be rewritten.
         let label = TextLine {
             items: vec![make_item_at("Fig. 2", 10.0, 90.0)],
-            y: 712.0,
+            y: 716.0,
             page: 1,
             adaptive_threshold: 0.10,
         };
@@ -755,7 +807,7 @@ mod tests {
         lead.text = " long time ago in a galaxy far away".to_string();
         let first_line = TextLine {
             items: vec![lead],
-            y: 712.0,
+            y: 716.0,
             page: 1,
             adaptive_threshold: 0.10,
         };
@@ -772,6 +824,82 @@ mod tests {
         assert!(
             result[0].text().starts_with("A long time ago"),
             "standalone-word cap keeps one space: {}",
+            result[0].text()
+        );
+    }
+
+    #[test]
+    fn embedded_drop_cap_skips_hyphenation_continuation_targets() {
+        // polkuja_ylakoulu: the line above the candidate ends on a hyphen, so
+        // the candidate resumes a split word and must not take the cap.
+        let split_word = TextLine {
+            items: vec![make_item_at(
+                "mediasisallot ovat osa useimpien ylakou-",
+                10.0,
+                90.0,
+            )],
+            y: 724.0,
+            page: 1,
+            adaptive_threshold: 0.10,
+        };
+        let continuation = TextLine {
+            items: vec![make_item_at(
+                "lulaisten elamaa ja muuta tekstia",
+                10.0,
+                90.0,
+            )],
+            y: 712.0,
+            page: 1,
+            adaptive_threshold: 0.10,
+        };
+        let cap_line = TextLine {
+            items: vec![
+                make_item_at("E", 25.0, 72.0),
+                make_item_at("jatkuu tassa lisaa leipatekstia", 10.0, 90.0),
+            ],
+            y: 700.0,
+            page: 1,
+            adaptive_threshold: 0.10,
+        };
+        let result = merge_drop_caps(vec![split_word, continuation, cap_line], 10.0);
+        assert!(
+            result[1].text().starts_with("lulaisten"),
+            "continuation must not receive the cap: {}",
+            result[1].text()
+        );
+        assert!(
+            result[2].text().starts_with('E'),
+            "cap stays put when no valid target exists: {}",
+            result[2].text()
+        );
+    }
+
+    #[test]
+    fn embedded_drop_cap_indent_is_not_a_word_boundary() {
+        // The paragraph's first line is indented to clear the cap, and that
+        // indent can arrive as leading whitespace. A mid-word cap must still
+        // join directly — "T HE recent" would be the defect this fixes.
+        let mut lead = make_item_at("HE recent development and more body text", 10.0, 90.0);
+        lead.text = "  HE recent development and more body text".to_string();
+        let first_line = TextLine {
+            items: vec![lead],
+            y: 716.0,
+            page: 1,
+            adaptive_threshold: 0.10,
+        };
+        let cap_line = TextLine {
+            items: vec![
+                make_item_at("T", 25.0, 72.0),
+                make_item_at("bandwidth for signal-to-noise ratio", 10.0, 90.0),
+            ],
+            y: 700.0,
+            page: 1,
+            adaptive_threshold: 0.10,
+        };
+        let result = merge_drop_caps(vec![first_line, cap_line], 10.0);
+        assert!(
+            result[0].text().starts_with("THE recent"),
+            "indent must not be read as a word boundary: {}",
             result[0].text()
         );
     }
