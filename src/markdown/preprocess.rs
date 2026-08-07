@@ -222,7 +222,7 @@ pub(crate) fn merge_drop_caps(lines: Vec<TextLine>, base_size: f32) -> Vec<TextL
                     .len()
                     .checked_sub(2)
                     .and_then(|i| result.get(i))
-                    .map(|l| l.text().trim_end().to_string());
+                    .map(|l| (l.text().trim_end().to_string(), l.y));
                 let target = result.last_mut().filter(|prev| {
                     let prev_text = prev.text();
                     let prev_trimmed = prev_text.trim();
@@ -234,8 +234,9 @@ pub(crate) fn merge_drop_caps(lines: Vec<TextLine>, base_size: f32) -> Vec<TextL
                     // target legitimately starts lowercase in the common
                     // case, because the cap removes the word's first letter
                     // and leaves "ver the course..." for "Over".
-                    let continues_previous =
-                        before_target.as_deref().is_some_and(|b| b.ends_with('-'));
+                    let continues_previous = before_target
+                        .as_ref()
+                        .is_some_and(|(b, _)| b.ends_with('-'));
                     // Both lines of a two-line cap clear the glyph, so they
                     // share a left edge. An ordinary continuation line sits at
                     // the paragraph margin instead, which is how the cap in
@@ -253,10 +254,39 @@ pub(crate) fn merge_drop_caps(lines: Vec<TextLine>, base_size: f32) -> Vec<TextL
                     // than immediately above — we cannot identify it here, so
                     // leave that cap alone rather than attach it to whichever
                     // continuation happens to sit above.
-                    let spans_two_lines = prev.y - line_y >= first.font_size * 0.5;
+                    let step = prev.y - line_y;
+                    // A two-line cap is about two line-steps tall. Express
+                    // this as a line count rather than a fraction of the cap
+                    // em: the step is the body leading and is independent of
+                    // cap size, so tying the bound to the em would skip a
+                    // legitimate tall cap over tight leading (a 25pt cap over
+                    // 12pt leading is still two lines). Shannon measures 1.53
+                    // line-steps; the four-line initials this cannot place
+                    // measure 3.5 and 4.0.
+                    let spans_two_lines = step > 0.0 && first.font_size <= step * 2.5;
+                    // The target must START a paragraph, not continue one.
+                    // Without this, an ordinary continuation that happens to
+                    // share the left edge is rewritten as "Tcontinuation...".
+                    // A paragraph break shows as extra leading above the
+                    // target, or as a completed sentence on the line above.
+                    let starts_paragraph = match before_target.as_ref() {
+                        None => true,
+                        Some((text, y)) => {
+                            y - prev.y > step * 1.15 || text.ends_with(['.', '!', '?'])
+                        }
+                    };
+                    log::warn!(
+                        "GEO cap={:?} capfs={:.1} step={:.1} caplines={:.2} above_gap={:?}",
+                        drop_char,
+                        first.font_size,
+                        prev.y - line_y,
+                        first.font_size / (prev.y - line_y).max(0.1),
+                        before_target.as_ref().map(|(_, y)| y - prev.y)
+                    );
                     !continues_previous
                         && shares_left_edge
                         && spans_two_lines
+                        && starts_paragraph
                         && prev.page == line.page
                         && prev.y > line_y
                         && prev.y - line_y <= cap_span
