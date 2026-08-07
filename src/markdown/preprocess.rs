@@ -169,6 +169,83 @@ pub(crate) fn merge_drop_caps(lines: Vec<TextLine>, base_size: f32) -> Vec<TextL
                 .map(|c| c.is_uppercase())
                 .unwrap_or(false);
 
+        // Embedded drop cap: a two-line cap's baseline aligns with the
+        // paragraph's SECOND line, so Y-grouping puts the glyph at the start
+        // of that line rather than on a line of its own. Left there it
+        // surfaces mid-sentence once the paragraph is joined — Shannon's
+        // "A Mathematical Theory of Communication" reads "...which exchange
+        // T bandwidth for signal-to-noise ratio...". Detect it, prepend the
+        // character to the paragraph's first line, and drop it from this one.
+        //
+        // The size gate is 1.8x rather than 2.5x because bitmap (Type3) caps
+        // report their glyph bbox rather than the em box, so a two-line cap
+        // can measure as little as ~1.9x the body size.
+        if line.items.len() > 1 {
+            let first = &line.items[0];
+            // The remainder must be a substantive body run: a lone label or
+            // math fragment beside a large glyph is not a drop-cap paragraph.
+            let rest_letters: usize = line.items[1..]
+                .iter()
+                .map(|i| i.text.chars().filter(|c| c.is_alphabetic()).count())
+                .sum();
+            let is_embedded_cap = first.font_size >= base_size * 1.8
+                && first.text.trim().chars().count() == 1
+                && first
+                    .text
+                    .trim()
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_uppercase)
+                && line.items[1..]
+                    .iter()
+                    .all(|i| i.font_size < base_size * 1.5)
+                && line.items[1..].iter().any(|i| i.x > first.x)
+                && rest_letters >= 8;
+            if is_embedded_cap {
+                let drop_char = first.text.trim().chars().next().unwrap();
+                let cap_x = first.x;
+                let cap_span = first.font_size * 1.5;
+                let line_y = line.y;
+                // Only the immediately preceding line qualifies: the
+                // paragraph's first line sits directly above, in the same
+                // column, indented past the cap by roughly its width, and
+                // must itself read as body text. Headings, labels and table
+                // fragments that merely fall in the geometric window are
+                // never rewritten.
+                let target = result.last_mut().filter(|prev| {
+                    let prev_text = prev.text();
+                    let prev_trimmed = prev_text.trim();
+                    prev.page == line.page
+                        && prev.y > line_y
+                        && prev.y - line_y <= cap_span
+                        && prev
+                            .items
+                            .first()
+                            .is_some_and(|i| i.x > cap_x && i.x - cap_x <= first.font_size * 2.5)
+                        && prev_trimmed.chars().next().is_some_and(char::is_alphabetic)
+                        && prev_trimmed.chars().filter(|c| c.is_alphabetic()).count() >= 8
+                });
+                if let Some(prev_line) = target {
+                    if let Some(first_item) = prev_line.items.first_mut() {
+                        // A mid-word cap ("T" + "HE recent") joins directly;
+                        // leading whitespace means the cap is its own word
+                        // ("A" + " long time ago"), so keep one space.
+                        let had_leading_ws = first_item.text.starts_with(char::is_whitespace);
+                        let rest = first_item.text.trim_start().to_string();
+                        first_item.text = if had_leading_ws {
+                            format!("{} {}", drop_char, rest)
+                        } else {
+                            format!("{}{}", drop_char, rest)
+                        };
+                    }
+                    let mut line = line.clone();
+                    line.items.remove(0);
+                    result.push(line);
+                    continue;
+                }
+            }
+        }
+
         if is_drop_cap {
             let drop_char = trimmed.chars().next().unwrap();
 
@@ -596,6 +673,107 @@ mod tests {
             page,
             adaptive_threshold: 0.10,
         }
+    }
+
+    fn make_item_at(text: &str, font_size: f32, x: f32) -> TextItem {
+        let mut item = make_item(text, font_size, None);
+        item.x = x;
+        item.width = text.len() as f32 * font_size * 0.5;
+        item
+    }
+
+    #[test]
+    fn embedded_drop_cap_moves_to_paragraph_start() {
+        // A two-line cap baseline-aligns with the paragraph's SECOND line,
+        // so it lands as that line's first item (Shannon entropy.pdf p.1).
+        let first_line = TextLine {
+            items: vec![make_item_at(
+                "HE recent development which exchange",
+                10.0,
+                90.0,
+            )],
+            y: 712.0,
+            page: 1,
+            adaptive_threshold: 0.10,
+        };
+        let second_line = TextLine {
+            items: vec![
+                make_item_at("T", 25.0, 72.0),
+                make_item_at("bandwidth for signal-to-noise ratio", 10.0, 90.0),
+            ],
+            y: 700.0,
+            page: 1,
+            adaptive_threshold: 0.10,
+        };
+        let result = merge_drop_caps(vec![first_line, second_line], 10.0);
+        assert_eq!(result.len(), 2);
+        assert!(
+            result[0].text().starts_with("THE recent"),
+            "cap should prepend to the paragraph start: {}",
+            result[0].text()
+        );
+        assert!(
+            result[1].text().starts_with("bandwidth"),
+            "cap must be removed from the second line: {}",
+            result[1].text()
+        );
+    }
+
+    #[test]
+    fn embedded_drop_cap_ignores_non_paragraph_neighbours() {
+        // Same geometry, but the preceding line is a short label rather than
+        // body text, so it must not be rewritten.
+        let label = TextLine {
+            items: vec![make_item_at("Fig. 2", 10.0, 90.0)],
+            y: 712.0,
+            page: 1,
+            adaptive_threshold: 0.10,
+        };
+        let second_line = TextLine {
+            items: vec![
+                make_item_at("T", 25.0, 72.0),
+                make_item_at("bandwidth for signal-to-noise ratio", 10.0, 90.0),
+            ],
+            y: 700.0,
+            page: 1,
+            adaptive_threshold: 0.10,
+        };
+        let result = merge_drop_caps(vec![label, second_line], 10.0);
+        assert_eq!(result[0].text().trim(), "Fig. 2");
+        assert!(
+            result[1].text().starts_with('T'),
+            "cap stays put: {}",
+            result[1].text()
+        );
+    }
+
+    #[test]
+    fn embedded_drop_cap_keeps_a_space_for_standalone_word_caps() {
+        // Leading whitespace on the paragraph's first item marks the cap as
+        // a word of its own rather than the first letter of one.
+        let mut lead = make_item_at("long time ago in a galaxy far away", 10.0, 90.0);
+        lead.text = " long time ago in a galaxy far away".to_string();
+        let first_line = TextLine {
+            items: vec![lead],
+            y: 712.0,
+            page: 1,
+            adaptive_threshold: 0.10,
+        };
+        let second_line = TextLine {
+            items: vec![
+                make_item_at("A", 25.0, 72.0),
+                make_item_at("continued here with more body text", 10.0, 90.0),
+            ],
+            y: 700.0,
+            page: 1,
+            adaptive_threshold: 0.10,
+        };
+        let result = merge_drop_caps(vec![first_line, second_line], 10.0);
+        assert!(
+            result[0].text().starts_with("A long time ago"),
+            "standalone-word cap keeps one space: {}",
+            result[0].text()
+        );
     }
 
     #[test]
