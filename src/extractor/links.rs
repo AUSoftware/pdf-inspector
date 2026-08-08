@@ -13,6 +13,13 @@ use super::get_number;
 /// so we cap total traversal work in addition to detecting cycles.
 const MAX_FORM_FIELD_NODES: usize = 100_000;
 
+/// Upper bound on `/Kids` recursion depth. Real AcroForm hierarchies are only
+/// a few levels deep (fields → child fields → widgets); a crafted PDF can chain
+/// tens of thousands of distinct fields into a linear `/Kids` list that would
+/// overflow the stack via depth-first recursion long before the node budget is
+/// reached. This depth cap bounds the stack independently of total node count.
+const MAX_FORM_FIELD_DEPTH: usize = 100;
+
 pub fn extract_page_links(doc: &Document, page_id: ObjectId, page_num: u32) -> Vec<TextItem> {
     let mut links = Vec::new();
 
@@ -180,6 +187,7 @@ pub(crate) fn extract_form_fields(
                 &annotation_pages,
                 &mut items,
                 &mut visited,
+                0,
             );
         }
     }
@@ -224,11 +232,16 @@ pub(crate) fn walk_form_fields(
     annotation_pages: &HashMap<ObjectId, u32>,
     items: &mut Vec<TextItem>,
     visited: &mut HashSet<ObjectId>,
+    depth: usize,
 ) {
     // Guard against `/Kids` cycles and pathologically large field trees.
-    // Revisiting an object ID means we hit a cycle; exceeding the node budget
-    // means the tree is too large to be a legitimate form.
-    if !visited.insert(field_id) || visited.len() > MAX_FORM_FIELD_NODES {
+    // Revisiting an object ID means we hit a cycle; exceeding the depth cap
+    // means the chain is too deep to be a legitimate form (and would overflow
+    // the stack); exceeding the node budget means the tree is too large.
+    if depth > MAX_FORM_FIELD_DEPTH
+        || !visited.insert(field_id)
+        || visited.len() > MAX_FORM_FIELD_NODES
+    {
         return;
     }
 
@@ -275,6 +288,7 @@ pub(crate) fn walk_form_fields(
                         annotation_pages,
                         items,
                         visited,
+                        depth + 1,
                     );
                 }
             }
@@ -487,6 +501,47 @@ mod tests {
             "Type" => "Catalog",
             "AcroForm" => dictionary! {
                 "Fields" => vec![Object::Reference(field_a)],
+            },
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let page_map = HashMap::new();
+        let items = extract_form_fields(&doc, &page_map);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn deep_acyclic_kids_chain_does_not_overflow_stack() {
+        // A long chain of *distinct* fields (no cycle) must also terminate:
+        // the visited set alone would still recurse to the chain length, so
+        // the depth cap is what prevents a stack overflow here.
+        let mut doc = Document::new();
+        let n = MAX_FORM_FIELD_DEPTH * 500;
+        let ids: Vec<ObjectId> = (0..=n).map(|_| doc.new_object_id()).collect();
+        for i in 0..n {
+            doc.set_object(
+                ids[i],
+                dictionary! {
+                    "FT" => "Tx",
+                    "Kids" => vec![Object::Reference(ids[i + 1])],
+                },
+            );
+        }
+        // Leaf carries a value; it sits far below the depth cap so it is never
+        // reached, proving traversal stops early rather than crashing.
+        doc.set_object(
+            ids[n],
+            dictionary! {
+                "FT" => "Tx",
+                "T" => Object::string_literal("leaf"),
+                "V" => Object::string_literal("x"),
+                "Rect" => vec![10.into(), 20.into(), 110.into(), 40.into()],
+            },
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "AcroForm" => dictionary! {
+                "Fields" => vec![Object::Reference(ids[0])],
             },
         });
         doc.trailer.set("Root", Object::Reference(catalog_id));
