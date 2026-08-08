@@ -259,106 +259,116 @@ pub(crate) fn merge_drop_caps(lines: Vec<TextLine>, base_size: f32) -> Vec<TextL
             if is_embedded_cap {
                 let drop_char = first.text.trim().chars().next().unwrap();
                 let cap_x = first.x;
-                let cap_span = first.font_size * 1.5;
                 let line_y = line.y;
-                // Only the immediately preceding line qualifies: the
-                // paragraph's first line sits directly above, in the same
-                // column, indented past the cap by roughly its width, and
-                // must itself read as body text. Headings, labels and table
-                // fragments that merely fall in the geometric window are
-                // never rewritten.
-                // The line before the candidate target tells us whether the
-                // target starts a paragraph or continues one. A continuation
-                // must never receive the cap: in polkuja_ylakoulu the cap
-                // belongs to "rilaiset" but the line below it continues a
-                // hyphenated word ("yläkou-" + "lulaisten"), and prepending
-                // there produced "Elulaisten".
-                // Scoped to the cap's own page: a line from the previous
-                // page has an unrelated y, so comparing leading across the
-                // break is meaningless and would suppress a legitimate cap on
-                // the first paragraph of a new page.
-                let before_target = result
-                    .len()
-                    .checked_sub(2)
+                // Text on the cap's own line, pushed right to clear the glyph.
+                let rest_x = line.items[1].x;
+
+                // Walk up the run of lines the cap has indented. A drop cap
+                // pushes every line it covers to the right of the glyph, so
+                // the paragraph's first line is the TOPMOST line sharing that
+                // indent — however many lines the cap spans. Using the indent
+                // rather than the cap's font size is what makes this work for
+                // three- and four-line initials as well as two-line ones;
+                // deriving a line count from the em size does not survive
+                // contact with real documents, where 36-47pt initials sit
+                // over 11-14pt leading.
+                //
+                // A cap in a different column has no such run (its neighbours
+                // sit at an unrelated x), so it is left alone — which is
+                // correct when the cap's own line already carries the rest of
+                // the word.
+                const INDENT_TOLERANCE: f32 = 2.0;
+                const MAX_CAP_LINES: usize = 8;
+                let max_step = base_size * 2.5;
+                let mut target_idx = result.len();
+                let mut expected_y = line_y;
+                while target_idx > 0 && result.len() - target_idx < MAX_CAP_LINES {
+                    let cand = &result[target_idx - 1];
+                    let step = cand.y - expected_y;
+                    let shares_indent = cand
+                        .items
+                        .first()
+                        .is_some_and(|i| (i.x - rest_x).abs() <= INDENT_TOLERANCE);
+                    if cand.page != line.page || step <= 0.0 || step > max_step || !shares_indent {
+                        break;
+                    }
+                    expected_y = cand.y;
+                    target_idx -= 1;
+                }
+
+                // The topmost line of the run is the paragraph's first line.
+                // The line above THAT tells us whether it starts a paragraph.
+                let before_target = target_idx
+                    .checked_sub(1)
                     .and_then(|i| result.get(i))
                     .filter(|l| l.page == line.page)
                     .map(|l| (l.text().trim_end().to_string(), l.y));
-                let target = result.last_mut().filter(|prev| {
-                    let prev_text = prev.text();
-                    let prev_trimmed = prev_text.trim();
-                    // A hyphen on the line above means the target resumes a
-                    // split word, so it is a continuation and must not take
-                    // the cap (polkuja_ylakoulu: "yläkou-" + "lulaisten").
-                    //
-                    // Case cannot be used as a continuation signal here: the
-                    // target legitimately starts lowercase in the common
-                    // case, because the cap removes the word's first letter
-                    // and leaves "ver the course..." for "Over".
-                    let continues_previous = before_target
-                        .as_ref()
-                        .is_some_and(|(b, _)| b.ends_with('-'));
-                    // Both lines of a two-line cap clear the glyph, so they
-                    // share a left edge. An ordinary continuation line sits at
-                    // the paragraph margin instead, which is how the cap in
-                    // polkuja_ylakoulu reached "tulla" mid-sentence.
-                    let shares_left_edge = prev
-                        .items
-                        .first()
-                        .zip(line.items.get(1))
-                        .is_some_and(|(p, c)| (p.x - c.x).abs() <= 2.0);
-                    // A two-line cap spans both baselines, so the step
-                    // between them is a large fraction of the cap's height.
-                    // A taller cap (polkuja_ylakoulu uses a 47pt initial over
-                    // ~13pt leading) covers four or five lines, and the
-                    // paragraph's first line is then several lines up rather
-                    // than immediately above — we cannot identify it here, so
-                    // leave that cap alone rather than attach it to whichever
-                    // continuation happens to sit above.
-                    let step = prev.y - line_y;
-                    // A two-line cap is about two line-steps tall. Express
-                    // this as a line count rather than a fraction of the cap
-                    // em: the step is the body leading and is independent of
-                    // cap size, so tying the bound to the em would skip a
-                    // legitimate tall cap over tight leading (a 25pt cap over
-                    // 12pt leading is still two lines). Shannon measures 1.53
-                    // line-steps; the four-line initials this cannot place
-                    // measure 3.5 and 4.0.
-                    let spans_two_lines = step > 0.0 && first.font_size <= step * 2.5;
-                    // The target must START a paragraph, not continue one.
-                    // Without this, an ordinary continuation that happens to
-                    // share the left edge is rewritten as "Tcontinuation...".
-                    // A paragraph break shows as extra leading above the
-                    // target, or as a completed sentence on the line above.
-                    let starts_paragraph = match before_target.as_ref() {
-                        None => true,
-                        Some((text, y)) => y - prev.y > step * 1.15 || ends_sentence(text),
-                    };
-                    !continues_previous
-                        && shares_left_edge
-                        && spans_two_lines
-                        && starts_paragraph
-                        && prev.page == line.page
-                        && prev.y > line_y
-                        && prev.y - line_y <= cap_span
-                        && prev
-                            .items
-                            .first()
-                            .is_some_and(|i| i.x > cap_x && i.x - cap_x <= first.font_size * 2.5)
-                        && prev_trimmed.chars().next().is_some_and(char::is_alphabetic)
-                        && prev_trimmed.chars().filter(|c| c.is_alphabetic()).count() >= 8
-                });
+                // Leading within the run: the step from the target down to the
+                // next line of the paragraph, which is the cap's own line when
+                // the run is a single line.
+                let run_step = result
+                    .get(target_idx)
+                    .map(|t| {
+                        let below_y = result.get(target_idx + 1).map_or(line_y, |b| b.y);
+                        t.y - below_y
+                    })
+                    .unwrap_or(0.0);
+                let step_for_gap = if run_step > 0.0 {
+                    run_step
+                } else {
+                    base_size * 1.2
+                };
+
+                let target = (target_idx < result.len())
+                    .then(|| &mut result[target_idx])
+                    .filter(|prev| {
+                        let prev_text = prev.text();
+                        let prev_trimmed = prev_text.trim();
+                        // A hyphen on the line above means the target resumes
+                        // a split word, so it continues a paragraph rather
+                        // than starting one (polkuja_ylakoulu: "ylakou-" +
+                        // "lulaisten").
+                        //
+                        // Case cannot serve as a continuation signal here: the
+                        // target legitimately starts lowercase, because the
+                        // cap removes the word's first letter and leaves
+                        // "ver the course..." for "Over".
+                        let continues_previous = before_target
+                            .as_ref()
+                            .is_some_and(|(b, _)| b.ends_with('-'));
+                        // The target must START a paragraph: extra leading
+                        // above it, a completed sentence on the line above, or
+                        // nothing above it at all.
+                        let starts_paragraph = match before_target.as_ref() {
+                            None => true,
+                            Some((text, y)) => {
+                                y - prev.y > step_for_gap * 1.15 || ends_sentence(text)
+                            }
+                        };
+                        !continues_previous
+                            && starts_paragraph
+                            && prev.page == line.page
+                            && prev.y > line_y
+                            // Indented past the cap glyph, not merely to its
+                            // right by an arbitrary amount.
+                            && prev
+                                .items
+                                .first()
+                                .is_some_and(|i| i.x > cap_x && i.x - cap_x <= first.font_size * 2.0)
+                            // Body text, so headings, labels and table
+                            // fragments are never rewritten.
+                            && prev_trimmed
+                                .chars()
+                                .next()
+                                .is_some_and(char::is_alphabetic)
+                            && prev_trimmed.chars().filter(|c| c.is_alphabetic()).count() >= 8
+                    });
                 if let Some(prev_line) = target {
                     if let Some(first_item) = prev_line.items.first_mut() {
-                        // A mid-word cap ("T" + "HE recent") joins directly;
-                        // leading whitespace means the cap is its own word
-                        // ("A" + " long time ago"), so keep one space.
-                        // Leading whitespace alone is not proof of a word
-                        // boundary: the paragraph's first line is indented to
-                        // clear the cap, and that indent can arrive as leading
-                        // whitespace in the text run. Treat it as a boundary
-                        // only when the cap is itself a single-letter word, so
-                        // an indented mid-word cap cannot produce "T HE recent"
-                        // — the very defect this change removes.
+                        // A mid-word cap ("T" + "HE recent") joins directly.
+                        // Leading whitespace only marks a word boundary when
+                        // the cap is itself a single-letter word, since the
+                        // paragraph's indent can also arrive as whitespace.
                         const SINGLE_LETTER_WORDS: &[char] = &['A', 'I', 'O', 'U', 'Y', 'E'];
                         let had_leading_ws = first_item.text.starts_with(char::is_whitespace)
                             && SINGLE_LETTER_WORDS.contains(&drop_char);
@@ -852,6 +862,61 @@ mod tests {
     }
 
     #[test]
+    fn embedded_drop_cap_walks_a_multi_line_initial_to_the_paragraph_start() {
+        // A 47pt initial over 13pt leading covers four lines, so the
+        // paragraph's first line is three lines above the cap rather than
+        // immediately above it (polkuja_ylakoulu). The indented run, not the
+        // cap's em size, is what locates it.
+        let mut lines = vec![TextLine {
+            items: vec![make_item_at("Previous paragraph ends here.", 10.0, 72.0)],
+            y: 766.0,
+            page: 1,
+            adaptive_threshold: 0.10,
+        }];
+        for (i, text) in [
+            "rilaiset mediasisallot ovat tarkea osa",
+            "useimpien ylakoululaisten elamaa ja",
+            "muuta tekstia jatkuu tassa viela",
+        ]
+        .iter()
+        .enumerate()
+        {
+            lines.push(TextLine {
+                items: vec![make_item_at(text, 10.0, 90.0)],
+                y: 753.0 - 13.0 * i as f32,
+                page: 1,
+                adaptive_threshold: 0.10,
+            });
+        }
+        lines.push(TextLine {
+            items: vec![
+                make_item_at("E", 47.0, 72.0),
+                make_item_at("loppuosa tekstista tassa", 10.0, 90.0),
+            ],
+            y: 714.0,
+            page: 1,
+            adaptive_threshold: 0.10,
+        });
+
+        let result = merge_drop_caps(lines, 10.0);
+        assert!(
+            result[1].text().starts_with("Erilaiset"),
+            "cap belongs on the topmost line of the indented run: {}",
+            result[1].text()
+        );
+        assert!(
+            result[2].text().starts_with("useimpien"),
+            "intervening run lines must be untouched: {}",
+            result[2].text()
+        );
+        assert!(
+            result[4].text().starts_with("loppuosa"),
+            "cap must be removed from its own line: {}",
+            result[4].text()
+        );
+    }
+
+    #[test]
     fn embedded_drop_cap_ignores_non_paragraph_neighbours() {
         // Same geometry, but the preceding line is a short label rather than
         // body text, so it must not be rewritten.
@@ -910,25 +975,27 @@ mod tests {
 
     #[test]
     fn embedded_drop_cap_skips_hyphenation_continuation_targets() {
-        // polkuja_ylakoulu: the line above the candidate ends on a hyphen, so
-        // the candidate resumes a split word and must not take the cap.
+        // The line above the RUN ends on a hyphen, so the run's topmost line
+        // resumes a split word rather than starting a paragraph. It sits at
+        // the paragraph margin (x=72), outside the cap's indent, so it is not
+        // part of the run itself.
         let split_word = TextLine {
             items: vec![make_item_at(
                 "mediasisallot ovat osa useimpien ylakou-",
                 10.0,
-                90.0,
+                72.0,
             )],
-            y: 724.0,
+            y: 728.0,
             page: 1,
             adaptive_threshold: 0.10,
         };
-        let continuation = TextLine {
+        let run_top = TextLine {
             items: vec![make_item_at(
                 "lulaisten elamaa ja muuta tekstia",
                 10.0,
                 90.0,
             )],
-            y: 712.0,
+            y: 714.0,
             page: 1,
             adaptive_threshold: 0.10,
         };
@@ -941,10 +1008,10 @@ mod tests {
             page: 1,
             adaptive_threshold: 0.10,
         };
-        let result = merge_drop_caps(vec![split_word, continuation, cap_line], 10.0);
+        let result = merge_drop_caps(vec![split_word, run_top, cap_line], 10.0);
         assert!(
             result[1].text().starts_with("lulaisten"),
-            "continuation must not receive the cap: {}",
+            "a run resuming a split word must not receive the cap: {}",
             result[1].text()
         );
         assert!(
