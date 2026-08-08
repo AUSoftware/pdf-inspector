@@ -993,7 +993,11 @@ mod tests {
         // Periods that do not end a sentence.
         assert!(!ends_sentence("as shown in Fig."));
         assert!(!ends_sentence("see e.g."));
-        // Non-ASCII abbreviations are two characters but more than two bytes.
+        // Non-ASCII abbreviations. The two-CHARACTER segment is the case
+        // that distinguishes a character count from a byte count: "пр" is
+        // 2 chars but 4 bytes, so a byte-based bound would reject it and
+        // read the line as a completed sentence.
+        assert!(!ends_sentence("и т.пр."));
         assert!(!ends_sentence("см. т.е."));
         assert!(!ends_sentence("napr. ú.d."));
         assert!(!ends_sentence("reviewed by Dr."));
