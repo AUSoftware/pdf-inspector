@@ -2,10 +2,16 @@
 
 use crate::types::{ItemType, TextItem};
 use lopdf::{Document, Object, ObjectId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::fonts::{resolve_array, resolve_dict};
 use super::get_number;
+
+/// Upper bound on the number of form-field nodes visited during a single
+/// `extract_form_fields` pass. A crafted PDF can chain thousands of distinct
+/// `/Kids` fields to blow the stack even without an outright reference cycle,
+/// so we cap total traversal work in addition to detecting cycles.
+const MAX_FORM_FIELD_NODES: usize = 100_000;
 
 pub fn extract_page_links(doc: &Document, page_id: ObjectId, page_num: u32) -> Vec<TextItem> {
     let mut links = Vec::new();
@@ -158,6 +164,11 @@ pub(crate) fn extract_form_fields(
     }
     let annotation_pages = annotation_page_map(doc, page_map);
 
+    // Track field object IDs already visited so a crafted PDF cannot send us
+    // into unbounded recursion via a `/Kids` cycle (e.g. a field that lists
+    // itself as its own child).
+    let mut visited = HashSet::new();
+
     for field_obj in &fields {
         if let Ok(field_ref) = field_obj.as_reference() {
             walk_form_fields(
@@ -168,6 +179,7 @@ pub(crate) fn extract_form_fields(
                 page_map,
                 &annotation_pages,
                 &mut items,
+                &mut visited,
             );
         }
     }
@@ -202,6 +214,7 @@ fn annotation_page_map(
 }
 
 /// Recursively walk the form field tree, extracting leaf field values.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn walk_form_fields(
     doc: &Document,
     field_id: ObjectId,
@@ -210,7 +223,15 @@ pub(crate) fn walk_form_fields(
     page_map: &HashMap<ObjectId, u32>,
     annotation_pages: &HashMap<ObjectId, u32>,
     items: &mut Vec<TextItem>,
+    visited: &mut HashSet<ObjectId>,
 ) {
+    // Guard against `/Kids` cycles and pathologically large field trees.
+    // Revisiting an object ID means we hit a cycle; exceeding the node budget
+    // means the tree is too large to be a legitimate form.
+    if !visited.insert(field_id) || visited.len() > MAX_FORM_FIELD_NODES {
+        return;
+    }
+
     let field_dict = match doc.get_dictionary(field_id) {
         Ok(d) => d,
         Err(_) => return,
@@ -253,6 +274,7 @@ pub(crate) fn walk_form_fields(
                         page_map,
                         annotation_pages,
                         items,
+                        visited,
                     );
                 }
             }
@@ -410,5 +432,67 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].page, 2);
         assert_eq!(items[0].text, "customer: Alice");
+    }
+
+    #[test]
+    fn kids_self_cycle_does_not_overflow_stack() {
+        // A crafted AcroForm field that lists itself in `/Kids` must not send
+        // the traversal into unbounded recursion.
+        let mut doc = Document::new();
+        let field_id = doc.new_object_id();
+        doc.set_object(
+            field_id,
+            dictionary! {
+                "FT" => "Tx",
+                "T" => Object::string_literal("loop"),
+                "Kids" => vec![Object::Reference(field_id)],
+            },
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "AcroForm" => dictionary! {
+                "Fields" => vec![Object::Reference(field_id)],
+            },
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let page_map = HashMap::new();
+        // Completes (rather than overflowing the stack) and yields no items.
+        let items = extract_form_fields(&doc, &page_map);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn kids_mutual_cycle_terminates() {
+        // Two fields that reference each other via `/Kids` form a cycle that
+        // must also terminate.
+        let mut doc = Document::new();
+        let field_a = doc.new_object_id();
+        let field_b = doc.new_object_id();
+        doc.set_object(
+            field_a,
+            dictionary! {
+                "T" => Object::string_literal("a"),
+                "Kids" => vec![Object::Reference(field_b)],
+            },
+        );
+        doc.set_object(
+            field_b,
+            dictionary! {
+                "T" => Object::string_literal("b"),
+                "Kids" => vec![Object::Reference(field_a)],
+            },
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "AcroForm" => dictionary! {
+                "Fields" => vec![Object::Reference(field_a)],
+            },
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let page_map = HashMap::new();
+        let items = extract_form_fields(&doc, &page_map);
+        assert!(items.is_empty());
     }
 }
