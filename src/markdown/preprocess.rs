@@ -150,6 +150,37 @@ pub(crate) fn merge_heading_lines(
 /// Merge drop caps with the appropriate line.
 /// A drop cap is a single large letter at the start of a paragraph.
 /// Due to PDF coordinate sorting, the drop cap may appear AFTER the line it belongs to.
+/// True when the text ends a sentence, as opposed to merely ending in a
+/// period. An abbreviation or list marker ("e.g.", "Fig.", "Mr.", "1.")
+/// closes with a period mid-sentence, so treating those as paragraph
+/// boundaries would let a drop cap be prepended to a continuation.
+fn ends_sentence(text: &str) -> bool {
+    let t = text.trim_end();
+    if t.ends_with(['!', '?']) {
+        return true;
+    }
+    let Some(stripped) = t.strip_suffix('.') else {
+        return false;
+    };
+    let last = stripped.split_whitespace().next_back().unwrap_or("");
+    // "e.g." / "i.e." — internal periods mark an abbreviation.
+    if last.contains('.') {
+        return false;
+    }
+    // "1." / "IV." — a list or section marker.
+    if last
+        .chars()
+        .all(|c| c.is_ascii_digit() || matches!(c, 'I' | 'V' | 'X' | 'L' | 'C'))
+    {
+        return false;
+    }
+    const ABBREVIATIONS: &[&str] = &[
+        "Fig", "No", "Mr", "Mrs", "Ms", "Dr", "St", "vs", "etc", "al", "Ed", "Eq", "Ch", "pp",
+        "Vol", "cf", "Prof", "Inc", "Ltd", "Jr", "Sr",
+    ];
+    !ABBREVIATIONS.iter().any(|a| a.eq_ignore_ascii_case(last))
+}
+
 pub(crate) fn merge_drop_caps(lines: Vec<TextLine>, base_size: f32) -> Vec<TextLine> {
     let mut result: Vec<TextLine> = Vec::with_capacity(lines.len());
 
@@ -218,10 +249,15 @@ pub(crate) fn merge_drop_caps(lines: Vec<TextLine>, base_size: f32) -> Vec<TextL
                 // belongs to "rilaiset" but the line below it continues a
                 // hyphenated word ("yläkou-" + "lulaisten"), and prepending
                 // there produced "Elulaisten".
+                // Scoped to the cap's own page: a line from the previous
+                // page has an unrelated y, so comparing leading across the
+                // break is meaningless and would suppress a legitimate cap on
+                // the first paragraph of a new page.
                 let before_target = result
                     .len()
                     .checked_sub(2)
                     .and_then(|i| result.get(i))
+                    .filter(|l| l.page == line.page)
                     .map(|l| (l.text().trim_end().to_string(), l.y));
                 let target = result.last_mut().filter(|prev| {
                     let prev_text = prev.text();
@@ -271,18 +307,8 @@ pub(crate) fn merge_drop_caps(lines: Vec<TextLine>, base_size: f32) -> Vec<TextL
                     // target, or as a completed sentence on the line above.
                     let starts_paragraph = match before_target.as_ref() {
                         None => true,
-                        Some((text, y)) => {
-                            y - prev.y > step * 1.15 || text.ends_with(['.', '!', '?'])
-                        }
+                        Some((text, y)) => y - prev.y > step * 1.15 || ends_sentence(text),
                     };
-                    log::warn!(
-                        "GEO cap={:?} capfs={:.1} step={:.1} caplines={:.2} above_gap={:?}",
-                        drop_char,
-                        first.font_size,
-                        prev.y - line_y,
-                        first.font_size / (prev.y - line_y).max(0.1),
-                        before_target.as_ref().map(|(_, y)| y - prev.y)
-                    );
                     !continues_previous
                         && shares_left_edge
                         && spans_two_lines
@@ -931,6 +957,62 @@ mod tests {
             result[0].text().starts_with("THE recent"),
             "indent must not be read as a word boundary: {}",
             result[0].text()
+        );
+    }
+
+    #[test]
+    fn ends_sentence_rejects_abbreviations_and_markers() {
+        use super::ends_sentence;
+        assert!(ends_sentence("This completes the thought."));
+        assert!(ends_sentence("Is that so?"));
+        assert!(ends_sentence("Stop!"));
+        // Periods that do not end a sentence.
+        assert!(!ends_sentence("as shown in Fig."));
+        assert!(!ends_sentence("see e.g."));
+        assert!(!ends_sentence("reviewed by Dr."));
+        assert!(!ends_sentence("item 1."));
+        assert!(!ends_sentence("section IV."));
+        assert!(!ends_sentence("a trailing clause with no period"));
+    }
+
+    #[test]
+    fn embedded_drop_cap_allows_first_paragraph_on_a_new_page() {
+        // The line two back is on the previous page, so its y is unrelated
+        // and must not be used as leading evidence.
+        let prev_page_tail = TextLine {
+            items: vec![make_item_at(
+                "tail of the previous page body text",
+                10.0,
+                90.0,
+            )],
+            y: 90.0,
+            page: 1,
+            adaptive_threshold: 0.10,
+        };
+        let first_line = TextLine {
+            items: vec![make_item_at(
+                "HE recent development which exchange",
+                10.0,
+                90.0,
+            )],
+            y: 716.0,
+            page: 2,
+            adaptive_threshold: 0.10,
+        };
+        let cap_line = TextLine {
+            items: vec![
+                make_item_at("T", 25.0, 72.0),
+                make_item_at("bandwidth for signal-to-noise ratio", 10.0, 90.0),
+            ],
+            y: 700.0,
+            page: 2,
+            adaptive_threshold: 0.10,
+        };
+        let result = merge_drop_caps(vec![prev_page_tail, first_line, cap_line], 10.0);
+        assert!(
+            result[1].text().starts_with("THE recent"),
+            "a page break must not suppress the merge: {}",
+            result[1].text()
         );
     }
 
