@@ -163,17 +163,38 @@ fn ends_sentence(text: &str) -> bool {
         return false;
     };
     let last = stripped.split_whitespace().next_back().unwrap_or("");
-    // "e.g." / "i.e." — internal periods mark an abbreviation.
-    if last.contains('.') {
+    if last.is_empty() {
         return false;
     }
-    // "1." / "IV." — a list or section marker.
-    if last
-        .chars()
-        .all(|c| c.is_ascii_digit() || matches!(c, 'I' | 'V' | 'X' | 'L' | 'C'))
+
+    // Abbreviations carry an internal period between very short segments
+    // ("e.g.", "i.e.", "U.S."). Domains and decimals have the same shape but
+    // longer or numeric segments ("example.com.", "3.14."), and those end
+    // sentences perfectly well, so require every segment to be short and
+    // alphabetic before reading the internal period as an abbreviation.
+    if last.contains('.')
+        && last
+            .split('.')
+            .filter(|seg| !seg.is_empty())
+            .all(|seg| seg.len() <= 2 && seg.chars().all(char::is_alphabetic))
     {
         return false;
     }
+
+    // Enumerators stand alone on their line ("1.", "ii.", "IV."). A number
+    // or numeral in the tail of a sentence does not — "published in 2020.",
+    // "He scored 5." and "after World War II." all end sentences, and
+    // treating them as markers would block a legitimate drop-cap merge.
+    if stripped.split_whitespace().count() == 1 {
+        let is_numeric = last.chars().all(|c| c.is_ascii_digit());
+        let is_roman = last
+            .chars()
+            .all(|c| matches!(c.to_ascii_uppercase(), 'I' | 'V' | 'X' | 'L' | 'C'));
+        if is_numeric || is_roman {
+            return false;
+        }
+    }
+
     const ABBREVIATIONS: &[&str] = &[
         "Fig", "No", "Mr", "Mrs", "Ms", "Dr", "St", "vs", "etc", "al", "Ed", "Eq", "Ch", "pp",
         "Vol", "cf", "Prof", "Inc", "Ltd", "Jr", "Sr",
@@ -970,8 +991,18 @@ mod tests {
         assert!(!ends_sentence("as shown in Fig."));
         assert!(!ends_sentence("see e.g."));
         assert!(!ends_sentence("reviewed by Dr."));
-        assert!(!ends_sentence("item 1."));
-        assert!(!ends_sentence("section IV."));
+        // Standalone enumerators, any case.
+        assert!(!ends_sentence("1."));
+        assert!(!ends_sentence("IV."));
+        assert!(!ends_sentence("ii."));
+        assert!(!ends_sentence("xii."));
+        // Numbers and numerals that genuinely end a sentence must count,
+        // or a legitimate drop-cap merge is blocked.
+        assert!(ends_sentence("The paper was published in 2020."));
+        assert!(ends_sentence("He scored 5."));
+        assert!(ends_sentence("after World War II."));
+        assert!(ends_sentence("the constant equals 3.14."));
+        assert!(ends_sentence("documented at example.com."));
         assert!(!ends_sentence("a trailing clause with no period"));
     }
 
