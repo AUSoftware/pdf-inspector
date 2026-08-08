@@ -176,7 +176,10 @@ fn ends_sentence(text: &str) -> bool {
         && last
             .split('.')
             .filter(|seg| !seg.is_empty())
-            .all(|seg| seg.len() <= 2 && seg.chars().all(char::is_alphabetic))
+            // Characters, not bytes: a two-letter non-ASCII abbreviation
+            // ("т.е.", "ú.d.") measures four or more bytes and would
+            // otherwise be read as a completed sentence.
+            .all(|seg| seg.chars().count() <= 2 && seg.chars().all(char::is_alphabetic))
     {
         return false;
     }
@@ -990,6 +993,9 @@ mod tests {
         // Periods that do not end a sentence.
         assert!(!ends_sentence("as shown in Fig."));
         assert!(!ends_sentence("see e.g."));
+        // Non-ASCII abbreviations are two characters but more than two bytes.
+        assert!(!ends_sentence("см. т.е."));
+        assert!(!ends_sentence("napr. ú.d."));
         assert!(!ends_sentence("reviewed by Dr."));
         // Standalone enumerators, any case.
         assert!(!ends_sentence("1."));
