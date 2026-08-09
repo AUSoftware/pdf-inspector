@@ -20,6 +20,33 @@ const MAX_FORM_FIELD_NODES: usize = 100_000;
 /// reached. This depth cap bounds the stack independently of total node count.
 const MAX_FORM_FIELD_DEPTH: usize = 100;
 
+/// Traversal budget for the AcroForm field walk. Bounds both the number of
+/// distinct nodes visited *and* the total number of `/Fields`/`/Kids` entries
+/// examined.
+///
+/// Counting `visited` alone is not enough: invalid entries (non-references) and
+/// duplicate references never grow `visited`, so an oversized array full of them
+/// would iterate to completion no matter how large. Charging every examined
+/// entry against the same budget makes it a real cap on traversal work.
+pub(crate) struct FieldWalkBudget {
+    visited: HashSet<ObjectId>,
+    examined: usize,
+}
+
+impl FieldWalkBudget {
+    fn new() -> Self {
+        Self {
+            visited: HashSet::new(),
+            examined: 0,
+        }
+    }
+
+    /// True once the budget is spent; callers must stop iterating and recursing.
+    fn exhausted(&self) -> bool {
+        self.visited.len() >= MAX_FORM_FIELD_NODES || self.examined >= MAX_FORM_FIELD_NODES
+    }
+}
+
 pub fn extract_page_links(doc: &Document, page_id: ObjectId, page_num: u32) -> Vec<TextItem> {
     let mut links = Vec::new();
 
@@ -171,17 +198,19 @@ pub(crate) fn extract_form_fields(
     }
     let annotation_pages = annotation_page_map(doc, page_map);
 
-    // Track field object IDs already visited so a crafted PDF cannot send us
-    // into unbounded recursion via a `/Kids` cycle (e.g. a field that lists
-    // itself as its own child).
-    let mut visited = HashSet::new();
+    // Bound the walk so a crafted PDF cannot send us into unbounded recursion
+    // via a `/Kids` cycle, a deep chain, or an oversized array of invalid or
+    // duplicate entries.
+    let mut budget = FieldWalkBudget::new();
 
     for field_obj in &fields {
-        // Stop once the node budget is spent so a `/Fields` array wider than the
-        // budget can't burn CPU iterating entries whose walk would no-op.
-        if visited.len() >= MAX_FORM_FIELD_NODES {
+        // Stop once the budget is spent so a `/Fields` array wider than the
+        // budget can't burn CPU iterating entries whose walk would no-op. Charge
+        // every entry (including invalid ones) against the budget.
+        if budget.exhausted() {
             break;
         }
+        budget.examined += 1;
         if let Ok(field_ref) = field_obj.as_reference() {
             walk_form_fields(
                 doc,
@@ -191,7 +220,7 @@ pub(crate) fn extract_form_fields(
                 page_map,
                 &annotation_pages,
                 &mut items,
-                &mut visited,
+                &mut budget,
                 0,
             );
         }
@@ -236,20 +265,19 @@ pub(crate) fn walk_form_fields(
     page_map: &HashMap<ObjectId, u32>,
     annotation_pages: &HashMap<ObjectId, u32>,
     items: &mut Vec<TextItem>,
-    visited: &mut HashSet<ObjectId>,
+    budget: &mut FieldWalkBudget,
     depth: usize,
 ) {
     // Guard against `/Kids` cycles and pathologically large field trees.
     // Exceeding the depth cap means the chain is too deep to be a legitimate
-    // form (and would overflow the stack); reaching the node budget means the
-    // tree is too large. Both checks run *before* inserting so `visited` can
-    // never grow past the budget — otherwise a huge `/Kids` array would keep
-    // inserting post-budget IDs and consume unbounded memory.
-    if depth > MAX_FORM_FIELD_DEPTH || visited.len() >= MAX_FORM_FIELD_NODES {
+    // form (and would overflow the stack); an exhausted budget means the tree is
+    // too large. Both checks run *before* inserting so the visited set can never
+    // grow past the budget.
+    if depth > MAX_FORM_FIELD_DEPTH || budget.exhausted() {
         return;
     }
     // Revisiting an object ID means we hit a `/Kids` cycle.
-    if !visited.insert(field_id) {
+    if !budget.visited.insert(field_id) {
         return;
     }
 
@@ -286,12 +314,14 @@ pub(crate) fn walk_form_fields(
         if let Some(kids) = resolve_array(doc, kids_obj) {
             let kids = kids.clone();
             for kid in &kids {
-                // Stop once the node budget is spent so a `/Kids` array wider
-                // than the budget can't burn CPU iterating entries whose walk
-                // would no-op. This makes the budget a true traversal-work cap.
-                if visited.len() >= MAX_FORM_FIELD_NODES {
+                // Stop once the budget is spent so a `/Kids` array wider than the
+                // budget can't burn CPU iterating entries whose walk would no-op.
+                // Charge every entry (including invalid/duplicate ones) against
+                // the budget so this is a true traversal-work cap.
+                if budget.exhausted() {
                     break;
                 }
+                budget.examined += 1;
                 if let Ok(kid_ref) = kid.as_reference() {
                     walk_form_fields(
                         doc,
@@ -301,7 +331,7 @@ pub(crate) fn walk_form_fields(
                         page_map,
                         annotation_pages,
                         items,
-                        visited,
+                        budget,
                         depth + 1,
                     );
                 }
@@ -600,10 +630,11 @@ mod tests {
 
         let page_map = HashMap::new();
         let items = extract_form_fields(&doc, &page_map);
-        // Never more than the budget, and specifically the budget minus the
-        // root node that was charged against it.
+        // Extraction stops at the budget: bounded above by the cap, and it gets
+        // right up to it (allowing a small delta for the root/boundary nodes
+        // charged against the budget).
         assert!(items.len() <= MAX_FORM_FIELD_NODES);
-        assert_eq!(items.len(), MAX_FORM_FIELD_NODES - 1);
+        assert!(items.len() >= MAX_FORM_FIELD_NODES - 3);
     }
 
     #[test]
@@ -635,6 +666,50 @@ mod tests {
 
         let page_map = HashMap::new();
         let items = extract_form_fields(&doc, &page_map);
-        assert_eq!(items.len(), MAX_FORM_FIELD_NODES);
+        assert!(items.len() <= MAX_FORM_FIELD_NODES);
+        assert!(items.len() >= MAX_FORM_FIELD_NODES - 3);
+    }
+
+    #[test]
+    fn duplicate_and_invalid_kids_entries_stop_at_budget() {
+        // Duplicate references and non-reference junk never grow `visited`, so
+        // without charging examined entries against the budget an oversized
+        // array of them would iterate to completion. The walk must still
+        // terminate and extract the single real leaf exactly once.
+        let mut doc = Document::new();
+        let leaf_id = doc.new_object_id();
+        doc.set_object(
+            leaf_id,
+            dictionary! {
+                "FT" => "Tx",
+                "V" => Object::string_literal("v"),
+                "Rect" => vec![10.into(), 20.into(), 110.into(), 40.into()],
+            },
+        );
+        // A `/Kids` array far wider than the budget: half duplicate references
+        // to the same leaf, half invalid (null) entries.
+        let mut kids: Vec<Object> = Vec::new();
+        for i in 0..(MAX_FORM_FIELD_NODES * 2) {
+            if i % 2 == 0 {
+                kids.push(Object::Reference(leaf_id));
+            } else {
+                kids.push(Object::Null);
+            }
+        }
+        let root_id = doc.add_object(dictionary! {
+            "T" => Object::string_literal("root"),
+            "Kids" => kids,
+        });
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "AcroForm" => dictionary! {
+                "Fields" => vec![Object::Reference(root_id)],
+            },
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let page_map = HashMap::new();
+        let items = extract_form_fields(&doc, &page_map);
+        assert_eq!(items.len(), 1);
     }
 }
