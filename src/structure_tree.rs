@@ -539,6 +539,9 @@ fn parse_kids(
     match k_obj {
         Object::Array(arr) => {
             for item in arr {
+                if walk.budget == 0 {
+                    break;
+                }
                 process_kid_item(doc, item, role_map, page_id, depth, &mut children, walk);
             }
         }
@@ -706,6 +709,11 @@ fn parse_struct_element_dict(
                     if walk.budget == 0 {
                         break;
                     }
+                    // Charge every `/K` item against the budget *before* handling
+                    // it, so an array of bare MCIDs or MCR dicts (which append to
+                    // `content_refs` rather than recursing) cannot allocate
+                    // without bound.
+                    walk.budget -= 1;
                     let ref_id = match item {
                         Object::Reference(id) => Some(*id),
                         _ => None,
@@ -1476,6 +1484,34 @@ mod tests {
         assert!(
             n <= MAX_STRUCT_NODES,
             "node count {n} exceeded budget {MAX_STRUCT_NODES}"
+        );
+    }
+
+    #[test]
+    fn struct_tree_wide_mcid_array_respects_budget() {
+        // A single struct element with a `/K` array of bare MCIDs wider than the
+        // budget must not allocate `content_refs` without bound — each array item
+        // is charged, so materialized marked-content refs stay within the budget.
+        let mut doc = Document::new();
+        let elem = doc.new_object_id();
+        let kids: Vec<Object> = (0..(MAX_STRUCT_NODES as i64 + 100))
+            .map(Object::Integer)
+            .collect();
+        doc.set_object(
+            elem,
+            dictionary! {
+                "Type" => "StructElem",
+                "S" => "P",
+                "K" => kids,
+            },
+        );
+        let doc = finalize_tagged_doc(doc, elem);
+
+        let tree = StructTree::from_doc(&doc).expect("tree should parse");
+        assert!(
+            tree.mcid_count() <= MAX_STRUCT_NODES,
+            "content_refs unbounded: {} > {MAX_STRUCT_NODES}",
+            tree.mcid_count()
         );
     }
 }
