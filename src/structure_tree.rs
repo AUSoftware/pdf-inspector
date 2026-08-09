@@ -496,11 +496,12 @@ const MAX_STRUCT_NODES: usize = 500_000;
 
 /// Traversal state shared across the recursive structure-tree parse.
 ///
-/// `budget` is a global allowance of nodes still permitted to be materialized;
-/// it caps total work even for aliased/DAG-shaped `/K` graphs of distinct
-/// objects. `active` holds the object IDs currently on the depth-first path so
-/// a struct element that references itself (or an ancestor) is not expanded
-/// into an unbounded/exponential subtree.
+/// `budget` is a global allowance charged once per materialized item — each
+/// struct-element node and each marked-content reference — so total work is
+/// bounded even for aliased/DAG-shaped `/K` graphs of distinct objects or a
+/// single element with a very wide `/K` array. `active` holds the object IDs
+/// currently on the depth-first path so a struct element that references itself
+/// (or an ancestor) is not expanded into an unbounded/exponential subtree.
 struct StructWalk {
     budget: usize,
     active: HashSet<ObjectId>,
@@ -709,11 +710,11 @@ fn parse_struct_element_dict(
                     if walk.budget == 0 {
                         break;
                     }
-                    // Charge every `/K` item against the budget *before* handling
-                    // it, so an array of bare MCIDs or MCR dicts (which append to
-                    // `content_refs` rather than recursing) cannot allocate
-                    // without bound.
-                    walk.budget -= 1;
+                    // Only content-ref items (bare MCIDs / MCR dicts) are charged
+                    // here — those are the unbounded allocations. Structural
+                    // children are charged once at their own node entry in the
+                    // recursive call, so charging them here too would double-count
+                    // and drain the budget ~2× faster than the per-node semantics.
                     let ref_id = match item {
                         Object::Reference(id) => Some(*id),
                         _ => None,
@@ -721,6 +722,7 @@ fn parse_struct_element_dict(
                     let resolved = resolve_obj(doc, item);
                     match resolved {
                         Object::Integer(mcid) => {
+                            walk.budget -= 1;
                             content_refs.push(MarkedContentRef {
                                 mcid: *mcid,
                                 page_id,
@@ -730,6 +732,7 @@ fn parse_struct_element_dict(
                             if is_mcr_dict(d) {
                                 if let Ok(Object::Integer(mcid)) = d.get(b"MCID") {
                                     let pg = get_page_ref(doc, d).or(page_id);
+                                    walk.budget -= 1;
                                     content_refs.push(MarkedContentRef {
                                         mcid: *mcid,
                                         page_id: pg,
