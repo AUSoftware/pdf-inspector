@@ -48,8 +48,17 @@ pub(crate) fn detect_columns(
         .map(|i| i.x + effective_width(i))
         .fold(f32::NEG_INFINITY, f32::max);
 
+    // Cap the histogram size. Bounds are derived from text-item coordinates,
+    // which come straight from the content-stream text matrix and can be placed
+    // at any coordinate, so a crafted PDF can otherwise force an arbitrarily
+    // large `page_width` and an unbounded `vec![0u32; num_bins]` allocation.
+    // 65_536 bins covers ~128k points at BIN_WIDTH 2.0 — roughly 9x the largest
+    // legal page — so this never clamps a real layout. A non-finite width
+    // (NaN/inf coordinate propagating through the folds) short-circuits here.
+    const MAX_BINS: usize = 65_536;
+
     let page_width = x_max - x_min;
-    if page_width < 200.0 {
+    if !page_width.is_finite() || page_width < 200.0 {
         return vec![ColumnRegion { x_min, x_max }];
     }
 
@@ -63,7 +72,7 @@ pub(crate) fn detect_columns(
     // detection of partial-page column layouts (e.g. two-column abstracts on
     // a page that also has single-column introduction text).
     let wide_threshold = page_width * 0.6;
-    let num_bins = ((page_width / BIN_WIDTH).ceil() as usize).max(1);
+    let num_bins = ((page_width / BIN_WIDTH).ceil() as usize).clamp(1, MAX_BINS);
     let mut histogram = vec![0u32; num_bins];
 
     for item in &page_items {
@@ -1827,7 +1836,7 @@ fn split_column_stragglers(lines: Vec<TextLine>) -> (Vec<TextLine>, Vec<TextLine
         .unwrap();
 
     let (cs, ce) = segments[core_seg];
-    let mut core = Vec::with_capacity(ce - cs);
+    let mut core = Vec::with_capacity(ce.saturating_sub(cs));
     let mut stragglers = Vec::new();
     for (i, line) in lines.into_iter().enumerate() {
         if i >= cs && i < ce {
@@ -2531,6 +2540,38 @@ mod tests {
             (620.0..=680.0).contains(&g2),
             "Second gutter at {g2}, expected between middle and right zones"
         );
+    }
+
+    #[test]
+    fn extreme_far_coordinate_does_not_allocate_unboundedly() {
+        // A crafted PDF can place a text run at an arbitrary coordinate via the
+        // text matrix. The derived page width must not drive an unbounded
+        // histogram allocation (previously `page_width / BIN_WIDTH` bins with no
+        // upper bound would try to reserve terabytes and abort the process).
+        let mut items = Vec::new();
+        for i in 0..24 {
+            items.push(make_item(1, i as f32 * 10.0, 700.0 - i as f32 * 5.0, "A"));
+        }
+        // Item placed 1e12 points away — 5e11 bins if left unclamped.
+        items.push(make_item(1, 1e12, 700.0, "Z"));
+
+        // Must return without aborting; content is preserved as a single region.
+        let cols = detect_columns(&items, 1, false);
+        assert!(!cols.is_empty());
+    }
+
+    #[test]
+    fn non_finite_coordinate_short_circuits() {
+        // A NaN/inf coordinate propagates through the min/max folds and would
+        // otherwise reach the histogram cast. The finite-width guard handles it.
+        let mut items = Vec::new();
+        for i in 0..24 {
+            items.push(make_item(1, i as f32 * 10.0, 700.0 - i as f32 * 5.0, "A"));
+        }
+        items.push(make_item(1, f32::INFINITY, 700.0, "Z"));
+
+        let cols = detect_columns(&items, 1, false);
+        assert_eq!(cols.len(), 1, "non-finite width returns a single region");
     }
 
     #[test]
