@@ -514,6 +514,17 @@ impl StructWalk {
             active: HashSet::new(),
         }
     }
+
+    /// Charge one unit against the budget for a materialized item (a struct
+    /// element node or a marked-content reference). Returns `false` — without
+    /// underflowing — once the budget is exhausted, so callers skip the item.
+    fn charge(&mut self) -> bool {
+        if self.budget == 0 {
+            return false;
+        }
+        self.budget -= 1;
+        true
+    }
 }
 
 /// Parse child elements from a `/K` entry.
@@ -599,10 +610,9 @@ fn parse_kid(
     match obj {
         // Direct MCID integer — create a leaf wrapper
         Object::Integer(mcid) => {
-            if walk.budget == 0 {
+            if !walk.charge() {
                 return;
             }
-            walk.budget -= 1;
             // This is a bare MCID at the struct-element level.
             // We attach it to the parent element, so we create a wrapper struct element.
             // Actually, bare MCIDs inside /K are content refs for the parent,
@@ -642,12 +652,11 @@ fn parse_struct_element_dict(
     out: &mut Vec<StructElement>,
     walk: &mut StructWalk,
 ) {
-    if depth >= MAX_DEPTH || walk.budget == 0 {
-        return;
-    }
     // Charge this node against the global budget so aliased/DAG-shaped `/K`
     // graphs (which the per-path cycle guard alone cannot bound) still stop.
-    walk.budget -= 1;
+    if depth >= MAX_DEPTH || !walk.charge() {
+        return;
+    }
     // Check if this is a marked-content reference dict (has /Type /MCR)
     if is_mcr_dict(dict) {
         if let Ok(Object::Integer(mcid)) = dict.get(b"MCID") {
@@ -700,10 +709,12 @@ fn parse_struct_element_dict(
         let k_resolved = resolve_obj(doc, k_obj);
         match k_resolved {
             Object::Integer(mcid) => {
-                content_refs.push(MarkedContentRef {
-                    mcid: *mcid,
-                    page_id,
-                });
+                if walk.charge() {
+                    content_refs.push(MarkedContentRef {
+                        mcid: *mcid,
+                        page_id,
+                    });
+                }
             }
             Object::Array(arr) => {
                 for item in arr {
@@ -722,21 +733,23 @@ fn parse_struct_element_dict(
                     let resolved = resolve_obj(doc, item);
                     match resolved {
                         Object::Integer(mcid) => {
-                            walk.budget -= 1;
-                            content_refs.push(MarkedContentRef {
-                                mcid: *mcid,
-                                page_id,
-                            });
+                            if walk.charge() {
+                                content_refs.push(MarkedContentRef {
+                                    mcid: *mcid,
+                                    page_id,
+                                });
+                            }
                         }
                         Object::Dictionary(d) => {
                             if is_mcr_dict(d) {
                                 if let Ok(Object::Integer(mcid)) = d.get(b"MCID") {
-                                    let pg = get_page_ref(doc, d).or(page_id);
-                                    walk.budget -= 1;
-                                    content_refs.push(MarkedContentRef {
-                                        mcid: *mcid,
-                                        page_id: pg,
-                                    });
+                                    if walk.charge() {
+                                        let pg = get_page_ref(doc, d).or(page_id);
+                                        content_refs.push(MarkedContentRef {
+                                            mcid: *mcid,
+                                            page_id: pg,
+                                        });
+                                    }
                                 }
                             } else if is_objr_dict(d) {
                                 // Skip object references
@@ -772,11 +785,13 @@ fn parse_struct_element_dict(
             Object::Dictionary(d) => {
                 if is_mcr_dict(d) {
                     if let Ok(Object::Integer(mcid)) = d.get(b"MCID") {
-                        let pg = get_page_ref(doc, d).or(page_id);
-                        content_refs.push(MarkedContentRef {
-                            mcid: *mcid,
-                            page_id: pg,
-                        });
+                        if walk.charge() {
+                            let pg = get_page_ref(doc, d).or(page_id);
+                            content_refs.push(MarkedContentRef {
+                                mcid: *mcid,
+                                page_id: pg,
+                            });
+                        }
                     }
                 } else {
                     let ref_id = match k_obj {
