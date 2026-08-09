@@ -604,9 +604,9 @@ mod tests {
     fn wide_tree_traversal_stops_at_node_budget() {
         // A single field with a `/Kids` array wider than the node budget must
         // stop traversal at the cap rather than growing `visited` (and the work)
-        // without bound. Each processed leaf emits one item, so the count is
-        // bounded by the budget: the root consumes one budget slot and emits
-        // nothing, leaving exactly MAX_FORM_FIELD_NODES - 1 extracted leaves.
+        // without bound. Each processed leaf emits one item, so the item count
+        // is bounded by the budget and reaches right up to it (a couple of
+        // slots go to the root and the boundary node charged against the cap).
         let mut doc = Document::new();
         let fanout = MAX_FORM_FIELD_NODES + 50;
         let leaf_ids: Vec<ObjectId> = (0..fanout).map(|_| doc.new_object_id()).collect();
@@ -645,8 +645,8 @@ mod tests {
     #[test]
     fn wide_top_level_fields_stop_at_node_budget() {
         // A top-level `/Fields` array wider than the budget must also stop at
-        // the cap. No parent is charged against the budget here, so exactly
-        // MAX_FORM_FIELD_NODES leaves are extracted.
+        // the cap: the item count is bounded by the budget and reaches right up
+        // to it.
         let mut doc = Document::new();
         let fanout = MAX_FORM_FIELD_NODES + 50;
         let leaf_ids: Vec<ObjectId> = (0..fanout).map(|_| doc.new_object_id()).collect();
