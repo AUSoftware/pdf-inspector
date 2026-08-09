@@ -186,9 +186,12 @@ pub(crate) fn extract_form_fields(
         Err(_) => return items,
     };
 
+    // Borrow the array rather than cloning it: a crafted `/Fields` can be huge,
+    // and cloning would pay an O(n) allocation/copy before the budget check
+    // below can stop the work.
     let fields = match acroform.get(b"Fields") {
         Ok(obj) => match resolve_array(doc, obj) {
-            Some(arr) => arr.clone(),
+            Some(arr) => arr,
             None => return items,
         },
         Err(_) => return items,
@@ -203,7 +206,7 @@ pub(crate) fn extract_form_fields(
     // duplicate entries.
     let mut budget = FieldWalkBudget::new();
 
-    for field_obj in &fields {
+    for field_obj in fields {
         // Stop once the budget is spent so a `/Fields` array wider than the
         // budget can't burn CPU iterating entries whose walk would no-op. Charge
         // every entry (including invalid ones) against the budget.
@@ -311,9 +314,11 @@ pub(crate) fn walk_form_fields(
 
     // Check for /Kids — if present, recurse into children
     if let Ok(kids_obj) = field_dict.get(b"Kids") {
+        // Iterate the borrowed array directly — cloning a crafted, oversized
+        // `/Kids` would allocate and copy every entry before the budget check
+        // below could stop the work.
         if let Some(kids) = resolve_array(doc, kids_obj) {
-            let kids = kids.clone();
-            for kid in &kids {
+            for kid in kids {
                 // Stop once the budget is spent so a `/Kids` array wider than the
                 // budget can't burn CPU iterating entries whose walk would no-op.
                 // Charge every entry (including invalid/duplicate ones) against
