@@ -177,6 +177,11 @@ pub(crate) fn extract_form_fields(
     let mut visited = HashSet::new();
 
     for field_obj in &fields {
+        // Stop once the node budget is spent so a `/Fields` array wider than the
+        // budget can't burn CPU iterating entries whose walk would no-op.
+        if visited.len() >= MAX_FORM_FIELD_NODES {
+            break;
+        }
         if let Ok(field_ref) = field_obj.as_reference() {
             walk_form_fields(
                 doc,
@@ -281,6 +286,12 @@ pub(crate) fn walk_form_fields(
         if let Some(kids) = resolve_array(doc, kids_obj) {
             let kids = kids.clone();
             for kid in &kids {
+                // Stop once the node budget is spent so a `/Kids` array wider
+                // than the budget can't burn CPU iterating entries whose walk
+                // would no-op. This makes the budget a true traversal-work cap.
+                if visited.len() >= MAX_FORM_FIELD_NODES {
+                    break;
+                }
                 if let Ok(kid_ref) = kid.as_reference() {
                     walk_form_fields(
                         doc,
@@ -593,5 +604,37 @@ mod tests {
         // root node that was charged against it.
         assert!(items.len() <= MAX_FORM_FIELD_NODES);
         assert_eq!(items.len(), MAX_FORM_FIELD_NODES - 1);
+    }
+
+    #[test]
+    fn wide_top_level_fields_stop_at_node_budget() {
+        // A top-level `/Fields` array wider than the budget must also stop at
+        // the cap. No parent is charged against the budget here, so exactly
+        // MAX_FORM_FIELD_NODES leaves are extracted.
+        let mut doc = Document::new();
+        let fanout = MAX_FORM_FIELD_NODES + 50;
+        let leaf_ids: Vec<ObjectId> = (0..fanout).map(|_| doc.new_object_id()).collect();
+        for &leaf in &leaf_ids {
+            doc.set_object(
+                leaf,
+                dictionary! {
+                    "FT" => "Tx",
+                    "V" => Object::string_literal("v"),
+                    "Rect" => vec![10.into(), 20.into(), 110.into(), 40.into()],
+                },
+            );
+        }
+        let fields: Vec<Object> = leaf_ids.iter().map(|&id| Object::Reference(id)).collect();
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "AcroForm" => dictionary! {
+                "Fields" => fields,
+            },
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let page_map = HashMap::new();
+        let items = extract_form_fields(&doc, &page_map);
+        assert_eq!(items.len(), MAX_FORM_FIELD_NODES);
     }
 }
