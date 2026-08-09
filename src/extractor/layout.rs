@@ -41,22 +41,35 @@ pub(crate) fn detect_columns(
     }
     debug!("page {}: detect_columns: {} items", page, page_items.len());
 
-    // Find page bounds
-    let x_min = page_items.iter().map(|i| i.x).fold(f32::INFINITY, f32::min);
+    // Find page bounds. Coordinates come straight from the content-stream text
+    // matrix, so a malformed document can place an item at a non-finite
+    // position. Such items are excluded from the bounds rather than failing the
+    // whole page: one bad glyph should not disable column detection, and the
+    // emitted regions must never carry a NaN/inf boundary to callers.
+    let x_min = page_items
+        .iter()
+        .map(|i| i.x)
+        .filter(|x| x.is_finite())
+        .fold(f32::INFINITY, f32::min);
     let x_max = page_items
         .iter()
         .map(|i| i.x + effective_width(i))
+        .filter(|x| x.is_finite())
         .fold(f32::NEG_INFINITY, f32::max);
 
-    // Cap the histogram size. Bounds are derived from text-item coordinates,
-    // which come straight from the content-stream text matrix and can be placed
-    // at any coordinate, so a crafted PDF can otherwise force an arbitrarily
-    // large `page_width` and an unbounded `vec![0u32; num_bins]` allocation.
-    // 65_536 bins covers ~128k points at BIN_WIDTH 2.0 — roughly 9x the largest
-    // legal page — so this never clamps a real layout. A non-finite width
-    // (NaN/inf coordinate propagating through the folds) short-circuits here.
+    // Every item sat at a non-finite coordinate, so there is no usable layout.
+    if !x_min.is_finite() || !x_max.is_finite() {
+        return vec![];
+    }
+
+    // Cap the histogram size. Because the bounds above are attacker-influenced,
+    // an unclamped `page_width / BIN_WIDTH` lets a crafted PDF force an
+    // arbitrarily large `vec![0u32; num_bins]` allocation. 65_536 bins covers
+    // ~128k points at BIN_WIDTH 2.0 — roughly 9x the largest legal page — so
+    // this never clamps a real layout.
     const MAX_BINS: usize = 65_536;
 
+    // Finite bounds can still subtract to infinity at the extremes of f32.
     let page_width = x_max - x_min;
     if !page_width.is_finite() || page_width < 200.0 {
         return vec![ColumnRegion { x_min, x_max }];
@@ -2561,17 +2574,48 @@ mod tests {
     }
 
     #[test]
-    fn non_finite_coordinate_short_circuits() {
-        // A NaN/inf coordinate propagates through the min/max folds and would
-        // otherwise reach the histogram cast. The finite-width guard handles it.
-        let mut items = Vec::new();
-        for i in 0..24 {
-            items.push(make_item(1, i as f32 * 10.0, 700.0 - i as f32 * 5.0, "A"));
+    fn non_finite_coordinates_never_leak_into_region_bounds() {
+        // An inf/NaN coordinate must not escape as a column boundary: callers
+        // treat these as page/column edges.
+        for bad_x in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            let mut items = Vec::new();
+            for i in 0..24 {
+                items.push(make_item(1, i as f32 * 10.0, 700.0 - i as f32 * 5.0, "A"));
+            }
+            items.push(make_item(1, bad_x, 700.0, "Z"));
+
+            for col in detect_columns(&items, 1, false) {
+                assert!(
+                    col.x_min.is_finite() && col.x_max.is_finite(),
+                    "bad_x {bad_x} leaked bounds {}..{}",
+                    col.x_min,
+                    col.x_max
+                );
+            }
         }
-        items.push(make_item(1, f32::INFINITY, 700.0, "Z"));
+    }
+
+    #[test]
+    fn all_non_finite_coordinates_yield_no_columns() {
+        let items: Vec<TextItem> = (0..24)
+            .map(|i| make_item(1, f32::NAN, 700.0 - i as f32 * 5.0, "A"))
+            .collect();
+
+        assert!(detect_columns(&items, 1, false).is_empty());
+    }
+
+    #[test]
+    fn one_bad_coordinate_does_not_disable_column_detection() {
+        // Excluding non-finite items from the bounds must not cost the page its
+        // real layout — a single stray coordinate should not collapse a clean
+        // two-column page to one region.
+        let mut items = Vec::new();
+        items.extend(fill_zone(1, 30.0, 280.0, 750.0, 50.0));
+        items.extend(fill_zone(1, 320.0, 570.0, 750.0, 50.0));
+        items.push(make_item(1, f32::NAN, 400.0, "Z"));
 
         let cols = detect_columns(&items, 1, false);
-        assert_eq!(cols.len(), 1, "non-finite width returns a single region");
+        assert_eq!(cols.len(), 2, "Expected 2 columns, got {}", cols.len());
     }
 
     #[test]
