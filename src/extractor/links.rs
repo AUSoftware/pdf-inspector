@@ -235,13 +235,16 @@ pub(crate) fn walk_form_fields(
     depth: usize,
 ) {
     // Guard against `/Kids` cycles and pathologically large field trees.
-    // Revisiting an object ID means we hit a cycle; exceeding the depth cap
-    // means the chain is too deep to be a legitimate form (and would overflow
-    // the stack); exceeding the node budget means the tree is too large.
-    if depth > MAX_FORM_FIELD_DEPTH
-        || !visited.insert(field_id)
-        || visited.len() > MAX_FORM_FIELD_NODES
-    {
+    // Exceeding the depth cap means the chain is too deep to be a legitimate
+    // form (and would overflow the stack); reaching the node budget means the
+    // tree is too large. Both checks run *before* inserting so `visited` can
+    // never grow past the budget — otherwise a huge `/Kids` array would keep
+    // inserting post-budget IDs and consume unbounded memory.
+    if depth > MAX_FORM_FIELD_DEPTH || visited.len() >= MAX_FORM_FIELD_NODES {
+        return;
+    }
+    // Revisiting an object ID means we hit a `/Kids` cycle.
+    if !visited.insert(field_id) {
         return;
     }
 
@@ -549,5 +552,46 @@ mod tests {
         let page_map = HashMap::new();
         let items = extract_form_fields(&doc, &page_map);
         assert!(items.is_empty());
+    }
+
+    #[test]
+    fn wide_tree_traversal_stops_at_node_budget() {
+        // A single field with a `/Kids` array wider than the node budget must
+        // stop traversal at the cap rather than growing `visited` (and the work)
+        // without bound. Each processed leaf emits one item, so the count is
+        // bounded by the budget: the root consumes one budget slot and emits
+        // nothing, leaving exactly MAX_FORM_FIELD_NODES - 1 extracted leaves.
+        let mut doc = Document::new();
+        let fanout = MAX_FORM_FIELD_NODES + 50;
+        let leaf_ids: Vec<ObjectId> = (0..fanout).map(|_| doc.new_object_id()).collect();
+        for &leaf in &leaf_ids {
+            doc.set_object(
+                leaf,
+                dictionary! {
+                    "FT" => "Tx",
+                    "V" => Object::string_literal("v"),
+                    "Rect" => vec![10.into(), 20.into(), 110.into(), 40.into()],
+                },
+            );
+        }
+        let kids: Vec<Object> = leaf_ids.iter().map(|&id| Object::Reference(id)).collect();
+        let root_id = doc.add_object(dictionary! {
+            "T" => Object::string_literal("root"),
+            "Kids" => kids,
+        });
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "AcroForm" => dictionary! {
+                "Fields" => vec![Object::Reference(root_id)],
+            },
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let page_map = HashMap::new();
+        let items = extract_form_fields(&doc, &page_map);
+        // Never more than the budget, and specifically the budget minus the
+        // root node that was charged against it.
+        assert!(items.len() <= MAX_FORM_FIELD_NODES);
+        assert_eq!(items.len(), MAX_FORM_FIELD_NODES - 1);
     }
 }
