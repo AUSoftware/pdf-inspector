@@ -41,28 +41,37 @@ pub(crate) fn detect_columns(
     }
     debug!("page {}: detect_columns: {} items", page, page_items.len());
 
-    // The PDF specification caps a page at 14_400 units (200 inches). Content
-    // may sit a little outside the MediaBox, but a span far beyond one whole
-    // page means stray items, not a real layout.
+    // A span wider than this means the bounds are being set by stray items
+    // rather than by a real layout. This is a heuristic, not a format rule:
+    // PDF 2.0 sets no page-size limit, and since PDF 1.6 `UserUnit` scales a
+    // page's physical size independently of its coordinates. 14_400 units
+    // (200in at the default 1/72in unit) is the traditional Acrobat
+    // architectural limit, which makes it a reasonable "wider than any
+    // ordinary page" mark in coordinate space.
     const MAX_PAGE_EXTENT: f32 = 14_400.0;
+    // Trimming is only safe when the far items are a small minority. A
+    // genuinely large-format page has content spread across its whole width,
+    // so a large share of items falls outside the window and the page keeps
+    // its true bounds; a malformed page has just a few strays.
+    const MAX_TRIM_FRACTION: f32 = 0.10;
 
     // Find page bounds. Coordinates come straight from the content-stream text
     // matrix, so a malformed document can place items at non-finite positions.
     // Those are excluded rather than failing the whole page: one bad glyph
     // should not disable column detection, and the emitted regions must never
     // carry a NaN/inf boundary out to callers.
-    let bounds = |keep: &dyn Fn(f32) -> bool| {
+    let bounds = |keep: &dyn Fn(f32, f32) -> bool| {
         page_items
             .iter()
-            .filter(|i| i.x.is_finite() && keep(i.x))
             .map(|i| (i.x, i.x + effective_width(i)))
-            .filter(|(_, right)| right.is_finite())
-            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), (l, r)| {
-                (lo.min(l), hi.max(r))
-            })
+            .filter(|&(left, right)| left.is_finite() && right.is_finite() && keep(left, right))
+            .fold(
+                (f32::INFINITY, f32::NEG_INFINITY, 0usize),
+                |(lo, hi, n), (left, right)| (lo.min(left), hi.max(right), n + 1),
+            )
     };
 
-    let (mut x_min, mut x_max) = bounds(&|_| true);
+    let (mut x_min, mut x_max, total) = bounds(&|_, _| true);
 
     // Every item sat at a non-finite coordinate, so there is no usable layout.
     if !x_min.is_finite() || !x_max.is_finite() {
@@ -70,8 +79,8 @@ pub(crate) fn detect_columns(
     }
 
     // Every threshold below (gutter margins, spanning-item width, the XY-cut
-    // margin) is a fraction of the page width, so a single far-but-finite item
-    // would otherwise set the scale for the whole page and shrink the effective
+    // margin) is a fraction of the page width, so a single far item would
+    // otherwise set the scale for the whole page and shrink the effective
     // detection window to a rounding error — real gutters then fall inside the
     // margin band and a genuine multi-column page collapses to one region.
     // Re-derive the bounds from the items clustered around the median so a lone
@@ -86,11 +95,18 @@ pub(crate) fn detect_columns(
         xs.sort_by(f32::total_cmp);
         let median = xs[xs.len() / 2];
 
-        let (lo, hi) = bounds(&|x| (x - median).abs() <= MAX_PAGE_EXTENT);
-        if lo.is_finite() && hi.is_finite() {
+        // Both edges are checked: a malformed width poisons `x_max` from an
+        // ordinary position just as a malformed position poisons `x_min`.
+        let near = |left: f32, right: f32| {
+            (left - median).abs() <= MAX_PAGE_EXTENT && (right - median).abs() <= MAX_PAGE_EXTENT
+        };
+        let (lo, hi, kept) = bounds(&near);
+        let dropped = total - kept;
+
+        if lo.is_finite() && hi.is_finite() && dropped as f32 <= total as f32 * MAX_TRIM_FRACTION {
             debug!(
                 "page {page}: bounds {x_min}..{x_max} span > one page; \
-                 trimming outliers to {lo}..{hi}"
+                 dropping {dropped}/{total} stray item(s), trimming to {lo}..{hi}"
             );
             x_min = lo;
             x_max = hi;
@@ -2641,33 +2657,66 @@ mod tests {
     }
 
     #[test]
-    fn one_bad_coordinate_does_not_disable_column_detection() {
-        // A single stray coordinate should not collapse a clean two-column page
-        // to one region. Finite outliers matter as much as NaN/inf ones: every
-        // gutter threshold is a fraction of the page width, so an untrimmed
-        // outlier pushes real gutters inside the rejected margin band.
-        for bad_x in [f32::NAN, f32::INFINITY, 50_000.0, 1e12] {
+    fn one_bad_item_does_not_disable_column_detection() {
+        // A single stray item should not collapse a clean two-column page to
+        // one region. Every gutter threshold is a fraction of the page width,
+        // so an untrimmed outlier pushes real gutters inside the rejected
+        // margin band. A malformed *width* at an ordinary position poisons the
+        // bounds just as a malformed position does.
+        for (label, bad_x, bad_width) in [
+            ("nan position", f32::NAN, 0.0),
+            ("inf position", f32::INFINITY, 0.0),
+            ("far position", 50_000.0, 0.0),
+            ("very far position", 1e12, 0.0),
+            ("huge width", 100.0, 1e12),
+            ("inf width", 100.0, f32::INFINITY),
+        ] {
             let mut items = Vec::new();
             items.extend(fill_zone(1, 30.0, 280.0, 750.0, 50.0));
             items.extend(fill_zone(1, 320.0, 570.0, 750.0, 50.0));
-            items.push(make_item(1, bad_x, 400.0, "Z"));
+            let mut bad = make_item(1, bad_x, 400.0, "Z");
+            bad.width = bad_width;
+            items.push(bad);
 
             let cols = detect_columns(&items, 1, false);
             assert_eq!(
                 cols.len(),
                 2,
-                "bad_x {bad_x}: expected 2 columns, got {}",
+                "{label}: expected 2 columns, got {}",
                 cols.len()
             );
             for col in &cols {
                 assert!(
-                    col.x_max - col.x_min <= 14_400.0,
-                    "bad_x {bad_x}: region {}..{} exceeds one page",
+                    col.x_max - col.x_min <= MAX_PAGE_EXTENT_FOR_TEST,
+                    "{label}: region {}..{} exceeds one page",
                     col.x_min,
                     col.x_max
                 );
             }
         }
+    }
+
+    /// Mirrors `MAX_PAGE_EXTENT` in `detect_columns`.
+    const MAX_PAGE_EXTENT_FOR_TEST: f32 = 14_400.0;
+
+    #[test]
+    fn genuinely_wide_layout_keeps_its_true_bounds() {
+        // A large-format page whose content really is spread beyond one
+        // ordinary page must not be trimmed to the median cluster: its far
+        // items are the majority, not strays.
+        let mut items = Vec::new();
+        items.extend(fill_zone(1, 100.0, 20_000.0, 750.0, 600.0));
+        items.extend(fill_zone(1, 22_000.0, 40_000.0, 750.0, 600.0));
+
+        let cols = detect_columns(&items, 1, false);
+        let widest = cols
+            .iter()
+            .map(|c| c.x_max)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            widest > 35_000.0,
+            "wide layout was trimmed: right edge {widest}, expected ~40_000"
+        );
     }
 
     #[test]
