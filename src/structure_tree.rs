@@ -503,6 +503,14 @@ const MAX_DEPTH: usize = 64;
 /// This budget bounds total work and allocation regardless of tree shape.
 const MAX_STRUCT_NODES: usize = 500_000;
 
+/// Cap on the number of `/K` items *examined* during a single parse, regardless
+/// of whether they materialize anything. Bounds CPU for crafted wide `/K` arrays
+/// of non-materializing entries (unsupported value types, `/OBJR` dicts, cycle
+/// back-edges) that would otherwise be scanned in full without ever touching the
+/// node budget. Kept well above the node budget so it never truncates content
+/// that already fits within `MAX_STRUCT_NODES`.
+const MAX_STRUCT_WORK: usize = 2_000_000;
+
 /// Traversal state shared across the recursive structure-tree parse.
 ///
 /// `budget` is a global allowance charged once per materialized item — each
@@ -511,6 +519,11 @@ const MAX_STRUCT_NODES: usize = 500_000;
 /// single element with a very wide `/K` array. `active` holds the object IDs
 /// currently on the depth-first path so a struct element that references itself
 /// (or an ancestor) is not expanded into an unbounded/exponential subtree.
+/// `budget` bounds *materialization* (nodes + content refs). `work` separately
+/// bounds *traversal* — every `/K` item examined is charged against it, even
+/// ones that materialize nothing (unsupported values, `/OBJR`, cycle back-edges)
+/// — so a wide malformed array cannot force an unbounded scan, and those skipped
+/// items don't drain the materialization budget and truncate real content.
 /// `truncated` records whether any parse work was skipped — the budget was
 /// exhausted, a `/K` reference cycle was broken, or the depth cap was hit — so
 /// the caller can log it once rather than per skipped item. `stalled` is set
@@ -519,6 +532,7 @@ const MAX_STRUCT_NODES: usize = 500_000;
 /// not scanned to the end once no further leaf can be materialized.
 struct StructWalk {
     budget: usize,
+    work: usize,
     active: HashSet<ObjectId>,
     truncated: bool,
     stalled: bool,
@@ -528,10 +542,24 @@ impl StructWalk {
     fn new() -> Self {
         Self {
             budget: MAX_STRUCT_NODES,
+            work: MAX_STRUCT_WORK,
             active: HashSet::new(),
             truncated: false,
             stalled: false,
         }
+    }
+
+    /// Charge one unit of traversal work for an examined `/K` item, whether or
+    /// not it materializes anything. Returns `false` (flagging truncation) once
+    /// the traversal budget is spent, so an enclosing loop stops instead of
+    /// scanning the rest of a wide array of non-materializing entries.
+    fn spend_work(&mut self) -> bool {
+        if self.work == 0 {
+            self.truncated = true;
+            return false;
+        }
+        self.work -= 1;
+        true
     }
 
     /// Record that some parse work was skipped for a non-budget reason (a `/K`
@@ -613,7 +641,7 @@ fn parse_kids(
     match k_obj {
         Object::Array(arr) => {
             for item in arr {
-                if walk.exhausted() {
+                if walk.exhausted() || !walk.spend_work() {
                     break;
                 }
                 process_kid_item(doc, item, role_map, page_id, depth, &mut children, walk);
@@ -752,18 +780,15 @@ fn parse_struct_element_dict(
         return;
     }
 
-    // Charge this node against the global budget so aliased/DAG-shaped `/K`
-    // graphs (which the per-path cycle guard alone cannot bound) still stop.
-    if !walk.charge() {
-        return;
-    }
-
-    // Check if this is an object reference dict (has /Type /OBJR) — skip these
+    // Skip object-reference dicts (`/Type /OBJR`) — they materialize no node, so
+    // recognize and return *before* charging the budget (otherwise a document
+    // full of OBJRs would drain the shared budget and truncate real content).
     if is_objr_dict(dict) {
         return;
     }
 
-    // It's a struct element — parse its /S (structure type)
+    // It's a struct element — parse its /S (structure type). A dict without a
+    // valid /S also materializes nothing, so validate before charging.
     let role_name = match dict.get(b"S") {
         Ok(s_obj) => {
             let resolved = resolve_obj(doc, s_obj);
@@ -774,6 +799,12 @@ fn parse_struct_element_dict(
         }
         Err(_) => return,
     };
+
+    // Charge the node only now that we know it will materialize (bounds
+    // aliased/DAG-shaped `/K` graphs the per-path cycle guard alone cannot stop).
+    if !walk.charge() {
+        return;
+    }
 
     let role = StructRole::from_name_with_role_map(&role_name, role_map);
     let page_id = get_page_ref(doc, dict).or(inherited_page);
@@ -800,7 +831,7 @@ fn parse_struct_element_dict(
             }
             Object::Array(arr) => {
                 for item in arr {
-                    if walk.exhausted() {
+                    if walk.exhausted() || !walk.spend_work() {
                         break;
                     }
                     // Only content-ref items (bare MCIDs / MCR dicts) are charged
@@ -1799,5 +1830,66 @@ mod tests {
             "an insufficient reservation must stop the loop"
         );
         assert!(walk.truncated);
+    }
+
+    #[test]
+    fn work_budget_bounds_examined_items() {
+        let mut walk = StructWalk::new();
+        walk.work = 2;
+        assert!(walk.spend_work());
+        assert!(walk.spend_work());
+        assert!(!walk.spend_work(), "traversal budget exhausted");
+        assert!(walk.truncated);
+    }
+
+    #[test]
+    fn wide_unsupported_kids_stop_at_work_budget() {
+        // A wide `/K` array of unsupported values (nulls) materializes nothing;
+        // it must stop at the traversal budget instead of scanning every entry.
+        let mut doc = Document::new();
+        let elem = doc.new_object_id();
+        let kids: Vec<Object> = (0..1000).map(|_| Object::Null).collect();
+        doc.set_object(
+            elem,
+            dictionary! { "Type" => "StructElem", "S" => "P", "K" => kids },
+        );
+        let dict = doc.get_dictionary(elem).unwrap().clone();
+
+        let mut walk = StructWalk::new();
+        walk.work = 10; // far smaller than the 1000-entry array
+        let role_map = HashMap::new();
+        let mut out = Vec::new();
+        parse_struct_element_dict(&doc, &dict, &role_map, None, 0, &mut out, &mut walk);
+        assert!(
+            walk.truncated,
+            "a wide unsupported `/K` array must hit the work budget"
+        );
+    }
+
+    #[test]
+    fn non_materializing_dicts_do_not_charge_node_budget() {
+        let doc = Document::new();
+        let role_map = HashMap::new();
+
+        // OBJR dict: materializes no node, so it must not spend the node budget.
+        let objr = dictionary! { "Type" => "OBJR" };
+        let mut walk = StructWalk::new();
+        let before = walk.budget;
+        let mut out = Vec::new();
+        parse_struct_element_dict(&doc, &objr, &role_map, None, 0, &mut out, &mut walk);
+        assert!(out.is_empty());
+        assert_eq!(walk.budget, before, "OBJR must not spend the node budget");
+
+        // A struct dict without a valid /S also materializes nothing.
+        let no_s = dictionary! { "Type" => "StructElem" };
+        let mut walk = StructWalk::new();
+        let before = walk.budget;
+        let mut out = Vec::new();
+        parse_struct_element_dict(&doc, &no_s, &role_map, None, 0, &mut out, &mut walk);
+        assert!(out.is_empty());
+        assert_eq!(
+            walk.budget, before,
+            "a dict without /S must not spend the node budget"
+        );
     }
 }
