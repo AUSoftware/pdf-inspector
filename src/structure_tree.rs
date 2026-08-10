@@ -267,9 +267,10 @@ impl StructTree {
         if walk.truncated {
             log::warn!(
                 "structure tree parsing was truncated (node budget of \
-                 {MAX_STRUCT_NODES} reached, a `/K` reference cycle, or the max \
-                 nesting depth of {MAX_DEPTH}); tagged roles/tables may be \
-                 incomplete (likely a very large or malformed tagged PDF)"
+                 {MAX_STRUCT_NODES} or traversal budget of {MAX_STRUCT_WORK} \
+                 reached, a `/K` reference cycle, or the max nesting depth of \
+                 {MAX_DEPTH}); tagged roles/tables may be incomplete (likely a \
+                 very large or malformed tagged PDF)"
             );
         }
 
