@@ -266,9 +266,10 @@ impl StructTree {
 
         if walk.truncated {
             log::warn!(
-                "structure tree hit the {MAX_STRUCT_NODES}-node budget and was \
-                 truncated; tagged roles/tables may be incomplete (likely a very \
-                 large or malformed tagged PDF)"
+                "structure tree parsing was truncated (node budget of \
+                 {MAX_STRUCT_NODES} reached, a `/K` reference cycle, or the max \
+                 nesting depth of {MAX_DEPTH}); tagged roles/tables may be \
+                 incomplete (likely a very large or malformed tagged PDF)"
             );
         }
 
@@ -510,8 +511,9 @@ const MAX_STRUCT_NODES: usize = 500_000;
 /// single element with a very wide `/K` array. `active` holds the object IDs
 /// currently on the depth-first path so a struct element that references itself
 /// (or an ancestor) is not expanded into an unbounded/exponential subtree.
-/// `truncated` records whether the budget was ever exhausted so the caller can
-/// log it once rather than per skipped item.
+/// `truncated` records whether any parse work was skipped — the budget was
+/// exhausted, a `/K` reference cycle was broken, or the depth cap was hit — so
+/// the caller can log it once rather than per skipped item.
 struct StructWalk {
     budget: usize,
     active: HashSet<ObjectId>,
@@ -525,6 +527,13 @@ impl StructWalk {
             active: HashSet::new(),
             truncated: false,
         }
+    }
+
+    /// Record that some parse work was skipped for a non-budget reason (a `/K`
+    /// reference cycle or the depth cap), so the one-shot truncation warning
+    /// also covers malformed/over-deep trees, not just budget exhaustion.
+    fn note_skipped(&mut self) {
+        self.truncated = true;
     }
 
     /// Charge one unit against the budget for a materialized item (a struct
@@ -562,7 +571,11 @@ fn parse_kids(
     depth: usize,
     walk: &mut StructWalk,
 ) -> Vec<StructElement> {
-    if depth >= MAX_DEPTH || walk.exhausted() {
+    if depth >= MAX_DEPTH {
+        walk.note_skipped();
+        return Vec::new();
+    }
+    if walk.exhausted() {
         return Vec::new();
     }
 
@@ -602,7 +615,11 @@ fn process_kid_item(
     out: &mut Vec<StructElement>,
     walk: &mut StructWalk,
 ) {
-    if walk.exhausted() || depth >= MAX_DEPTH {
+    if walk.exhausted() {
+        return;
+    }
+    if depth >= MAX_DEPTH {
+        walk.note_skipped();
         return;
     }
     // If this child is an indirect reference, track its id on the active path so
@@ -613,6 +630,7 @@ fn process_kid_item(
     };
     if let Some(id) = ref_id {
         if !walk.active.insert(id) {
+            walk.note_skipped();
             return; // cycle: this object is already on the current path
         }
     }
@@ -636,7 +654,9 @@ fn parse_kid(
     match obj {
         // Direct MCID integer — create a leaf wrapper
         Object::Integer(mcid) => {
-            if !walk.charge() {
+            // This materializes both a wrapper node and a marked-content
+            // reference, so charge two units to match the per-item budget.
+            if !walk.charge() || !walk.charge() {
                 return;
             }
             // This is a bare MCID at the struct-element level.
@@ -678,9 +698,13 @@ fn parse_struct_element_dict(
     out: &mut Vec<StructElement>,
     walk: &mut StructWalk,
 ) {
+    if depth >= MAX_DEPTH {
+        walk.note_skipped();
+        return;
+    }
     // Charge this node against the global budget so aliased/DAG-shaped `/K`
     // graphs (which the per-path cycle guard alone cannot bound) still stop.
-    if depth >= MAX_DEPTH || !walk.charge() {
+    if !walk.charge() {
         return;
     }
     // Check if this is a marked-content reference dict (has /Type /MCR)
@@ -871,6 +895,7 @@ fn recurse_struct_child(
     }
     if let Some(id) = ref_id {
         if !walk.active.insert(id) {
+            walk.note_skipped();
             return; // cycle: this object is already on the current path
         }
     }
@@ -1614,6 +1639,58 @@ mod tests {
         assert!(
             walk.truncated,
             "a `/K` array wider than the budget must flag truncation"
+        );
+    }
+
+    #[test]
+    fn cycle_skip_flags_truncation() {
+        // A `/K` reference cycle is dropped rather than expanded; that skip must
+        // still flag truncation so the one-shot warning fires for malformed
+        // trees, not only for budget exhaustion.
+        let mut doc = Document::new();
+        let elem = doc.new_object_id();
+        doc.set_object(
+            elem,
+            dictionary! {
+                "Type" => "StructElem",
+                "S" => "Div",
+                "K" => vec![Object::Reference(elem), Object::Reference(elem)],
+            },
+        );
+        let dict = doc.get_dictionary(elem).unwrap().clone();
+
+        let mut walk = StructWalk::new();
+        walk.active.insert(elem); // simulate `elem` already on the DFS path
+        let role_map = HashMap::new();
+        let mut out = Vec::new();
+        parse_struct_element_dict(&doc, &dict, &role_map, None, 0, &mut out, &mut walk);
+        assert!(
+            walk.truncated,
+            "a cycle-skipped `/K` child must flag truncation"
+        );
+    }
+
+    #[test]
+    fn bare_mcid_charges_node_and_reference() {
+        // A bare MCID `/K` child becomes a wrapper node carrying one content
+        // reference — two materialized items — so it must charge two budget
+        // units, not one.
+        let doc = Document::new();
+        let obj = Object::Integer(7);
+        let role_map = HashMap::new();
+        let mut out = Vec::new();
+        let mut walk = StructWalk::new();
+        let before = walk.budget;
+        parse_kid(&doc, &obj, &role_map, None, 0, &mut out, &mut walk);
+        assert_eq!(
+            out.len(),
+            1,
+            "bare MCID should materialize one wrapper node"
+        );
+        assert_eq!(
+            before - walk.budget,
+            2,
+            "bare MCID must charge for both the node and its content reference"
         );
     }
 }
