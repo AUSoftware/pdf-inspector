@@ -538,6 +538,19 @@ impl StructWalk {
         self.budget -= 1;
         true
     }
+
+    /// Whether the budget is spent. Use this at the guards that break/return to
+    /// skip remaining items: it records that truncation occurred (a guard only
+    /// fires while there is still an item pending), so callers that drop work
+    /// without going through [`charge`] still flag the truncation for logging.
+    fn exhausted(&mut self) -> bool {
+        if self.budget == 0 {
+            self.truncated = true;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Parse child elements from a `/K` entry.
@@ -549,7 +562,7 @@ fn parse_kids(
     depth: usize,
     walk: &mut StructWalk,
 ) -> Vec<StructElement> {
-    if depth >= MAX_DEPTH || walk.budget == 0 {
+    if depth >= MAX_DEPTH || walk.exhausted() {
         return Vec::new();
     }
 
@@ -564,7 +577,7 @@ fn parse_kids(
     match k_obj {
         Object::Array(arr) => {
             for item in arr {
-                if walk.budget == 0 {
+                if walk.exhausted() {
                     break;
                 }
                 process_kid_item(doc, item, role_map, page_id, depth, &mut children, walk);
@@ -589,7 +602,7 @@ fn process_kid_item(
     out: &mut Vec<StructElement>,
     walk: &mut StructWalk,
 ) {
-    if walk.budget == 0 || depth >= MAX_DEPTH {
+    if walk.exhausted() || depth >= MAX_DEPTH {
         return;
     }
     // If this child is an indirect reference, track its id on the active path so
@@ -731,7 +744,7 @@ fn parse_struct_element_dict(
             }
             Object::Array(arr) => {
                 for item in arr {
-                    if walk.budget == 0 {
+                    if walk.exhausted() {
                         break;
                     }
                     // Only content-ref items (bare MCIDs / MCR dicts) are charged
@@ -853,7 +866,7 @@ fn recurse_struct_child(
     out: &mut Vec<StructElement>,
     walk: &mut StructWalk,
 ) {
-    if walk.budget == 0 {
+    if walk.exhausted() {
         return;
     }
     if let Some(id) = ref_id {
@@ -1557,5 +1570,50 @@ mod tests {
         // Stays exhausted/flagged on subsequent calls.
         assert!(!walk.charge());
         assert!(walk.truncated);
+    }
+
+    #[test]
+    fn exhausted_flags_truncation_after_budget_spent_by_charge() {
+        // The dominant truncation path: the budget is driven to 0 by a
+        // successful `charge()` (which does not set the flag), and remaining
+        // items are then dropped by an `exhausted()` guard — which must flag it.
+        let mut walk = StructWalk::new();
+        walk.budget = 1;
+        assert!(walk.charge());
+        assert!(
+            !walk.truncated,
+            "spending the last unit is not truncation yet"
+        );
+        assert!(walk.exhausted(), "budget is now spent");
+        assert!(
+            walk.truncated,
+            "the guard that skips work must flag truncation"
+        );
+    }
+
+    #[test]
+    fn wide_kids_array_flags_truncation_via_parser() {
+        // Reproduce the reviewer's scenario through the real parser: a `/K`
+        // array wider than the budget drives the budget to 0 via `charge()`,
+        // then the loop guard drops the rest — the truncation flag must be set
+        // (so `from_doc` logs it) rather than staying silently false.
+        let mut doc = Document::new();
+        let elem = doc.new_object_id();
+        let kids: Vec<Object> = (0..20i64).map(Object::Integer).collect();
+        doc.set_object(
+            elem,
+            dictionary! { "Type" => "StructElem", "S" => "P", "K" => kids },
+        );
+        let dict = doc.get_dictionary(elem).unwrap().clone();
+
+        let mut walk = StructWalk::new();
+        walk.budget = 5; // smaller than the 20-item `/K` array
+        let role_map = HashMap::new();
+        let mut out = Vec::new();
+        parse_struct_element_dict(&doc, &dict, &role_map, None, 0, &mut out, &mut walk);
+        assert!(
+            walk.truncated,
+            "a `/K` array wider than the budget must flag truncation"
+        );
     }
 }
