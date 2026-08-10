@@ -41,35 +41,71 @@ pub(crate) fn detect_columns(
     }
     debug!("page {}: detect_columns: {} items", page, page_items.len());
 
+    // The PDF specification caps a page at 14_400 units (200 inches). Content
+    // may sit a little outside the MediaBox, but a span far beyond one whole
+    // page means stray items, not a real layout.
+    const MAX_PAGE_EXTENT: f32 = 14_400.0;
+
     // Find page bounds. Coordinates come straight from the content-stream text
-    // matrix, so a malformed document can place an item at a non-finite
-    // position. Such items are excluded from the bounds rather than failing the
-    // whole page: one bad glyph should not disable column detection, and the
-    // emitted regions must never carry a NaN/inf boundary to callers.
-    let x_min = page_items
-        .iter()
-        .map(|i| i.x)
-        .filter(|x| x.is_finite())
-        .fold(f32::INFINITY, f32::min);
-    let x_max = page_items
-        .iter()
-        .map(|i| i.x + effective_width(i))
-        .filter(|x| x.is_finite())
-        .fold(f32::NEG_INFINITY, f32::max);
+    // matrix, so a malformed document can place items at non-finite positions.
+    // Those are excluded rather than failing the whole page: one bad glyph
+    // should not disable column detection, and the emitted regions must never
+    // carry a NaN/inf boundary out to callers.
+    let bounds = |keep: &dyn Fn(f32) -> bool| {
+        page_items
+            .iter()
+            .filter(|i| i.x.is_finite() && keep(i.x))
+            .map(|i| (i.x, i.x + effective_width(i)))
+            .filter(|(_, right)| right.is_finite())
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), (l, r)| {
+                (lo.min(l), hi.max(r))
+            })
+    };
+
+    let (mut x_min, mut x_max) = bounds(&|_| true);
 
     // Every item sat at a non-finite coordinate, so there is no usable layout.
     if !x_min.is_finite() || !x_max.is_finite() {
         return vec![];
     }
 
-    // Cap the histogram size. Because the bounds above are attacker-influenced,
-    // an unclamped `page_width / BIN_WIDTH` lets a crafted PDF force an
-    // arbitrarily large `vec![0u32; num_bins]` allocation. 65_536 bins covers
-    // ~128k points at BIN_WIDTH 2.0 — roughly 9x the largest legal page — so
-    // this never clamps a real layout.
+    // Every threshold below (gutter margins, spanning-item width, the XY-cut
+    // margin) is a fraction of the page width, so a single far-but-finite item
+    // would otherwise set the scale for the whole page and shrink the effective
+    // detection window to a rounding error — real gutters then fall inside the
+    // margin band and a genuine multi-column page collapses to one region.
+    // Re-derive the bounds from the items clustered around the median so a lone
+    // outlier cannot poison the scale. Outliers keep their text: column
+    // assignment buckets them by nearest overlap, not by containment.
+    if x_max - x_min > MAX_PAGE_EXTENT {
+        let mut xs: Vec<f32> = page_items
+            .iter()
+            .map(|i| i.x)
+            .filter(|x| x.is_finite())
+            .collect();
+        xs.sort_by(f32::total_cmp);
+        let median = xs[xs.len() / 2];
+
+        let (lo, hi) = bounds(&|x| (x - median).abs() <= MAX_PAGE_EXTENT);
+        if lo.is_finite() && hi.is_finite() {
+            debug!(
+                "page {page}: bounds {x_min}..{x_max} span > one page; \
+                 trimming outliers to {lo}..{hi}"
+            );
+            x_min = lo;
+            x_max = hi;
+        }
+    }
+
+    // Hard ceiling on the histogram size, independent of the trimming above:
+    // the bounds are attacker-influenced, so an unclamped
+    // `page_width / BIN_WIDTH` lets a crafted PDF force an arbitrarily large
+    // `vec![0u32; num_bins]` allocation. 65_536 bins covers ~128k points at
+    // BIN_WIDTH 2.0 — roughly 9x the largest legal page — so this never clamps
+    // a real layout. Kept as a bound that does not depend on the outlier
+    // heuristic staying correct.
     const MAX_BINS: usize = 65_536;
 
-    // Finite bounds can still subtract to infinity at the extremes of f32.
     let page_width = x_max - x_min;
     if !page_width.is_finite() || page_width < 200.0 {
         return vec![ColumnRegion { x_min, x_max }];
@@ -2606,16 +2642,49 @@ mod tests {
 
     #[test]
     fn one_bad_coordinate_does_not_disable_column_detection() {
-        // Excluding non-finite items from the bounds must not cost the page its
-        // real layout — a single stray coordinate should not collapse a clean
-        // two-column page to one region.
+        // A single stray coordinate should not collapse a clean two-column page
+        // to one region. Finite outliers matter as much as NaN/inf ones: every
+        // gutter threshold is a fraction of the page width, so an untrimmed
+        // outlier pushes real gutters inside the rejected margin band.
+        for bad_x in [f32::NAN, f32::INFINITY, 50_000.0, 1e12] {
+            let mut items = Vec::new();
+            items.extend(fill_zone(1, 30.0, 280.0, 750.0, 50.0));
+            items.extend(fill_zone(1, 320.0, 570.0, 750.0, 50.0));
+            items.push(make_item(1, bad_x, 400.0, "Z"));
+
+            let cols = detect_columns(&items, 1, false);
+            assert_eq!(
+                cols.len(),
+                2,
+                "bad_x {bad_x}: expected 2 columns, got {}",
+                cols.len()
+            );
+            for col in &cols {
+                assert!(
+                    col.x_max - col.x_min <= 14_400.0,
+                    "bad_x {bad_x}: region {}..{} exceeds one page",
+                    col.x_min,
+                    col.x_max
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_but_legal_page_is_not_trimmed() {
+        // A wide-format page well inside the 14_400pt spec limit must keep its
+        // real bounds — outlier trimming is only for spans beyond a legal page.
         let mut items = Vec::new();
-        items.extend(fill_zone(1, 30.0, 280.0, 750.0, 50.0));
-        items.extend(fill_zone(1, 320.0, 570.0, 750.0, 50.0));
-        items.push(make_item(1, f32::NAN, 400.0, "Z"));
+        items.extend(fill_zone(1, 100.0, 4_000.0, 750.0, 400.0));
+        items.extend(fill_zone(1, 4_400.0, 8_000.0, 750.0, 400.0));
 
         let cols = detect_columns(&items, 1, false);
         assert_eq!(cols.len(), 2, "Expected 2 columns, got {}", cols.len());
+        assert!(
+            cols[1].x_max > 7_000.0,
+            "right column should keep its true extent, got {}",
+            cols[1].x_max
+        );
     }
 
     #[test]
