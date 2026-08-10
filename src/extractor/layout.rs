@@ -55,21 +55,15 @@ pub(crate) fn detect_columns(
     // the halves are far apart.
     const MAX_TRIM_FRACTION: f32 = 0.10;
 
-    // Usable extent of an item, or None if its geometry is malformed.
-    // Coordinates come straight from the content-stream text matrix, so a
-    // document can place a run at a non-finite position or give it a width
-    // wider than any page. Such items are skipped rather than failing the whole
-    // page: one bad glyph should not disable column detection, and the emitted
-    // regions must never carry a NaN/inf boundary out to callers.
-    let usable = |i: &&TextItem| -> Option<(f32, f32)> {
+    // Position and width of each item, skipping only non-finite geometry.
+    let finite_span = |i: &&TextItem| -> Option<(f32, f32)> {
         let (left, width) = (i.x, effective_width(i));
-        let right = left + width;
-        (left.is_finite() && right.is_finite() && width <= MAX_PAGE_EXTENT).then_some((left, right))
+        (left.is_finite() && (left + width).is_finite()).then_some((left, width))
     };
 
-    let (mut x_min, mut x_max, total) = page_items.iter().filter_map(usable).fold(
+    let (min_left, max_right, total) = page_items.iter().filter_map(finite_span).fold(
         (f32::INFINITY, f32::NEG_INFINITY, 0usize),
-        |(lo, hi, n), (left, right)| (lo.min(left), hi.max(right), n + 1),
+        |(lo, hi, n), (left, width)| (lo.min(left), hi.max(left + width), n + 1),
     );
 
     // No item had usable geometry, so there is no layout to report.
@@ -83,43 +77,62 @@ pub(crate) fn detect_columns(
     // rounding error — real gutters then fall inside the margin band and a
     // genuine multi-column page collapses to one region.
     //
-    // Detaching such an item needs positive evidence that it is not part of the
-    // layout, because a count-based rule alone cannot tell a stray from a
-    // sparse far sidebar. The evidence used here is geometric: content is
-    // grouped into clusters separated by more than a whole page of continuous
-    // emptiness. Real content, however sparse, does not leave a void that
-    // large; a malformed coordinate sits alone beyond one. A cluster is only
-    // dropped when it also holds a small minority of the items.
-    if x_max - x_min > MAX_PAGE_EXTENT {
-        let mut spans: Vec<(f32, f32)> = page_items.iter().filter_map(usable).collect();
+    // Anything inside one page extent is ordinary, so the common case keeps the
+    // plain bounds and skips the work below entirely.
+    let (x_min, x_max) = if max_right - min_left <= MAX_PAGE_EXTENT {
+        (min_left, max_right)
+    } else {
+        // Discarding content needs positive evidence that it is not part of the
+        // layout, because a count-based rule alone cannot tell a stray from a
+        // sparse far sidebar. The evidence is geometric: positions are grouped
+        // into clusters separated by more than a whole page of continuous
+        // emptiness. Real content, however sparse, does not leave a void that
+        // large; a malformed coordinate sits alone beyond one.
+        let mut spans: Vec<(f32, f32)> = page_items.iter().filter_map(finite_span).collect();
         spans.sort_by(|a, b| a.0.total_cmp(&b.0));
 
-        // (item count, lo, hi) per cluster.
-        let mut clusters: Vec<(usize, f32, f32)> = Vec::new();
-        for &(left, right) in &spans {
-            match clusters.last_mut() {
-                Some((count, _, hi)) if left - *hi <= MAX_PAGE_EXTENT => {
-                    *count += 1;
-                    *hi = hi.max(right);
-                }
-                _ => clusters.push((1, left, right)),
+        let mut core: Option<std::ops::Range<usize>> = None;
+        let mut start = 0usize;
+        for i in 1..=spans.len() {
+            if i < spans.len() && spans[i].0 - spans[i - 1].0 <= MAX_PAGE_EXTENT {
+                continue;
             }
+            if core.as_ref().is_none_or(|best| i - start > best.len()) {
+                core = Some(start..i);
+            }
+            start = i;
         }
+        let mut core = core.unwrap_or(0..spans.len());
 
-        if let Some(&(count, lo, hi)) = clusters.iter().max_by_key(|&&(count, _, _)| count) {
-            let dropped = total - count;
-            if clusters.len() > 1 && dropped as f32 <= total as f32 * MAX_TRIM_FRACTION {
-                debug!(
-                    "page {page}: bounds {x_min}..{x_max} span > one page in \
-                     {} clusters; dropping {dropped}/{total} detached item(s), \
-                     trimming to {lo}..{hi}",
-                    clusters.len()
-                );
-                x_min = lo;
-                x_max = hi;
-            }
+        // Only drop the detached clusters when they are a small minority, so a
+        // genuine two-part layout keeps its full bounds.
+        let dropped = spans.len() - core.len();
+        if dropped as f32 > spans.len() as f32 * MAX_TRIM_FRACTION {
+            core = 0..spans.len();
         }
-    }
+        let core = &spans[core];
+
+        // Positions cannot be inflated by a bogus width, so the spread of the
+        // content is a sound scale for judging one. A run much wider than the
+        // page's own content is a malformed width — the test is relative, so a
+        // genuinely large page keeps its genuinely long runs.
+        let (lo, widest_left) = (core[0].0, core[core.len() - 1].0);
+        let max_run_width = (widest_left - lo) + MAX_PAGE_EXTENT;
+        let hi = core
+            .iter()
+            .filter(|&&(_, width)| width <= max_run_width)
+            .map(|&(left, width)| left + width)
+            .fold(widest_left, f32::max);
+
+        if lo != min_left || hi != max_right {
+            debug!(
+                "page {page}: bounds {min_left}..{max_right} exceed one page; \
+                 dropped {dropped}/{} detached item(s), using {lo}..{hi}",
+                spans.len()
+            );
+        }
+        (lo, hi)
+    };
 
     // Hard ceiling on the histogram size, independent of the trimming above:
     // the bounds are attacker-influenced, so an unclamped
@@ -2737,6 +2750,36 @@ mod tests {
             (140_000.0..=160_000.0).contains(&cols[1].x_max),
             "second gutter at {}, expected inside the real 140k..160k gap",
             cols[1].x_max
+        );
+    }
+
+    #[test]
+    fn large_page_with_legitimately_long_runs_is_kept() {
+        // On a very large page, individual runs can exceed one ordinary page's
+        // width. They are real content, so they must not be judged malformed:
+        // the page keeps its columns and its full right edge.
+        let mut items = Vec::new();
+        for row in 0..30 {
+            let y = 750.0 - row as f32 * 14.0;
+            let mut left = make_item(1, 0.0, y, "Left run");
+            left.width = 20_000.0;
+            let mut right = make_item(1, 25_000.0, y, "Right run");
+            right.width = 20_000.0;
+            items.extend([left, right]);
+        }
+
+        let cols = detect_columns(&items, 1, false);
+        assert!(
+            !cols.is_empty(),
+            "a page of long-but-valid runs must still report a layout"
+        );
+        let right_edge = cols
+            .iter()
+            .map(|c| c.x_max)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            right_edge > 44_000.0,
+            "long runs were treated as malformed: right edge {right_edge}, expected ~45_000"
         );
     }
 
