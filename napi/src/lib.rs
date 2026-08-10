@@ -714,10 +714,17 @@ fn to_page_region_texts(results: Vec<pdf_inspector::PageRegionResult>) -> Vec<Pa
 // on the libuv thread pool and hand JavaScript a promise, so servers under
 // concurrent load keep answering requests while a document parses. The sync
 // exports keep their names, signatures, and behaviour.
+//
+// The tasks hold the napi `Buffer` itself rather than a copy: the Buffer
+// keeps a reference that pins the JS-side allocation for the task's lifetime,
+// and its backing store is stable, so `compute` can read it from the worker
+// thread without an event-loop-blocking memcpy at call time. The caller must
+// not mutate the buffer until the promise settles — the same contract as
+// Node's own async `fs` APIs.
 // ---------------------------------------------------------------------------
 
 pub struct ProcessPdfTask {
-    bytes: Vec<u8>,
+    buffer: Buffer,
     pages: Option<Vec<u32>>,
 }
 
@@ -726,13 +733,13 @@ impl Task for ProcessPdfTask {
     type JsValue = PdfResult;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        let bytes = std::mem::take(&mut self.bytes);
+        let bytes: &[u8] = &self.buffer;
         let pages = self.pages.take();
-        // AssertUnwindSafe: `bytes`/`pages` are moved into the closure and
-        // dropped on unwind — no shared state can be observed broken.
+        // AssertUnwindSafe: the closure only reads `bytes` and owns `pages`;
+        // on unwind no shared state can be observed broken.
         catch_panic(
             "process_pdf",
-            panic::AssertUnwindSafe(move || process_pdf_impl(&bytes, pages)),
+            panic::AssertUnwindSafe(move || process_pdf_impl(bytes, pages)),
         )
     }
 
@@ -743,17 +750,17 @@ impl Task for ProcessPdfTask {
 
 /// Async variant of [`processPdf`]: same result, but the parse runs on the
 /// libuv thread pool instead of the event loop and the call returns a
-/// promise.
+/// promise. The buffer is read in place (no copy) — do not mutate it until
+/// the promise settles.
+// ts_return_type is required: napi-rs emits `Promise<unknown>` for
+// `AsyncTask<T>` returns without it.
 #[napi(ts_return_type = "Promise<PdfResult>")]
 pub fn process_pdf_async(buffer: Buffer, pages: Option<Vec<u32>>) -> AsyncTask<ProcessPdfTask> {
-    AsyncTask::new(ProcessPdfTask {
-        bytes: buffer.to_vec(),
-        pages,
-    })
+    AsyncTask::new(ProcessPdfTask { buffer, pages })
 }
 
 pub struct ClassifyPdfTask {
-    bytes: Vec<u8>,
+    buffer: Buffer,
 }
 
 impl Task for ClassifyPdfTask {
@@ -761,10 +768,10 @@ impl Task for ClassifyPdfTask {
     type JsValue = PdfClassification;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        let bytes = std::mem::take(&mut self.bytes);
+        let bytes: &[u8] = &self.buffer;
         catch_panic(
             "classify_pdf",
-            panic::AssertUnwindSafe(move || classify_pdf_impl(&bytes)),
+            panic::AssertUnwindSafe(move || classify_pdf_impl(bytes)),
         )
     }
 
@@ -775,16 +782,15 @@ impl Task for ClassifyPdfTask {
 
 /// Async variant of [`classifyPdf`]: same result, but the classification runs
 /// on the libuv thread pool instead of the event loop and the call returns a
-/// promise.
+/// promise. The buffer is read in place (no copy) — do not mutate it until
+/// the promise settles.
 #[napi(ts_return_type = "Promise<PdfClassification>")]
 pub fn classify_pdf_async(buffer: Buffer) -> AsyncTask<ClassifyPdfTask> {
-    AsyncTask::new(ClassifyPdfTask {
-        bytes: buffer.to_vec(),
-    })
+    AsyncTask::new(ClassifyPdfTask { buffer })
 }
 
 pub struct ExtractPagesMarkdownTask {
-    bytes: Vec<u8>,
+    buffer: Buffer,
     pages: Option<Vec<u32>>,
 }
 
@@ -793,11 +799,11 @@ impl Task for ExtractPagesMarkdownTask {
     type JsValue = PagesExtractionResult;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        let bytes = std::mem::take(&mut self.bytes);
+        let bytes: &[u8] = &self.buffer;
         let pages = self.pages.take();
         catch_panic(
             "extract_pages_markdown",
-            panic::AssertUnwindSafe(move || extract_pages_markdown_impl(&bytes, pages.as_deref())),
+            panic::AssertUnwindSafe(move || extract_pages_markdown_impl(bytes, pages.as_deref())),
         )
     }
 
@@ -808,14 +814,12 @@ impl Task for ExtractPagesMarkdownTask {
 
 /// Async variant of [`extractPagesMarkdown`]: same result, but the extraction
 /// runs on the libuv thread pool instead of the event loop and the call
-/// returns a promise.
+/// returns a promise. The buffer is read in place (no copy) — do not mutate
+/// it until the promise settles.
 #[napi(ts_return_type = "Promise<PagesExtractionResult>")]
 pub fn extract_pages_markdown_async(
     buffer: Buffer,
     pages: Option<Vec<u32>>,
 ) -> AsyncTask<ExtractPagesMarkdownTask> {
-    AsyncTask::new(ExtractPagesMarkdownTask {
-        bytes: buffer.to_vec(),
-        pages,
-    })
+    AsyncTask::new(ExtractPagesMarkdownTask { buffer, pages })
 }
