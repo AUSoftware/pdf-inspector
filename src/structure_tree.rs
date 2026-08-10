@@ -513,11 +513,15 @@ const MAX_STRUCT_NODES: usize = 500_000;
 /// (or an ancestor) is not expanded into an unbounded/exponential subtree.
 /// `truncated` records whether any parse work was skipped — the budget was
 /// exhausted, a `/K` reference cycle was broken, or the depth cap was hit — so
-/// the caller can log it once rather than per skipped item.
+/// the caller can log it once rather than per skipped item. `stalled` is set
+/// when an atomic multi-unit reservation could not fit in the remaining budget;
+/// it makes [`exhausted`](Self::exhausted) report done so a wide `/K` array is
+/// not scanned to the end once no further leaf can be materialized.
 struct StructWalk {
     budget: usize,
     active: HashSet<ObjectId>,
     truncated: bool,
+    stalled: bool,
 }
 
 impl StructWalk {
@@ -526,6 +530,7 @@ impl StructWalk {
             budget: MAX_STRUCT_NODES,
             active: HashSet::new(),
             truncated: false,
+            stalled: false,
         }
     }
 
@@ -550,24 +555,28 @@ impl StructWalk {
 
     /// Atomically charge `n` units for a single item that materializes several
     /// budget-counted parts at once (a leaf wrapper node *plus* its content
-    /// reference). Charges nothing and flags truncation when fewer than `n`
-    /// units remain, so a partial reservation never wastes capacity that a later
-    /// smaller item could have used.
+    /// reference). Charges nothing when fewer than `n` units remain — so a
+    /// partial reservation never wastes capacity — and marks the walk `stalled`
+    /// so the enclosing loop stops instead of scanning the rest of a wide `/K`
+    /// array that can no longer fit any leaf.
     fn charge_n(&mut self, n: usize) -> bool {
         if self.budget < n {
             self.truncated = true;
+            self.stalled = true;
             return false;
         }
         self.budget -= n;
         true
     }
 
-    /// Whether the budget is spent. Use this at the guards that break/return to
-    /// skip remaining items: it records that truncation occurred (a guard only
-    /// fires while there is still an item pending), so callers that drop work
-    /// without going through [`charge`] still flag the truncation for logging.
+    /// Whether traversal should stop: the budget is spent, or a multi-unit
+    /// reservation could not fit (`stalled`) so no further leaf will materialize.
+    /// Use this at the guards that break/return to skip remaining items; it
+    /// records that truncation occurred (a guard only fires while an item is
+    /// still pending), so callers that drop work without going through
+    /// [`charge`](Self::charge) still flag the truncation for logging.
     fn exhausted(&mut self) -> bool {
-        if self.budget == 0 {
+        if self.budget == 0 || self.stalled {
             self.truncated = true;
             true
         } else {
@@ -1770,6 +1779,25 @@ mod tests {
         parse_struct_element_dict(&doc, &mcr, &role_map, None, 0, &mut out, &mut walk);
         assert!(out.is_empty(), "MCR dict must not partially materialize");
         assert_eq!(walk.budget, 1, "the leftover unit must be preserved");
+        assert!(walk.truncated);
+    }
+
+    #[test]
+    fn insufficient_reservation_stops_the_scan() {
+        // A one-unit budget is not "exhausted" for a one-unit item, but once a
+        // two-unit leaf reservation fails, the walk is stalled so enclosing `/K`
+        // loops stop instead of scanning the rest of a wide array.
+        let mut walk = StructWalk::new();
+        walk.budget = 1;
+        assert!(
+            !walk.exhausted(),
+            "one unit left must still allow a one-unit item"
+        );
+        assert!(!walk.charge_n(2), "cannot reserve two units from one");
+        assert!(
+            walk.exhausted(),
+            "an insufficient reservation must stop the loop"
+        );
         assert!(walk.truncated);
     }
 }
