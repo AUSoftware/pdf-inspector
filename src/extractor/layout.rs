@@ -87,10 +87,14 @@ pub(crate) fn detect_columns(
     // outlier cannot poison the scale. Outliers keep their text: column
     // assignment buckets them by nearest overlap, not by containment.
     if x_max - x_min > MAX_PAGE_EXTENT {
+        // Anchor on the same items `bounds` accepts, so a malformed width
+        // cannot shift the median that decides which items are strays.
         let mut xs: Vec<f32> = page_items
             .iter()
-            .map(|i| i.x)
-            .filter(|x| x.is_finite())
+            .filter_map(|i| {
+                let right = i.x + effective_width(i);
+                (i.x.is_finite() && right.is_finite()).then_some(i.x)
+            })
             .collect();
         xs.sort_by(f32::total_cmp);
         let median = xs[xs.len() / 2];
@@ -117,8 +121,8 @@ pub(crate) fn detect_columns(
     // the bounds are attacker-influenced, so an unclamped
     // `page_width / BIN_WIDTH` lets a crafted PDF force an arbitrarily large
     // `vec![0u32; num_bins]` allocation. 65_536 bins covers ~128k points at
-    // BIN_WIDTH 2.0 — roughly 9x the largest legal page — so this never clamps
-    // a real layout. Kept as a bound that does not depend on the outlier
+    // BIN_WIDTH 2.0 — roughly 9x the largest legal page — so this never binds
+    // on a real layout. Kept as a bound that does not depend on the outlier
     // heuristic staying correct.
     const MAX_BINS: usize = 65_536;
 
@@ -131,13 +135,20 @@ pub(crate) fn detect_columns(
         return vec![ColumnRegion { x_min, x_max }];
     }
 
+    // Widen the bins rather than dropping the tail of the page. Clamping the
+    // count alone would leave anything past MAX_BINS * BIN_WIDTH outside the
+    // histogram, folded into the last bin, which places gutters at the wrong
+    // coordinates. Scaling keeps full coverage under the same allocation
+    // ceiling; only the resolution degrades, and only beyond ~131k points.
+    let bin_width = BIN_WIDTH.max(page_width / MAX_BINS as f32);
+
     // Build occupancy histogram.
     // Exclude items wider than 60% of page width — these are spanning items
     // (titles, full-width paragraphs) that would fill the gutter and prevent
     // detection of partial-page column layouts (e.g. two-column abstracts on
     // a page that also has single-column introduction text).
     let wide_threshold = page_width * 0.6;
-    let num_bins = ((page_width / BIN_WIDTH).ceil() as usize).clamp(1, MAX_BINS);
+    let num_bins = ((page_width / bin_width).ceil() as usize).clamp(1, MAX_BINS);
     let mut histogram = vec![0u32; num_bins];
 
     for item in &page_items {
@@ -145,8 +156,8 @@ pub(crate) fn detect_columns(
         if w > wide_threshold {
             continue;
         }
-        let left = ((item.x - x_min) / BIN_WIDTH).floor() as usize;
-        let right = (((item.x + w) - x_min) / BIN_WIDTH).ceil() as usize;
+        let left = ((item.x - x_min) / bin_width).floor() as usize;
+        let right = (((item.x + w) - x_min) / bin_width).ceil() as usize;
         let left = left.min(num_bins);
         let right = right.min(num_bins);
         for count in histogram.iter_mut().take(right).skip(left) {
@@ -183,12 +194,12 @@ pub(crate) fn detect_columns(
     let valleys: Vec<(usize, usize)> = valleys
         .into_iter()
         .filter(|&(start, end)| {
-            let width_pts = (end - start) as f32 * BIN_WIDTH;
+            let width_pts = (end - start) as f32 * bin_width;
             if width_pts < MIN_GUTTER_WIDTH {
                 return false;
             }
             // Valley center must not be within 5% of page edges
-            let center_pts = ((start + end) as f32 / 2.0) * BIN_WIDTH;
+            let center_pts = ((start + end) as f32 / 2.0) * bin_width;
             center_pts > margin_threshold && center_pts < (page_width - margin_threshold)
         })
         .collect();
@@ -206,7 +217,7 @@ pub(crate) fn detect_columns(
             &histogram,
             num_bins,
             x_min,
-            BIN_WIDTH,
+            bin_width,
             page_width,
             margin_threshold,
         );
@@ -215,7 +226,7 @@ pub(crate) fn detect_columns(
                 &rel_valleys,
                 &page_items,
                 x_min,
-                BIN_WIDTH,
+                bin_width,
                 x_max,
                 MIN_ITEMS_PER_COLUMN,
                 MIN_VERTICAL_SPAN_RATIO,
@@ -256,7 +267,7 @@ pub(crate) fn detect_columns(
         &valleys,
         &page_items,
         x_min,
-        BIN_WIDTH,
+        bin_width,
         x_max,
         MIN_ITEMS_PER_COLUMN,
         MIN_VERTICAL_SPAN_RATIO,
@@ -270,7 +281,7 @@ pub(crate) fn detect_columns(
         &valleys,
         &page_items,
         x_min,
-        BIN_WIDTH,
+        bin_width,
         x_max,
         MIN_ITEMS_PER_COLUMN,
         MIN_VERTICAL_SPAN_RATIO,
@@ -2698,6 +2709,32 @@ mod tests {
 
     /// Mirrors `MAX_PAGE_EXTENT` in `detect_columns`.
     const MAX_PAGE_EXTENT_FOR_TEST: f32 = 14_400.0;
+
+    #[test]
+    fn very_wide_page_keeps_full_histogram_coverage() {
+        // Beyond MAX_BINS * BIN_WIDTH (~131k points) the bins must widen rather
+        // than stop covering the page. Three zones: the first gutter is inside
+        // the old coverage limit, the second is past it. Because the first
+        // gutter is found, the XY-cut fallback never runs, so a truncated
+        // histogram silently reports two columns instead of three.
+        let mut items = Vec::new();
+        items.extend(fill_zone(1, 0.0, 60_000.0, 750.0, 700.0));
+        items.extend(fill_zone(1, 70_000.0, 140_000.0, 750.0, 700.0));
+        items.extend(fill_zone(1, 160_000.0, 200_000.0, 750.0, 700.0));
+
+        let cols = detect_columns(&items, 1, false);
+        assert_eq!(
+            cols.len(),
+            3,
+            "Expected 3 columns across a 200k-wide page, got {}",
+            cols.len()
+        );
+        assert!(
+            (140_000.0..=160_000.0).contains(&cols[1].x_max),
+            "second gutter at {}, expected inside the real 140k..160k gap",
+            cols[1].x_max
+        );
+    }
 
     #[test]
     fn genuinely_wide_layout_keeps_its_true_bounds() {
