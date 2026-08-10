@@ -548,6 +548,20 @@ impl StructWalk {
         true
     }
 
+    /// Atomically charge `n` units for a single item that materializes several
+    /// budget-counted parts at once (a leaf wrapper node *plus* its content
+    /// reference). Charges nothing and flags truncation when fewer than `n`
+    /// units remain, so a partial reservation never wastes capacity that a later
+    /// smaller item could have used.
+    fn charge_n(&mut self, n: usize) -> bool {
+        if self.budget < n {
+            self.truncated = true;
+            return false;
+        }
+        self.budget -= n;
+        true
+    }
+
     /// Whether the budget is spent. Use this at the guards that break/return to
     /// skip remaining items: it records that truncation occurred (a guard only
     /// fires while there is still an item pending), so callers that drop work
@@ -654,9 +668,9 @@ fn parse_kid(
     match obj {
         // Direct MCID integer — create a leaf wrapper
         Object::Integer(mcid) => {
-            // This materializes both a wrapper node and a marked-content
-            // reference, so charge two units to match the per-item budget.
-            if !walk.charge() || !walk.charge() {
+            // A wrapper node plus its content reference — two items — reserved
+            // atomically so we never consume one unit without emitting both.
+            if !walk.charge_n(2) {
                 return;
             }
             // This is a bare MCID at the struct-element level.
@@ -702,32 +716,36 @@ fn parse_struct_element_dict(
         walk.note_skipped();
         return;
     }
+
+    // A marked-content reference dict materializes a wrapper node + one content
+    // reference (two items). Reserve both atomically *before* the node charge so
+    // we never consume a unit without emitting the reference — which would also
+    // deny that unit to a later element that would have fit. This matches the
+    // bare-MCID path.
+    if is_mcr_dict(dict) {
+        if let Ok(Object::Integer(mcid)) = dict.get(b"MCID") {
+            if !walk.charge_n(2) {
+                return;
+            }
+            let page_id = get_page_ref(doc, dict).or(inherited_page);
+            out.push(StructElement {
+                role: StructRole::Span,
+                alt_text: None,
+                actual_text: None,
+                lang: None,
+                content_refs: vec![MarkedContentRef {
+                    mcid: *mcid,
+                    page_id,
+                }],
+                children: Vec::new(),
+            });
+        }
+        return;
+    }
+
     // Charge this node against the global budget so aliased/DAG-shaped `/K`
     // graphs (which the per-path cycle guard alone cannot bound) still stop.
     if !walk.charge() {
-        return;
-    }
-    // Check if this is a marked-content reference dict (has /Type /MCR)
-    if is_mcr_dict(dict) {
-        if let Ok(Object::Integer(mcid)) = dict.get(b"MCID") {
-            // The entry charge above covered the wrapper node; charge once more
-            // for the content reference so this matches the bare-MCID path
-            // (both materialize a Span node + one reference = two items).
-            if walk.charge() {
-                let page_id = get_page_ref(doc, dict).or(inherited_page);
-                out.push(StructElement {
-                    role: StructRole::Span,
-                    alt_text: None,
-                    actual_text: None,
-                    lang: None,
-                    content_refs: vec![MarkedContentRef {
-                        mcid: *mcid,
-                        page_id,
-                    }],
-                    children: Vec::new(),
-                });
-            }
-        }
         return;
     }
 
@@ -1717,5 +1735,41 @@ mod tests {
             2,
             "MCR dict must charge for both the node and its content reference"
         );
+    }
+
+    #[test]
+    fn leaf_wrappers_reserve_both_units_atomically() {
+        // With only one unit left, a two-item leaf wrapper (bare MCID or MCR
+        // dict) must consume nothing and flag truncation, leaving the unit for a
+        // later single-item element instead of half-charging.
+        let doc = Document::new();
+        let role_map = HashMap::new();
+
+        // Bare MCID via parse_kid.
+        let mut walk = StructWalk::new();
+        walk.budget = 1;
+        let mut out = Vec::new();
+        parse_kid(
+            &doc,
+            &Object::Integer(5),
+            &role_map,
+            None,
+            0,
+            &mut out,
+            &mut walk,
+        );
+        assert!(out.is_empty(), "bare MCID must not partially materialize");
+        assert_eq!(walk.budget, 1, "the leftover unit must be preserved");
+        assert!(walk.truncated);
+
+        // MCR dict via parse_struct_element_dict.
+        let mcr = dictionary! { "Type" => "MCR", "MCID" => 1 };
+        let mut walk = StructWalk::new();
+        walk.budget = 1;
+        let mut out = Vec::new();
+        parse_struct_element_dict(&doc, &mcr, &role_map, None, 0, &mut out, &mut walk);
+        assert!(out.is_empty(), "MCR dict must not partially materialize");
+        assert_eq!(walk.budget, 1, "the leftover unit must be preserved");
+        assert!(walk.truncated);
     }
 }
