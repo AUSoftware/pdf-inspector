@@ -169,6 +169,15 @@ assert.equal(asyncPicked.pages[0].page, 2);
 assert.equal(asyncPicked.pages[1].page, 0);
 console.log('  extractPagesMarkdownAsync with pages: OK');
 
+// input buffer is copied at call time: mutating it immediately after the
+// call must not affect the in-flight parse
+const scratch = Buffer.from(fixture);
+const inFlight = processPdfAsync(scratch);
+scratch.fill(0);
+const fromMutated = await inFlight;
+assert.equal(fromMutated.markdown, result.markdown);
+console.log('  processPdfAsync input copied at call time: OK');
+
 // concurrent async calls all settle
 const [c1, c2, c3] = await Promise.all([
   processPdfAsync(fixture),
