@@ -41,79 +41,83 @@ pub(crate) fn detect_columns(
     }
     debug!("page {}: detect_columns: {} items", page, page_items.len());
 
-    // A span wider than this means the bounds are being set by stray items
-    // rather than by a real layout. This is a heuristic, not a format rule:
-    // PDF 2.0 sets no page-size limit, and since PDF 1.6 `UserUnit` scales a
-    // page's physical size independently of its coordinates. 14_400 units
-    // (200in at the default 1/72in unit) is the traditional Acrobat
-    // architectural limit, which makes it a reasonable "wider than any
-    // ordinary page" mark in coordinate space.
+    // The width of one ordinary page, used three ways below: as the largest
+    // credible width for a single text run, as the size of empty gap that marks
+    // content as detached, and as the span past which those checks run at all.
+    // This is a heuristic, not a format rule: PDF 2.0 sets no page-size limit,
+    // and since PDF 1.6 `UserUnit` scales a page's physical size independently
+    // of its coordinates. 14_400 units (200in at the default 1/72in unit) is
+    // the traditional Acrobat architectural limit, which makes it a reasonable
+    // "wider than any ordinary page" mark in coordinate space.
     const MAX_PAGE_EXTENT: f32 = 14_400.0;
-    // Trimming is only safe when the far items are a small minority. A
-    // genuinely large-format page has content spread across its whole width,
-    // so a large share of items falls outside the window and the page keeps
-    // its true bounds; a malformed page has just a few strays.
+    // A detached cluster is only dropped if it also holds a small minority of
+    // the items, so a genuine two-part layout keeps its full bounds even when
+    // the halves are far apart.
     const MAX_TRIM_FRACTION: f32 = 0.10;
 
-    // Find page bounds. Coordinates come straight from the content-stream text
-    // matrix, so a malformed document can place items at non-finite positions.
-    // Those are excluded rather than failing the whole page: one bad glyph
-    // should not disable column detection, and the emitted regions must never
-    // carry a NaN/inf boundary out to callers.
-    let bounds = |keep: &dyn Fn(f32, f32) -> bool| {
-        page_items
-            .iter()
-            .map(|i| (i.x, i.x + effective_width(i)))
-            .filter(|&(left, right)| left.is_finite() && right.is_finite() && keep(left, right))
-            .fold(
-                (f32::INFINITY, f32::NEG_INFINITY, 0usize),
-                |(lo, hi, n), (left, right)| (lo.min(left), hi.max(right), n + 1),
-            )
+    // Usable extent of an item, or None if its geometry is malformed.
+    // Coordinates come straight from the content-stream text matrix, so a
+    // document can place a run at a non-finite position or give it a width
+    // wider than any page. Such items are skipped rather than failing the whole
+    // page: one bad glyph should not disable column detection, and the emitted
+    // regions must never carry a NaN/inf boundary out to callers.
+    let usable = |i: &&TextItem| -> Option<(f32, f32)> {
+        let (left, width) = (i.x, effective_width(i));
+        let right = left + width;
+        (left.is_finite() && right.is_finite() && width <= MAX_PAGE_EXTENT).then_some((left, right))
     };
 
-    let (mut x_min, mut x_max, total) = bounds(&|_, _| true);
+    let (mut x_min, mut x_max, total) = page_items.iter().filter_map(usable).fold(
+        (f32::INFINITY, f32::NEG_INFINITY, 0usize),
+        |(lo, hi, n), (left, right)| (lo.min(left), hi.max(right), n + 1),
+    );
 
-    // Every item sat at a non-finite coordinate, so there is no usable layout.
-    if !x_min.is_finite() || !x_max.is_finite() {
+    // No item had usable geometry, so there is no layout to report.
+    if total == 0 {
         return vec![];
     }
 
     // Every threshold below (gutter margins, spanning-item width, the XY-cut
-    // margin) is a fraction of the page width, so a single far item would
-    // otherwise set the scale for the whole page and shrink the effective
-    // detection window to a rounding error — real gutters then fall inside the
-    // margin band and a genuine multi-column page collapses to one region.
-    // Re-derive the bounds from the items clustered around the median so a lone
-    // outlier cannot poison the scale. Outliers keep their text: column
-    // assignment buckets them by nearest overlap, not by containment.
+    // margin) is a fraction of the page width, so a far item can set the scale
+    // for the whole page and shrink the effective detection window to a
+    // rounding error — real gutters then fall inside the margin band and a
+    // genuine multi-column page collapses to one region.
+    //
+    // Detaching such an item needs positive evidence that it is not part of the
+    // layout, because a count-based rule alone cannot tell a stray from a
+    // sparse far sidebar. The evidence used here is geometric: content is
+    // grouped into clusters separated by more than a whole page of continuous
+    // emptiness. Real content, however sparse, does not leave a void that
+    // large; a malformed coordinate sits alone beyond one. A cluster is only
+    // dropped when it also holds a small minority of the items.
     if x_max - x_min > MAX_PAGE_EXTENT {
-        // Anchor on the same items `bounds` accepts, so a malformed width
-        // cannot shift the median that decides which items are strays.
-        let mut xs: Vec<f32> = page_items
-            .iter()
-            .filter_map(|i| {
-                let right = i.x + effective_width(i);
-                (i.x.is_finite() && right.is_finite()).then_some(i.x)
-            })
-            .collect();
-        xs.sort_by(f32::total_cmp);
-        let median = xs[xs.len() / 2];
+        let mut spans: Vec<(f32, f32)> = page_items.iter().filter_map(usable).collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
 
-        // Both edges are checked: a malformed width poisons `x_max` from an
-        // ordinary position just as a malformed position poisons `x_min`.
-        let near = |left: f32, right: f32| {
-            (left - median).abs() <= MAX_PAGE_EXTENT && (right - median).abs() <= MAX_PAGE_EXTENT
-        };
-        let (lo, hi, kept) = bounds(&near);
-        let dropped = total - kept;
+        // (item count, lo, hi) per cluster.
+        let mut clusters: Vec<(usize, f32, f32)> = Vec::new();
+        for &(left, right) in &spans {
+            match clusters.last_mut() {
+                Some((count, _, hi)) if left - *hi <= MAX_PAGE_EXTENT => {
+                    *count += 1;
+                    *hi = hi.max(right);
+                }
+                _ => clusters.push((1, left, right)),
+            }
+        }
 
-        if lo.is_finite() && hi.is_finite() && dropped as f32 <= total as f32 * MAX_TRIM_FRACTION {
-            debug!(
-                "page {page}: bounds {x_min}..{x_max} span > one page; \
-                 dropping {dropped}/{total} stray item(s), trimming to {lo}..{hi}"
-            );
-            x_min = lo;
-            x_max = hi;
+        if let Some(&(count, lo, hi)) = clusters.iter().max_by_key(|&&(count, _, _)| count) {
+            let dropped = total - count;
+            if clusters.len() > 1 && dropped as f32 <= total as f32 * MAX_TRIM_FRACTION {
+                debug!(
+                    "page {page}: bounds {x_min}..{x_max} span > one page in \
+                     {} clusters; dropping {dropped}/{total} detached item(s), \
+                     trimming to {lo}..{hi}",
+                    clusters.len()
+                );
+                x_min = lo;
+                x_max = hi;
+            }
         }
     }
 
@@ -2733,6 +2737,29 @@ mod tests {
             (140_000.0..=160_000.0).contains(&cols[1].x_max),
             "second gutter at {}, expected inside the real 140k..160k gap",
             cols[1].x_max
+        );
+    }
+
+    #[test]
+    fn sparse_far_sidebar_on_a_large_page_is_kept() {
+        // A large-format page with a thin, sparsely-populated sidebar far from
+        // the main block. The sidebar is a small minority of the items, so an
+        // item-count rule alone would discard it — but nothing about its
+        // geometry says it is invalid, so its bounds must survive.
+        let mut items = Vec::new();
+        items.extend(fill_zone(1, 0.0, 12_000.0, 750.0, 500.0));
+        for i in 0..12 {
+            items.push(make_item(1, 24_000.0, 750.0 - i as f32 * 14.0, "Sidebar"));
+        }
+
+        let cols = detect_columns(&items, 1, false);
+        let right_edge = cols
+            .iter()
+            .map(|c| c.x_max)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            right_edge > 24_000.0,
+            "sidebar was trimmed away: right edge {right_edge}, expected >24_000"
         );
     }
 
