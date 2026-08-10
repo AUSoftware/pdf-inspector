@@ -710,18 +710,23 @@ fn parse_struct_element_dict(
     // Check if this is a marked-content reference dict (has /Type /MCR)
     if is_mcr_dict(dict) {
         if let Ok(Object::Integer(mcid)) = dict.get(b"MCID") {
-            let page_id = get_page_ref(doc, dict).or(inherited_page);
-            out.push(StructElement {
-                role: StructRole::Span,
-                alt_text: None,
-                actual_text: None,
-                lang: None,
-                content_refs: vec![MarkedContentRef {
-                    mcid: *mcid,
-                    page_id,
-                }],
-                children: Vec::new(),
-            });
+            // The entry charge above covered the wrapper node; charge once more
+            // for the content reference so this matches the bare-MCID path
+            // (both materialize a Span node + one reference = two items).
+            if walk.charge() {
+                let page_id = get_page_ref(doc, dict).or(inherited_page);
+                out.push(StructElement {
+                    role: StructRole::Span,
+                    alt_text: None,
+                    actual_text: None,
+                    lang: None,
+                    content_refs: vec![MarkedContentRef {
+                        mcid: *mcid,
+                        page_id,
+                    }],
+                    children: Vec::new(),
+                });
+            }
         }
         return;
     }
@@ -1691,6 +1696,26 @@ mod tests {
             before - walk.budget,
             2,
             "bare MCID must charge for both the node and its content reference"
+        );
+    }
+
+    #[test]
+    fn mcr_dict_charges_node_and_reference() {
+        // A top-level MCR `/K` dict materializes the same wrapper node + content
+        // reference as a bare MCID, so it must charge the same two budget units
+        // (not one), keeping the per-item budgeting uniform.
+        let doc = Document::new();
+        let obj = Object::Dictionary(dictionary! { "Type" => "MCR", "MCID" => 3 });
+        let role_map = HashMap::new();
+        let mut out = Vec::new();
+        let mut walk = StructWalk::new();
+        let before = walk.budget;
+        parse_kid(&doc, &obj, &role_map, None, 0, &mut out, &mut walk);
+        assert_eq!(out.len(), 1, "MCR dict should materialize one wrapper node");
+        assert_eq!(
+            before - walk.budget,
+            2,
+            "MCR dict must charge for both the node and its content reference"
         );
     }
 }
