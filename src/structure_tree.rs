@@ -264,6 +264,14 @@ impl StructTree {
         let children = parse_kids(doc, struct_root, &role_map, None, 0, &mut walk);
         debug!("structure tree: {} top-level elements", children.len());
 
+        if walk.truncated {
+            log::warn!(
+                "structure tree hit the {MAX_STRUCT_NODES}-node budget and was \
+                 truncated; tagged roles/tables may be incomplete (likely a very \
+                 large or malformed tagged PDF)"
+            );
+        }
+
         if children.is_empty() {
             return None;
         }
@@ -502,9 +510,12 @@ const MAX_STRUCT_NODES: usize = 500_000;
 /// single element with a very wide `/K` array. `active` holds the object IDs
 /// currently on the depth-first path so a struct element that references itself
 /// (or an ancestor) is not expanded into an unbounded/exponential subtree.
+/// `truncated` records whether the budget was ever exhausted so the caller can
+/// log it once rather than per skipped item.
 struct StructWalk {
     budget: usize,
     active: HashSet<ObjectId>,
+    truncated: bool,
 }
 
 impl StructWalk {
@@ -512,6 +523,7 @@ impl StructWalk {
         Self {
             budget: MAX_STRUCT_NODES,
             active: HashSet::new(),
+            truncated: false,
         }
     }
 
@@ -520,6 +532,7 @@ impl StructWalk {
     /// underflowing — once the budget is exhausted, so callers skip the item.
     fn charge(&mut self) -> bool {
         if self.budget == 0 {
+            self.truncated = true;
             return false;
         }
         self.budget -= 1;
@@ -1531,5 +1544,18 @@ mod tests {
             "content_refs unbounded: {} > {MAX_STRUCT_NODES}",
             tree.mcid_count()
         );
+    }
+
+    #[test]
+    fn budget_charge_flags_truncation_once_exhausted() {
+        let mut walk = StructWalk::new();
+        walk.budget = 1;
+        assert!(walk.charge(), "should spend the last unit");
+        assert!(!walk.truncated, "not truncated while budget remained");
+        assert!(!walk.charge(), "budget exhausted");
+        assert!(walk.truncated, "exhaustion must set the truncation flag");
+        // Stays exhausted/flagged on subsequent calls.
+        assert!(!walk.charge());
+        assert!(walk.truncated);
     }
 }
