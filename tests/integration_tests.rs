@@ -1654,6 +1654,159 @@ fn test_extract_regions_mem_basic_text_pdf() {
     assert_eq!(regions[0].page, 0);
 }
 
+/// Build a synthetic "scanned page" PDF: a full-page image XObject with a
+/// text layer drawn in the given render mode (3 = invisible OCR overlay,
+/// 0 = normal visible fill). `visible_extra` optionally adds a normally
+/// rendered paragraph so double-layer behavior can be tested.
+fn make_pdf_with_text_layer(text_render_mode: i32, visible_extra: Option<&str>) -> Vec<u8> {
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    let mut offsets = vec![0usize];
+
+    fn add_object(pdf: &mut Vec<u8>, offsets: &mut Vec<usize>, id: usize, body: &str) {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{id} 0 obj\n").as_bytes());
+        pdf.extend_from_slice(body.as_bytes());
+        pdf.extend_from_slice(b"\nendobj\n");
+    }
+    fn add_stream_object(
+        pdf: &mut Vec<u8>,
+        offsets: &mut Vec<usize>,
+        id: usize,
+        dict: &str,
+        stream_bytes: &[u8],
+    ) {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{id} 0 obj\n").as_bytes());
+        pdf.extend_from_slice(
+            format!("<< {} /Length {} >>\nstream\n", dict, stream_bytes.len()).as_bytes(),
+        );
+        pdf.extend_from_slice(stream_bytes);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+    }
+
+    add_object(
+        &mut pdf,
+        &mut offsets,
+        1,
+        "<< /Type /Catalog /Pages 2 0 R >>",
+    );
+    add_object(
+        &mut pdf,
+        &mut offsets,
+        2,
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    );
+    add_object(
+        &mut pdf,
+        &mut offsets,
+        3,
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+         /Resources << /Font << /F1 5 0 R >> /XObject << /Im0 6 0 R >> >> \
+         /Contents 4 0 R >>",
+    );
+    // Full-page raster, then the text layer in the requested render mode —
+    // several lines so the OCR-layer gate's alnum floor (40) is well cleared.
+    let mut content = String::from("q 612 0 0 792 0 0 cm /Im0 Do Q\n");
+    content.push_str(&format!(
+        "BT /F1 12 Tf {} Tr 72 700 Td \
+         (The quick brown fox jumps over the lazy dog) Tj \
+         0 -16 Td (Pack my box with five dozen liquor jugs tonight) Tj \
+         0 -16 Td (Sphinx of black quartz judge my vow carefully) Tj ET\n",
+        text_render_mode
+    ));
+    if let Some(extra) = visible_extra {
+        content.push_str(&format!(
+            "BT /F1 12 Tf 0 Tr 72 500 Td ({extra}) Tj \
+             0 -16 Td (This visible paragraph carries plenty of readable words) Tj \
+             0 -16 Td (so the page does not look textless to the extractor) Tj ET\n"
+        ));
+    }
+    add_stream_object(&mut pdf, &mut offsets, 4, "", content.as_bytes());
+    add_object(
+        &mut pdf,
+        &mut offsets,
+        5,
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    );
+    let image_pixel = [128u8];
+    add_stream_object(
+        &mut pdf,
+        &mut offsets,
+        6,
+        "/Type /XObject /Subtype /Image /Width 1 /Height 1 \
+         /ColorSpace /DeviceGray /BitsPerComponent 8",
+        &image_pixel,
+    );
+
+    let xref_start = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n", offsets.len()).as_bytes());
+    pdf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in offsets.iter().skip(1) {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF",
+            offsets.len(),
+            xref_start
+        )
+        .as_bytes(),
+    );
+    pdf
+}
+
+/// A scanned page whose only text is an invisible (Tr 3) OCR layer behind
+/// the raster must serve that layer from the region extractor instead of
+/// reporting the region as needs_ocr — the exact text is already in the PDF.
+#[test]
+fn test_extract_regions_mem_recovers_invisible_ocr_layer() {
+    let buf = make_pdf_with_text_layer(3, None);
+    let regions = extract_text_in_regions_mem(&buf, &full_page_regions(1)).unwrap();
+    assert_eq!(regions.len(), 1);
+    let region = &regions[0].regions[0];
+    assert!(
+        region.text.contains("quick brown fox"),
+        "invisible OCR layer should be served as region text, got: {:?}",
+        region.text
+    );
+    assert!(
+        !region.needs_ocr,
+        "recovered OCR layer must not fall back to GPU OCR"
+    );
+}
+
+/// A page with real visible text AND an invisible layer must keep the
+/// visible-only extraction: the invisible copy is typically a duplicate
+/// (accessibility/OCR overlay of the same words), and adopting it would
+/// double the text.
+#[test]
+fn test_extract_regions_mem_visible_text_wins_over_invisible_layer() {
+    let buf = make_pdf_with_text_layer(3, Some("INVISIBLE MUST NOT LEAK into this output"));
+    let regions = extract_text_in_regions_mem(&buf, &full_page_regions(1)).unwrap();
+    let region = &regions[0].regions[0];
+    assert!(
+        region.text.contains("visible paragraph"),
+        "visible text should be extracted, got: {:?}",
+        region.text
+    );
+    assert!(
+        !region.text.contains("quick brown fox"),
+        "invisible layer must not be adopted when visible text exists, got: {:?}",
+        region.text
+    );
+}
+
+/// Regression guard: a normal visible-text page (render mode 0) behaves
+/// exactly as before — the fallback only triggers on textless pages.
+#[test]
+fn test_extract_regions_mem_visible_layer_unchanged() {
+    let buf = make_pdf_with_text_layer(0, None);
+    let regions = extract_text_in_regions_mem(&buf, &full_page_regions(1)).unwrap();
+    let region = &regions[0].regions[0];
+    assert!(region.text.contains("quick brown fox"));
+    assert!(!region.needs_ocr);
+}
+
 #[test]
 fn test_extract_regions_mem_identity_h_needs_ocr() {
     let buf = std::fs::read("tests/fixtures/shinagawa_identity_h.pdf").unwrap();

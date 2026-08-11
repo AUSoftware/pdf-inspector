@@ -776,6 +776,23 @@ pub struct PageRegionResult {
 /// # Returns
 ///
 /// A `Vec<PageRegionResult>` parallel to `page_regions`.
+/// Threshold below which a page's visible extraction counts as textless for
+/// the OCR-layer fallback in [`extract_text_in_regions_mem`]. A real content
+/// page carries far more; a scanned page usually carries none at all.
+const OCR_LAYER_VISIBLE_ALNUM_FLOOR: usize = 40;
+
+/// Alphanumeric mass of extracted items, ignoring raster placeholders.
+/// `[Image: ...]` items (ItemType::Image) are synthesized for image
+/// XObjects — they mark that pixels exist, not that text was read, so they
+/// must not count as coverage.
+fn non_placeholder_alnum(items: &[TextItem]) -> usize {
+    items
+        .iter()
+        .filter(|it| !matches!(it.item_type, types::ItemType::Image))
+        .map(|it| it.text.chars().filter(|c| c.is_alphanumeric()).count())
+        .sum()
+}
+
 pub fn extract_text_in_regions_mem(
     buffer: &[u8],
     page_regions: &[(u32, Vec<[f32; 4]>)],
@@ -810,7 +827,7 @@ pub fn extract_text_in_regions_mem(
         page_heights.insert(*page_num, height);
 
         // Extract text items for this page
-        let ((mut items, _rects, _lines), has_gid, coords_rotated) =
+        let ((mut items, _rects, _lines), mut has_gid, mut coords_rotated) =
             extractor::content_stream::extract_page_text_items(
                 &doc,
                 page_id,
@@ -819,6 +836,46 @@ pub fn extract_text_in_regions_mem(
                 false,
                 &mut style_cache,
             )?;
+        // OCR-layer fallback: scanned pages often carry their text as an
+        // invisible (Tr 3) layer behind the page raster. The visible-only
+        // pass sees nothing there but `[Image: ...]` placeholders, so every
+        // region on the page reports needs_ocr even though the exact text is
+        // embedded in the PDF — and this extractor then disagrees with the
+        // markdown path, which already retries Mixed PDFs with the invisible
+        // layer included. Mirror that gate page-scoped: retry only when the
+        // visible pass is effectively textless, adopt the retry only when it
+        // contributes real, non-garbage text. Pages with real visible text
+        // never retry, so double-layer PDFs (visible text plus an invisible
+        // accessibility copy) keep their visible-only extraction.
+        let visible_alnum = non_placeholder_alnum(&items);
+        if visible_alnum < OCR_LAYER_VISIBLE_ALNUM_FLOOR {
+            if let Ok(((inv_items, _inv_rects, _inv_lines), inv_gid, inv_rotated)) =
+                extractor::content_stream::extract_page_text_items(
+                    &doc,
+                    page_id,
+                    *page_num,
+                    &font_cmaps,
+                    true,
+                    &mut style_cache,
+                )
+            {
+                let inv_alnum = non_placeholder_alnum(&inv_items);
+                let sample: String = inv_items
+                    .iter()
+                    .filter(|it| !matches!(it.item_type, types::ItemType::Image))
+                    .take(200)
+                    .map(|it| it.text.as_str())
+                    .collect();
+                if inv_alnum >= OCR_LAYER_VISIBLE_ALNUM_FLOOR
+                    && inv_alnum > visible_alnum
+                    && !is_garbage_text(&sample)
+                {
+                    items = inv_items;
+                    has_gid = inv_gid;
+                    coords_rotated = inv_rotated;
+                }
+            }
+        }
         let threshold = text_utils::fix_letterspaced_items(&mut items);
         if threshold > 0.10 {
             page_thresholds.insert(*page_num, threshold);
