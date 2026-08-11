@@ -1799,9 +1799,10 @@ fn test_extract_regions_mem_visible_text_blocks_invisible_layer() {
 }
 
 /// Punctuation-only visible text (zero alphanumerics) must ALSO block
-/// adoption: an invisible OCR layer transcribes the raster, so the visible
-/// glyphs have invisible twins there and adoption would duplicate them.
-/// The gate is item-presence, not alphanumeric mass.
+/// adoption — the gate is item-presence, not alphanumeric mass. (Real-world
+/// rationale: an invisible OCR layer transcribes the raster, so visible
+/// glyphs typically have invisible twins there; this fixture's layers are
+/// disjoint, so it pins the gate itself, not the duplication scenario.)
 #[test]
 fn test_extract_regions_mem_punctuation_visible_blocks_invisible_layer() {
     let buf = make_pdf_with_text_layer(3, Some("... --- ..."));
@@ -1810,6 +1811,12 @@ fn test_extract_regions_mem_punctuation_visible_blocks_invisible_layer() {
     assert!(
         !region.text.contains("quick brown fox"),
         "invisible layer must not be adopted over punctuation-only visible text, got: {:?}",
+        region.text
+    );
+    assert_eq!(
+        region.text.matches("... --- ...").count(),
+        1,
+        "visible punctuation must be preserved exactly once, got: {:?}",
         region.text
     );
 }
