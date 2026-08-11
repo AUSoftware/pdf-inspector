@@ -1657,8 +1657,13 @@ fn test_extract_regions_mem_basic_text_pdf() {
 /// Build a synthetic "scanned page" PDF: a full-page image XObject with a
 /// text layer drawn in the given render mode (3 = invisible OCR overlay,
 /// 0 = normal visible fill). `visible_extra` optionally adds a normally
-/// rendered paragraph so double-layer behavior can be tested.
-fn make_pdf_with_text_layer(text_render_mode: i32, visible_extra: Option<&str>) -> Vec<u8> {
+/// rendered line so double-layer behavior can be tested; `layer_lines`
+/// overrides the layer content (default: three pangram lines).
+fn make_pdf_with_custom_text_layer(
+    text_render_mode: i32,
+    visible_extra: Option<&str>,
+    layer_lines: Option<&[&str]>,
+) -> Vec<u8> {
     let mut pdf = b"%PDF-1.4\n".to_vec();
     let mut offsets = vec![0usize];
 
@@ -1707,13 +1712,20 @@ fn make_pdf_with_text_layer(text_render_mode: i32, visible_extra: Option<&str>) 
     // Full-page raster, then the text layer in the requested render mode —
     // several lines so the OCR-layer gate's alnum floor (40) is well cleared.
     let mut content = String::from("q 612 0 0 792 0 0 cm /Im0 Do Q\n");
-    content.push_str(&format!(
-        "BT /F1 12 Tf {} Tr 72 700 Td \
-         (The quick brown fox jumps over the lazy dog) Tj \
-         0 -16 Td (Pack my box with five dozen liquor jugs tonight) Tj \
-         0 -16 Td (Sphinx of black quartz judge my vow carefully) Tj ET\n",
-        text_render_mode
-    ));
+    let default_layer = [
+        "The quick brown fox jumps over the lazy dog",
+        "Pack my box with five dozen liquor jugs tonight",
+        "Sphinx of black quartz judge my vow carefully",
+    ];
+    let layer: &[&str] = layer_lines.unwrap_or(&default_layer);
+    content.push_str(&format!("BT /F1 12 Tf {text_render_mode} Tr 72 700 Td "));
+    for (i, line) in layer.iter().enumerate() {
+        if i > 0 {
+            content.push_str("0 -16 Td ");
+        }
+        content.push_str(&format!("({line}) Tj "));
+    }
+    content.push_str("ET\n");
     if let Some(extra) = visible_extra {
         content.push_str(&format!("BT /F1 12 Tf 0 Tr 72 500 Td ({extra}) Tj ET\n"));
     }
@@ -1749,6 +1761,10 @@ fn make_pdf_with_text_layer(text_render_mode: i32, visible_extra: Option<&str>) 
         .as_bytes(),
     );
     pdf
+}
+
+fn make_pdf_with_text_layer(text_render_mode: i32, visible_extra: Option<&str>) -> Vec<u8> {
+    make_pdf_with_custom_text_layer(text_render_mode, visible_extra, None)
 }
 
 /// A scanned page whose only text is an invisible (Tr 3) OCR layer behind
@@ -1794,6 +1810,52 @@ fn test_extract_regions_mem_visible_text_blocks_invisible_layer() {
         region.text.matches("Folio 142").count(),
         1,
         "visible text must appear exactly once, got: {:?}",
+        region.text
+    );
+}
+
+/// An invisible layer below the 40-alnum floor (a stray watermark line)
+/// must NOT be adopted — the region keeps its needs_ocr fallback.
+#[test]
+fn test_extract_regions_mem_tiny_invisible_layer_not_adopted() {
+    let buf = make_pdf_with_custom_text_layer(3, None, Some(&["Scanned by ACME"]));
+    let regions = extract_text_in_regions_mem(&buf, &full_page_regions(1)).unwrap();
+    let region = &regions[0].regions[0];
+    assert!(
+        !region.text.contains("Scanned by ACME"),
+        "below-floor invisible layer must not be adopted, got: {:?}",
+        region.text
+    );
+    // Only the raster placeholder remains — needs_ocr stays whatever main
+    // reports for placeholder-only regions (false today; downstream
+    // pipelines route placeholder-only text to OCR themselves, and this PR
+    // deliberately does not change that contract).
+    assert!(
+        region.text.trim().starts_with("[Image:"),
+        "region should hold only the raster placeholder, got: {:?}",
+        region.text
+    );
+}
+
+/// An invisible layer that clears the alnum floor but is mostly symbol
+/// garbage (a broken OCR run) must be rejected by the garbage gate.
+#[test]
+fn test_extract_regions_mem_garbage_invisible_layer_not_adopted() {
+    // Each line: 5 alphanumerics among 15 symbol chars. Ten lines clear the
+    // 40-alnum floor (50 alnum) while staying well under the half-alnum
+    // ratio is_garbage_text requires.
+    let garbage_lines: Vec<&str> = vec!["a@@b%%c&&d==e~~"; 10];
+    let buf = make_pdf_with_custom_text_layer(3, None, Some(&garbage_lines));
+    let regions = extract_text_in_regions_mem(&buf, &full_page_regions(1)).unwrap();
+    let region = &regions[0].regions[0];
+    assert!(
+        !region.text.contains("a@@b"),
+        "garbage invisible layer must not be adopted, got: {:?}",
+        region.text
+    );
+    assert!(
+        region.text.trim().starts_with("[Image:"),
+        "region should hold only the raster placeholder, got: {:?}",
         region.text
     );
 }
