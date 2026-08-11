@@ -500,7 +500,14 @@ pub(crate) fn extract_page_text_items(
                     // For Mixed/template PDFs, include_invisible=true extracts
                     // the OCR text layer that sits behind scanned images.
                     if text_rendering_mode == 3 && !include_invisible {
-                        skipped_invisible = true;
+                        if op
+                            .operands
+                            .first()
+                            .and_then(get_operand_bytes)
+                            .is_some_and(|raw| !raw.is_empty())
+                        {
+                            skipped_invisible = true;
+                        }
                         if let Some(w_ts) = w_ts_opt {
                             text_matrix[4] += w_ts * text_matrix[0];
                             text_matrix[5] += w_ts * text_matrix[1];
@@ -572,7 +579,14 @@ pub(crate) fn extract_page_text_items(
                 if in_text_block && !op.operands.is_empty() {
                     if let Ok(array) = op.operands[0].as_array() {
                         let font_info = font_widths.get(&current_font);
-                        if text_rendering_mode == 3 && !include_invisible {
+                        // Numeric-only TJ arrays (pure kerning) show no
+                        // text — they must not trigger the invisible retry.
+                        if text_rendering_mode == 3
+                            && !include_invisible
+                            && array
+                                .iter()
+                                .any(|el| get_operand_bytes(el).is_some_and(|raw| !raw.is_empty()))
+                        {
                             skipped_invisible = true;
                         }
                         let is_invisible = (text_rendering_mode == 3 && !include_invisible)
@@ -780,6 +794,16 @@ pub(crate) fn extract_page_text_items(
                         )
                     })
                 });
+                if text_rendering_mode == 3
+                    && !include_invisible
+                    && op
+                        .operands
+                        .first()
+                        .and_then(get_operand_bytes)
+                        .is_some_and(|raw| !raw.is_empty())
+                {
+                    skipped_invisible = true;
+                }
                 if !((text_rendering_mode == 3 && !include_invisible)
                     || suppress_glyph_extraction
                     || op.operands.is_empty())

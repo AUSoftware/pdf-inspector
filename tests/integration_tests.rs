@@ -1658,11 +1658,14 @@ fn test_extract_regions_mem_basic_text_pdf() {
 /// text layer drawn in the given render mode (3 = invisible OCR overlay,
 /// 0 = normal visible fill). `visible_extra` optionally adds a normally
 /// rendered line so double-layer behavior can be tested; `layer_lines`
-/// overrides the layer content (default: three pangram lines).
+/// overrides the layer content (default: three pangram lines);
+/// `quote_ops` shows every layer line via the `'` operator instead of Tj
+/// (both are standard show-text encodings for OCR layers).
 fn make_pdf_with_custom_text_layer(
     text_render_mode: i32,
     visible_extra: Option<&str>,
     layer_lines: Option<&[&str]>,
+    quote_ops: bool,
 ) -> Vec<u8> {
     let mut pdf = b"%PDF-1.4\n".to_vec();
     let mut offsets = vec![0usize];
@@ -1718,12 +1721,23 @@ fn make_pdf_with_custom_text_layer(
         "Sphinx of black quartz judge my vow carefully",
     ];
     let layer: &[&str] = layer_lines.unwrap_or(&default_layer);
-    content.push_str(&format!("BT /F1 12 Tf {text_render_mode} Tr 72 700 Td "));
-    for (i, line) in layer.iter().enumerate() {
-        if i > 0 {
-            content.push_str("0 -16 Td ");
+    if quote_ops {
+        // Every line shown via `'` (move-to-next-line + show) — nothing on
+        // this layer goes through Tj, pinning the `'` suppression path.
+        content.push_str(&format!(
+            "BT /F1 12 Tf {text_render_mode} Tr 16 TL 72 716 Td "
+        ));
+        for line in layer {
+            content.push_str(&format!("({line}) ' "));
         }
-        content.push_str(&format!("({line}) Tj "));
+    } else {
+        content.push_str(&format!("BT /F1 12 Tf {text_render_mode} Tr 72 700 Td "));
+        for (i, line) in layer.iter().enumerate() {
+            if i > 0 {
+                content.push_str("0 -16 Td ");
+            }
+            content.push_str(&format!("({line}) Tj "));
+        }
     }
     content.push_str("ET\n");
     if let Some(extra) = visible_extra {
@@ -1764,7 +1778,7 @@ fn make_pdf_with_custom_text_layer(
 }
 
 fn make_pdf_with_text_layer(text_render_mode: i32, visible_extra: Option<&str>) -> Vec<u8> {
-    make_pdf_with_custom_text_layer(text_render_mode, visible_extra, None)
+    make_pdf_with_custom_text_layer(text_render_mode, visible_extra, None, false)
 }
 
 /// A scanned page whose only text is an invisible (Tr 3) OCR layer behind
@@ -1814,11 +1828,27 @@ fn test_extract_regions_mem_visible_text_blocks_invisible_layer() {
     );
 }
 
+/// An invisible OCR layer shown entirely via the `'` show-text operator
+/// (move-to-next-line + show) must also be recovered — the skipped_invisible
+/// signal has to fire on every show-text path, not just Tj/TJ.
+#[test]
+fn test_extract_regions_mem_recovers_quote_operator_layer() {
+    let buf = make_pdf_with_custom_text_layer(3, None, None, true);
+    let regions = extract_text_in_regions_mem(&buf, &full_page_regions(1)).unwrap();
+    let region = &regions[0].regions[0];
+    assert!(
+        region.text.contains("quick brown fox"),
+        "'-operator OCR layer should be recovered, got: {:?}",
+        region.text
+    );
+    assert!(!region.needs_ocr);
+}
+
 /// An invisible layer below the 40-alnum floor (a stray watermark line)
 /// must NOT be adopted — the region keeps its needs_ocr fallback.
 #[test]
 fn test_extract_regions_mem_tiny_invisible_layer_not_adopted() {
-    let buf = make_pdf_with_custom_text_layer(3, None, Some(&["Scanned by ACME"]));
+    let buf = make_pdf_with_custom_text_layer(3, None, Some(&["Scanned by ACME"]), false);
     let regions = extract_text_in_regions_mem(&buf, &full_page_regions(1)).unwrap();
     let region = &regions[0].regions[0];
     assert!(
@@ -1845,7 +1875,7 @@ fn test_extract_regions_mem_garbage_invisible_layer_not_adopted() {
     // 40-alnum floor (50 alnum) while staying well under the half-alnum
     // ratio is_garbage_text requires.
     let garbage_lines: Vec<&str> = vec!["a@@b%%c&&d==e~~"; 10];
-    let buf = make_pdf_with_custom_text_layer(3, None, Some(&garbage_lines));
+    let buf = make_pdf_with_custom_text_layer(3, None, Some(&garbage_lines), false);
     let regions = extract_text_in_regions_mem(&buf, &full_page_regions(1)).unwrap();
     let region = &regions[0].regions[0];
     assert!(
