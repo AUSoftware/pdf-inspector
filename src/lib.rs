@@ -842,12 +842,16 @@ pub fn extract_text_in_regions_mem(
         // region on the page reports needs_ocr even though the exact text is
         // embedded in the PDF — and this extractor then disagrees with the
         // markdown path, which already retries Mixed PDFs with the invisible
-        // layer included. Retry page-scoped, and only for pages with ZERO
-        // visible text: the invisible pass returns visible items too, so
-        // adopting it on a page that has any visible text would duplicate
-        // that text (review catch — no fuzzy dedupe, strict gate instead).
+        // layer included. Retry page-scoped, and only for pages with NO
+        // visible text item at all (punctuation counts, whitespace-only
+        // artifacts don't): an invisible OCR layer transcribes the raster,
+        // so any visible glyph has an invisible twin there and adoption
+        // would duplicate it (review catches — strict gate, no fuzzy dedupe).
         // Adopt the retry only when it contributes real, non-garbage text.
-        if non_placeholder_alnum(&items) == 0 {
+        let has_visible_text = items.iter().any(|it| {
+            !matches!(it.item_type, types::ItemType::Image) && !it.text.trim().is_empty()
+        });
+        if !has_visible_text {
             if let Ok(((inv_items, _inv_rects, _inv_lines), inv_gid, inv_rotated)) =
                 extractor::content_stream::extract_page_text_items(
                     &doc,
