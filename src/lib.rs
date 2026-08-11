@@ -757,6 +757,23 @@ pub struct PageRegionResult {
     pub regions: Vec<RegionText>,
 }
 
+/// Minimum alphanumeric mass an invisible (Tr 3) text layer must carry for
+/// the OCR-layer fallback in [`extract_text_in_regions_mem`] to adopt it. A
+/// real OCR layer carries far more; a stray watermark or artifact does not.
+const OCR_LAYER_MIN_ALNUM: usize = 40;
+
+/// Alphanumeric mass of extracted items, ignoring raster placeholders.
+/// `[Image: ...]` items (ItemType::Image) are synthesized for image
+/// XObjects — they mark that pixels exist, not that text was read, so they
+/// must not count as coverage.
+fn non_placeholder_alnum(items: &[TextItem]) -> usize {
+    items
+        .iter()
+        .filter(|it| !matches!(it.item_type, types::ItemType::Image))
+        .map(|it| it.text.chars().filter(|c| c.is_alphanumeric()).count())
+        .sum()
+}
+
 /// Extract text within bounding-box regions from a PDF in memory.
 ///
 /// This is designed for hybrid OCR pipelines: a layout model detects regions
@@ -776,23 +793,6 @@ pub struct PageRegionResult {
 /// # Returns
 ///
 /// A `Vec<PageRegionResult>` parallel to `page_regions`.
-/// Threshold below which a page's visible extraction counts as textless for
-/// the OCR-layer fallback in [`extract_text_in_regions_mem`]. A real content
-/// page carries far more; a scanned page usually carries none at all.
-const OCR_LAYER_VISIBLE_ALNUM_FLOOR: usize = 40;
-
-/// Alphanumeric mass of extracted items, ignoring raster placeholders.
-/// `[Image: ...]` items (ItemType::Image) are synthesized for image
-/// XObjects — they mark that pixels exist, not that text was read, so they
-/// must not count as coverage.
-fn non_placeholder_alnum(items: &[TextItem]) -> usize {
-    items
-        .iter()
-        .filter(|it| !matches!(it.item_type, types::ItemType::Image))
-        .map(|it| it.text.chars().filter(|c| c.is_alphanumeric()).count())
-        .sum()
-}
-
 pub fn extract_text_in_regions_mem(
     buffer: &[u8],
     page_regions: &[(u32, Vec<[f32; 4]>)],
@@ -842,13 +842,12 @@ pub fn extract_text_in_regions_mem(
         // region on the page reports needs_ocr even though the exact text is
         // embedded in the PDF — and this extractor then disagrees with the
         // markdown path, which already retries Mixed PDFs with the invisible
-        // layer included. Mirror that gate page-scoped: retry only when the
-        // visible pass is effectively textless, adopt the retry only when it
-        // contributes real, non-garbage text. Pages with real visible text
-        // never retry, so double-layer PDFs (visible text plus an invisible
-        // accessibility copy) keep their visible-only extraction.
-        let visible_alnum = non_placeholder_alnum(&items);
-        if visible_alnum < OCR_LAYER_VISIBLE_ALNUM_FLOOR {
+        // layer included. Retry page-scoped, and only for pages with ZERO
+        // visible text: the invisible pass returns visible items too, so
+        // adopting it on a page that has any visible text would duplicate
+        // that text (review catch — no fuzzy dedupe, strict gate instead).
+        // Adopt the retry only when it contributes real, non-garbage text.
+        if non_placeholder_alnum(&items) == 0 {
             if let Ok(((inv_items, _inv_rects, _inv_lines), inv_gid, inv_rotated)) =
                 extractor::content_stream::extract_page_text_items(
                     &doc,
@@ -860,16 +859,15 @@ pub fn extract_text_in_regions_mem(
                 )
             {
                 let inv_alnum = non_placeholder_alnum(&inv_items);
+                // Judge the WHOLE recovered layer, not a prefix — a broken
+                // OCR layer can hide its garbage past any fixed sample size
+                // (review catch).
                 let sample: String = inv_items
                     .iter()
                     .filter(|it| !matches!(it.item_type, types::ItemType::Image))
-                    .take(200)
                     .map(|it| it.text.as_str())
                     .collect();
-                if inv_alnum >= OCR_LAYER_VISIBLE_ALNUM_FLOOR
-                    && inv_alnum > visible_alnum
-                    && !is_garbage_text(&sample)
-                {
+                if inv_alnum >= OCR_LAYER_MIN_ALNUM && !is_garbage_text(&sample) {
                     items = inv_items;
                     has_gid = inv_gid;
                     coords_rotated = inv_rotated;

@@ -1715,11 +1715,7 @@ fn make_pdf_with_text_layer(text_render_mode: i32, visible_extra: Option<&str>) 
         text_render_mode
     ));
     if let Some(extra) = visible_extra {
-        content.push_str(&format!(
-            "BT /F1 12 Tf 0 Tr 72 500 Td ({extra}) Tj \
-             0 -16 Td (This visible paragraph carries plenty of readable words) Tj \
-             0 -16 Td (so the page does not look textless to the extractor) Tj ET\n"
-        ));
+        content.push_str(&format!("BT /F1 12 Tf 0 Tr 72 500 Td ({extra}) Tj ET\n"));
     }
     add_stream_object(&mut pdf, &mut offsets, 4, "", content.as_bytes());
     add_object(
@@ -1775,35 +1771,47 @@ fn test_extract_regions_mem_recovers_invisible_ocr_layer() {
     );
 }
 
-/// A page with real visible text AND an invisible layer must keep the
-/// visible-only extraction: the invisible copy is typically a duplicate
-/// (accessibility/OCR overlay of the same words), and adopting it would
-/// double the text.
+/// ANY visible text on the page — even a single short line — must block the
+/// invisible-layer adoption entirely: the invisible pass returns visible
+/// items too, so adopting it alongside visible text would duplicate the
+/// visible words. Strict zero-visible gate, no fuzzy dedupe.
 #[test]
-fn test_extract_regions_mem_visible_text_wins_over_invisible_layer() {
-    let buf = make_pdf_with_text_layer(3, Some("INVISIBLE MUST NOT LEAK into this output"));
+fn test_extract_regions_mem_visible_text_blocks_invisible_layer() {
+    let buf = make_pdf_with_text_layer(3, Some("Folio 142"));
     let regions = extract_text_in_regions_mem(&buf, &full_page_regions(1)).unwrap();
     let region = &regions[0].regions[0];
     assert!(
-        region.text.contains("visible paragraph"),
+        region.text.contains("Folio 142"),
         "visible text should be extracted, got: {:?}",
         region.text
     );
     assert!(
         !region.text.contains("quick brown fox"),
-        "invisible layer must not be adopted when visible text exists, got: {:?}",
+        "invisible layer must not be adopted when any visible text exists, got: {:?}",
+        region.text
+    );
+    assert_eq!(
+        region.text.matches("Folio 142").count(),
+        1,
+        "visible text must appear exactly once, got: {:?}",
         region.text
     );
 }
 
-/// Regression guard: a normal visible-text page (render mode 0) behaves
-/// exactly as before — the fallback only triggers on textless pages.
+/// Regression guard: a normal visible-text page (render mode 0) is served
+/// once and only once — if the fallback ever mis-fired here and merged a
+/// second pass, the phrase would duplicate.
 #[test]
 fn test_extract_regions_mem_visible_layer_unchanged() {
     let buf = make_pdf_with_text_layer(0, None);
     let regions = extract_text_in_regions_mem(&buf, &full_page_regions(1)).unwrap();
     let region = &regions[0].regions[0];
-    assert!(region.text.contains("quick brown fox"));
+    assert_eq!(
+        region.text.matches("quick brown fox").count(),
+        1,
+        "visible text must appear exactly once, got: {:?}",
+        region.text
+    );
     assert!(!region.needs_ocr);
 }
 
