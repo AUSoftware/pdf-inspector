@@ -86,6 +86,9 @@ model-cache = ["local-vision", "dep:dirs", "dep:fs2", "dep:sha2", "dep:windows-s
 model-download = ["model-cache", "dep:ureq"]
 ocr-oar = ["model-cache", "dep:image", "dep:oar-ocr", "dep:ort"]
 render-pdfium = ["local-vision", "dep:firecrawl-pdfium"]
+# Complete native local OCR path. This remains opt-in so default library,
+# renderer-only, and browser consumers do not inherit inference or HTTP/TLS.
+local-ocr = ["render-pdfium", "ocr-oar", "model-download"]
 
 [[bin]]
 name = "pdf2md"
