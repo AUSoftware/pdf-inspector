@@ -83,6 +83,29 @@ class VersionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Invalid semantic version"):
             set_versions("next", self.root)
 
+    def test_rejects_numeric_prerelease_with_leading_zero(self):
+        before = (self.root / "Cargo.toml").read_text(encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "Invalid semantic version"):
+            set_versions("1.2.3-01", self.root)
+
+        self.assertEqual(
+            (self.root / "Cargo.toml").read_text(encoding="utf-8"), before
+        )
+
+    def test_preflight_failure_does_not_partially_update(self):
+        before = (self.root / "Cargo.toml").read_text(encoding="utf-8")
+        (self.root / "site/index.html").write_text(
+            "missing module URL\n", encoding="utf-8"
+        )
+
+        with self.assertRaisesRegex(ValueError, "Missing pinned WASM package URL"):
+            set_versions("1.14.0", self.root)
+
+        self.assertEqual(
+            (self.root / "Cargo.toml").read_text(encoding="utf-8"), before
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

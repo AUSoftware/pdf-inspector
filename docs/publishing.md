@@ -43,7 +43,7 @@ Configure each registry's trusted publisher for `firecrawl/pdf-inspector` and
 its corresponding workflow:
 
 - crates.io: `publish-crate.yml`, environment `crates-io`
-- PyPI: `publish-pypi.yml`
+- PyPI: `publish-pypi.yml`, environment `pypi`
 - npm Node package: `publish.yml`
 - npm WASM package: `publish-wasm.yml`
 

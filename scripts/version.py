@@ -10,9 +10,12 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PRERELEASE_IDENTIFIER = (
+    r"(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+)
 SEMVER = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
-    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    rf"(?:-{PRERELEASE_IDENTIFIER}(?:\.{PRERELEASE_IDENTIFIER})*)?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
 VERSION_LINE = re.compile(r'^(\s*version\s*=\s*")[^"]+(".*)$')
@@ -136,7 +139,9 @@ def _bun_versions(root: Path) -> dict[str, str]:
     text = (root / "napi/bun.lock").read_text(encoding="utf-8")
     versions = {}
     for dependency in PLATFORM_PACKAGES:
-        match = re.search(rf'"{re.escape(dependency)}": "([^"]+)"', text)
+        match = re.search(
+            rf'"{re.escape(dependency)}": "([^"]+)"[,]', text
+        )
         if not match:
             raise ValueError(f"Missing Bun lock dependency: {dependency}")
         versions[f"Bun lock: {dependency}"] = match.group(1)
@@ -187,6 +192,10 @@ def check_versions(root: Path = ROOT) -> str:
 def set_versions(version: str, root: Path = ROOT) -> None:
     if not SEMVER.fullmatch(version):
         raise ValueError(f"Invalid semantic version: {version}")
+
+    # Validate every expected location before writing the first file. This
+    # prevents a stale manifest or generated file from leaving a partial bump.
+    package_versions(root)
 
     for _, relative, section in TOML_VERSIONS:
         _write_section_version(root / relative, section, version)
