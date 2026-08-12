@@ -273,3 +273,4 @@ See [docs/debugging.md](docs/debugging.md) for `RUST_LOG` environment variable u
 ## License
 
 [MIT](LICENSE)
+Waku multiplayer e2e checkpoint: session a51f9c8e
