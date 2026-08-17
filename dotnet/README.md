@@ -18,12 +18,27 @@ Console.WriteLine(result.Markdown);         // "# Invoice\n\n| Item | ..."
 
 ## Install
 
+> **Not on nuget.org yet.** `PdfInspector` is the intended package id, but
+> nothing has been published under it. Until someone publishes it, build the
+> package yourself (below) or take the `.nupkg` the
+> [Package NuGet workflow](../.github/workflows/package-nuget.yml) attaches to
+> each run.
+
+Build a package locally and install it from a folder feed:
+
 ```bash
+cd dotnet && ./build.sh --pack        # writes dotnet/artifacts/PdfInspector.<version>.nupkg
+dotnet nuget add source /path/to/pdf-inspector/dotnet/artifacts --name pdf-inspector-local
 dotnet add package PdfInspector
 ```
 
-The package carries the native library for each supported runtime under
-`runtimes/{rid}/native`, so no extra install step is needed on .NET 6+.
+Once the package is published, the last line alone is enough.
+
+Either way the package carries the native library for each runtime it was
+built for under `runtimes/{rid}/native`, so there is no separate native
+install step on .NET 6+. A locally built package only contains the runtime
+you built it on; see [Building from source](#building-from-source) for
+covering several.
 
 | Target | Support |
 | --- | --- |

@@ -80,8 +80,10 @@ console.log(result.markdown);  // Markdown string or null
 
 ### .NET
 
+Not published to nuget.org yet — build the package from this repo:
+
 ```bash
-dotnet add package PdfInspector
+cd dotnet && ./build.sh --pack   # → dotnet/artifacts/PdfInspector.<version>.nupkg
 ```
 
 ```csharp
