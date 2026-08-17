@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <RootNamespace>AUSoftware.PdfInspector.Tests</RootNamespace>
     <IsPackable>false</IsPackable>
     <!-- Test names read better without the analyzer's naming rules. -->

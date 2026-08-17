@@ -69,6 +69,8 @@ src/
 `dotnet/` holds a C ABI crate (`dotnet/native`, crate `pdf-inspector-ffi`) and
 the managed package (`dotnet/src/AUSoftware.PdfInspector`, NuGet id
 `AUSoftware.PdfInspector`, namespace `AUSoftware.PdfInspector`). The
+managed library targets `netstandard2.0` and `net10.0`, while its tests target
+`net10.0`; building it requires the .NET 10 SDK. The
 ABI is JSON-over-C: each entry point takes UTF-8 arguments plus an optional
 options JSON string and returns a `{"ok":…,"data"|"error":…}` envelope that
 the caller frees with `pdfi_free_string`. Panics are caught at the boundary

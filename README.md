@@ -88,6 +88,10 @@ console.log(ocr.pagesRoutedToOcr);
 
 ### .NET
 
+The managed package targets `.NET 10` and retains a `netstandard2.0`
+compatibility assembly for older .NET and .NET Framework consumers. Building
+the package requires the .NET 10 SDK.
+
 Not published to nuget.org yet — build the package from this repo:
 
 ```bash

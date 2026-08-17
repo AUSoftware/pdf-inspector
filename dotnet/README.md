@@ -42,8 +42,8 @@ covering several.
 
 | Target | Support |
 | --- | --- |
-| .NET 8 and newer | `net8.0` assembly, native library resolved automatically |
-| .NET 6 / 7, .NET Core 3.1 | `netstandard2.0` assembly, native library resolved automatically |
+| .NET 10 and newer | `net10.0` assembly, native library resolved automatically |
+| .NET 6–9, .NET Core 3.1 | `netstandard2.0` assembly, native library resolved automatically |
 | .NET Framework 4.6.2+ | `netstandard2.0` assembly; the bundled MSBuild targets copy the Windows native library to your output directory |
 
 ## What you can do
@@ -193,7 +193,7 @@ thread-safe — the native library keeps no shared mutable state. There are no
 
 ## Building from source
 
-Requires the Rust toolchain and the .NET 8 SDK.
+Requires the Rust toolchain and the .NET 10 SDK.
 
 ```bash
 cd dotnet

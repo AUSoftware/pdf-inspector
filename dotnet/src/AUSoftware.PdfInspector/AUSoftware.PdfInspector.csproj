@@ -2,8 +2,8 @@
 
   <PropertyGroup>
     <!-- netstandard2.0 keeps .NET Framework 4.6.2+ and Mono/Unity working;
-         net8.0 gets in-box System.Text.Json and the DllImport resolver. -->
-    <TargetFrameworks>netstandard2.0;net8.0</TargetFrameworks>
+         net10.0 gets in-box System.Text.Json and the DllImport resolver. -->
+    <TargetFrameworks>netstandard2.0;net10.0</TargetFrameworks>
     <AssemblyName>AUSoftware.PdfInspector</AssemblyName>
     <RootNamespace>AUSoftware.PdfInspector</RootNamespace>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
