@@ -1,4 +1,4 @@
-# PdfInspector for .NET
+# AUSoftware.PdfInspector
 
 Fast PDF text extraction to structured Markdown, with scanned-vs-text
 detection, table recovery, and column analysis. This is the .NET binding over
@@ -7,7 +7,7 @@ the native [pdf-inspector](https://github.com/firecrawl/pdf-inspector) library
 date and no per-page rendering cost.
 
 ```csharp
-using PdfInspector;
+using AUSoftware.PdfInspector;
 
 PdfResult result = Pdf.Process("invoice.pdf");
 
@@ -18,7 +18,7 @@ Console.WriteLine(result.Markdown);         // "# Invoice\n\n| Item | ..."
 
 ## Install
 
-> **Not on nuget.org yet.** `PdfInspector` is the intended package id, but
+> **Not on nuget.org yet.** `AUSoftware.PdfInspector` is the intended package id, but
 > nothing has been published under it. Until someone publishes it, build the
 > package yourself (below) or take the `.nupkg` the
 > [Package NuGet workflow](../.github/workflows/package-nuget.yml) attaches to
@@ -27,9 +27,9 @@ Console.WriteLine(result.Markdown);         // "# Invoice\n\n| Item | ..."
 Build a package locally and install it from a folder feed:
 
 ```bash
-cd dotnet && ./build.sh --pack        # writes dotnet/artifacts/PdfInspector.<version>.nupkg
+cd dotnet && ./build.sh --pack   # writes dotnet/artifacts/AUSoftware.PdfInspector.<version>.nupkg
 dotnet nuget add source /path/to/pdf-inspector/dotnet/artifacts --name pdf-inspector-local
-dotnet add package PdfInspector
+dotnet add package AUSoftware.PdfInspector
 ```
 
 Once the package is published, the last line alone is enough.
@@ -217,7 +217,7 @@ containing it) to override the lookup — useful for testing a packaged build.
 ```
 dotnet/
   native/              – Rust crate exposing the C ABI (pdf-inspector-ffi)
-  src/PdfInspector/    – the managed binding
+  src/AUSoftware.PdfInspector/       – the managed binding
   tests/               – xUnit suite driven by the repository's fixture PDFs
   build.sh, build.ps1  – native + managed build and packaging
 ```

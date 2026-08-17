@@ -1,9 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
-using PdfInspector.Json;
+using AUSoftware.PdfInspector.Json;
 
-namespace PdfInspector;
+namespace AUSoftware.PdfInspector;
 
 /// <summary>
 /// Options for a PDF operation. Every property is optional; anything left

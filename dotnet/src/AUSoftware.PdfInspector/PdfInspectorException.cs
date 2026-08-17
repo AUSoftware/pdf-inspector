@@ -1,6 +1,6 @@
 using System;
 
-namespace PdfInspector;
+namespace AUSoftware.PdfInspector;
 
 /// <summary>
 /// Why a PDF operation failed. Mirrors the <c>kind</c> discriminant on the

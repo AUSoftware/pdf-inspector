@@ -1,7 +1,7 @@
 using System.Text.Json.Serialization;
-using PdfInspector.Json;
+using AUSoftware.PdfInspector.Json;
 
-namespace PdfInspector;
+namespace AUSoftware.PdfInspector;
 
 /// <summary>How a PDF's content is stored, and therefore how to read it.</summary>
 [JsonConverter(typeof(PdfTypeConverter))]

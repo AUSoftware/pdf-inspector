@@ -2,6 +2,7 @@
 
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>AUSoftware.PdfInspector.Tests</RootNamespace>
     <IsPackable>false</IsPackable>
     <!-- Test names read better without the analyzer's naming rules. -->
     <NoWarn>$(NoWarn);CA1707;CA1861;CA2007</NoWarn>
@@ -14,7 +15,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../../src/PdfInspector/PdfInspector.csproj" />
+    <ProjectReference Include="../../src/AUSoftware.PdfInspector/AUSoftware.PdfInspector.csproj" />
   </ItemGroup>
 
 </Project>

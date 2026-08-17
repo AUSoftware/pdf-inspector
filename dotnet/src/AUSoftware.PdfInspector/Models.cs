@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace PdfInspector;
+namespace AUSoftware.PdfInspector;
 
 /// <summary>
 /// Machine-readable reasons a page's text layer cannot be trusted.

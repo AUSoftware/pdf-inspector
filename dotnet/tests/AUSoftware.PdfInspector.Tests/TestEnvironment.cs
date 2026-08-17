@@ -3,7 +3,7 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
-namespace PdfInspector.Tests;
+namespace AUSoftware.PdfInspector.Tests;
 
 /// <summary>
 /// Points the binding at the locally built native library and locates the

@@ -88,18 +88,18 @@ echo "==> staged $destination/$library_name"
 # --- Managed build --------------------------------------------------------
 
 echo "==> dotnet build"
-dotnet build "$SCRIPT_DIR/PdfInspector.sln" -c Release
+dotnet build "$SCRIPT_DIR/AUSoftware.PdfInspector.sln" -c Release
 
 if [[ "$run_tests" == "1" ]]; then
   echo "==> dotnet test"
   # The tests load the native library straight from the cargo output.
   PDF_INSPECTOR_NATIVE_LIBRARY="$built" \
-    dotnet test "$SCRIPT_DIR/PdfInspector.sln" -c Release --no-build
+    dotnet test "$SCRIPT_DIR/AUSoftware.PdfInspector.sln" -c Release --no-build
 fi
 
 if [[ "$run_pack" == "1" ]]; then
   echo "==> dotnet pack"
-  dotnet pack "$SCRIPT_DIR/src/PdfInspector/PdfInspector.csproj" \
+  dotnet pack "$SCRIPT_DIR/src/AUSoftware.PdfInspector/AUSoftware.PdfInspector.csproj" \
     -c Release --no-build -o "$SCRIPT_DIR/artifacts"
   echo "==> packages in $SCRIPT_DIR/artifacts"
 fi

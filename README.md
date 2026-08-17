@@ -83,11 +83,11 @@ console.log(result.markdown);  // Markdown string or null
 Not published to nuget.org yet — build the package from this repo:
 
 ```bash
-cd dotnet && ./build.sh --pack   # → dotnet/artifacts/PdfInspector.<version>.nupkg
+cd dotnet && ./build.sh --pack   # → dotnet/artifacts/AUSoftware.PdfInspector.<version>.nupkg
 ```
 
 ```csharp
-using PdfInspector;
+using AUSoftware.PdfInspector;
 
 PdfResult result = Pdf.Process("document.pdf");
 Console.WriteLine(result.PdfType);   // TextBased, Scanned, ImageBased, Mixed

@@ -4,7 +4,7 @@ name: Package NuGet
 # multi-RID NuGet package, uploaded as a workflow artifact. Publishing to
 # nuget.org is deliberately left as a manual step:
 #
-#   dotnet nuget push PdfInspector.<version>.nupkg \
+#   dotnet nuget push AUSoftware.PdfInspector.<version>.nupkg \
 #     --source https://api.nuget.org/v3/index.json --api-key <key>
 
 on:
@@ -100,7 +100,7 @@ jobs:
           find dotnet/runtimes -type f
 
       - name: Pack
-        run: dotnet pack dotnet/src/PdfInspector/PdfInspector.csproj -c Release -o dotnet/artifacts
+        run: dotnet pack dotnet/src/AUSoftware.PdfInspector/AUSoftware.PdfInspector.csproj -c Release -o dotnet/artifacts
 
       - name: Verify every runtime is in the package
         run: |

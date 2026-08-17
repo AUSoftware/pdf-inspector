@@ -4,12 +4,12 @@
     <!-- netstandard2.0 keeps .NET Framework 4.6.2+ and Mono/Unity working;
          net8.0 gets in-box System.Text.Json and the DllImport resolver. -->
     <TargetFrameworks>netstandard2.0;net8.0</TargetFrameworks>
-    <AssemblyName>PdfInspector</AssemblyName>
-    <RootNamespace>PdfInspector</RootNamespace>
+    <AssemblyName>AUSoftware.PdfInspector</AssemblyName>
+    <RootNamespace>AUSoftware.PdfInspector</RootNamespace>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
 
-    <PackageId>PdfInspector</PackageId>
+    <PackageId>AUSoftware.PdfInspector</PackageId>
     <Title>pdf-inspector</Title>
     <Description>Fast PDF text extraction to structured Markdown, with scanned-vs-text detection, table and column analysis. .NET binding over the native pdf-inspector library.</Description>
     <PackageTags>pdf;markdown;text-extraction;ocr;tables;document-ai</PackageTags>
@@ -18,7 +18,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <InternalsVisibleTo Include="PdfInspector.Tests" />
+    <InternalsVisibleTo Include="AUSoftware.PdfInspector.Tests" />
   </ItemGroup>
 
   <ItemGroup>
@@ -27,9 +27,10 @@
   </ItemGroup>
 
   <!-- .NET Framework consumers resolve native assets through this targets
-       file rather than the runtime's RID graph. -->
+       file rather than the runtime's RID graph. NuGet only auto-imports it
+       when the file name matches the package id exactly. -->
   <ItemGroup>
-    <None Include="build/PdfInspector.targets" Pack="true" PackagePath="build/" />
+    <None Include="build/AUSoftware.PdfInspector.targets" Pack="true" PackagePath="build/" />
   </ItemGroup>
 
   <!-- Native shared libraries, staged per RID by dotnet/build.sh. Whatever

@@ -2,7 +2,7 @@ using System;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace PdfInspector.Json;
+namespace AUSoftware.PdfInspector.Json;
 
 /// <summary>
 /// Base for the enum converters. The native library speaks snake_case, and

@@ -4,7 +4,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Xunit;
 
-namespace PdfInspector.Tests;
+namespace AUSoftware.PdfInspector.Tests;
 
 /// <summary>
 /// Exercises the public API against the repository's fixture PDFs.

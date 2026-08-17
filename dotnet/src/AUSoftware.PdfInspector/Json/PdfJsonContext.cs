@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
 
-namespace PdfInspector.Json;
+namespace AUSoftware.PdfInspector.Json;
 
 /// <summary>
 /// The response envelope every native call returns.

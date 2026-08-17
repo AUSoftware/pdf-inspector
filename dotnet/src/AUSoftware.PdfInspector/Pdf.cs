@@ -1,10 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json;
-using PdfInspector.Interop;
-using PdfInspector.Json;
+using AUSoftware.PdfInspector.Interop;
+using AUSoftware.PdfInspector.Json;
 
-namespace PdfInspector;
+namespace AUSoftware.PdfInspector;
 
 /// <summary>
 /// PDF inspection, classification, and Markdown extraction.

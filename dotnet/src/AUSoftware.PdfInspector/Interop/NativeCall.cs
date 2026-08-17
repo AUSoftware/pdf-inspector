@@ -1,9 +1,9 @@
 using System;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
-using PdfInspector.Json;
+using AUSoftware.PdfInspector.Json;
 
-namespace PdfInspector.Interop;
+namespace AUSoftware.PdfInspector.Interop;
 
 /// <summary>
 /// Marshals arguments into the native library and turns its JSON response

@@ -69,19 +69,19 @@ Copy-Item $built (Join-Path $destination $libraryName) -Force
 Write-Host "==> staged $destination/$libraryName"
 
 Write-Host '==> dotnet build'
-& dotnet build (Join-Path $scriptDir 'PdfInspector.sln') -c Release
+& dotnet build (Join-Path $scriptDir 'AUSoftware.PdfInspector.sln') -c Release
 if ($LASTEXITCODE -ne 0) { throw 'dotnet build failed' }
 
 if ($Test) {
     Write-Host '==> dotnet test'
     $env:PDF_INSPECTOR_NATIVE_LIBRARY = $built
-    & dotnet test (Join-Path $scriptDir 'PdfInspector.sln') -c Release --no-build
+    & dotnet test (Join-Path $scriptDir 'AUSoftware.PdfInspector.sln') -c Release --no-build
     if ($LASTEXITCODE -ne 0) { throw 'dotnet test failed' }
 }
 
 if ($Pack) {
     Write-Host '==> dotnet pack'
-    & dotnet pack (Join-Path $scriptDir 'src/PdfInspector/PdfInspector.csproj') `
+    & dotnet pack (Join-Path $scriptDir 'src/AUSoftware.PdfInspector/AUSoftware.PdfInspector.csproj') `
         -c Release --no-build -o (Join-Path $scriptDir 'artifacts')
     if ($LASTEXITCODE -ne 0) { throw 'dotnet pack failed' }
     Write-Host "==> packages in $(Join-Path $scriptDir 'artifacts')"

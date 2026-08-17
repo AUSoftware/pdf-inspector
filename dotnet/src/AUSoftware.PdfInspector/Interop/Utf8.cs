@@ -1,7 +1,7 @@
 using System;
 using System.Text;
 
-namespace PdfInspector.Interop;
+namespace AUSoftware.PdfInspector.Interop;
 
 /// <summary>
 /// UTF-8 marshalling helpers shared by every P/Invoke call.

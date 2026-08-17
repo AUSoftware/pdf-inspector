@@ -1,11 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json;
-using PdfInspector.Interop;
-using PdfInspector.Json;
+using AUSoftware.PdfInspector.Interop;
+using AUSoftware.PdfInspector.Json;
 using Xunit;
 
-namespace PdfInspector.Tests;
+namespace AUSoftware.PdfInspector.Tests;
 
 /// <summary>
 /// Pins the wire format. The native side rejects unknown fields, so a

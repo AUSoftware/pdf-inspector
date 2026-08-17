@@ -1,7 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 
-namespace PdfInspector.Interop;
+namespace AUSoftware.PdfInspector.Interop;
 
 /// <summary>
 /// Raw P/Invoke declarations for the <c>pdf_inspector_ffi</c> shared library.

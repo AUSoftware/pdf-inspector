@@ -6,7 +6,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 
-namespace PdfInspector.Interop;
+namespace AUSoftware.PdfInspector.Interop;
 
 /// <summary>
 /// Locates the native <c>pdf_inspector_ffi</c> library.
