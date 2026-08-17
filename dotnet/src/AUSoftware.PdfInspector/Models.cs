@@ -223,6 +223,127 @@ public sealed class PagesExtractionResult
     public bool IsComplex { get; init; }
 }
 
+/// <summary>Which OCR model produced a page's text.</summary>
+public sealed class OcrModelIdentity
+{
+    /// <summary>Model name, e.g. <c>pp-ocrv6-small</c>.</summary>
+    public string Name { get; init; } = string.Empty;
+
+    /// <summary>Pinned revision of the model artifacts.</summary>
+    public string Revision { get; init; } = string.Empty;
+}
+
+/// <summary>How long each OCR stage took for one page.</summary>
+public sealed class OcrTimings
+{
+    /// <summary>Time spent rasterising the page.</summary>
+    public long RenderMs { get; init; }
+
+    /// <summary>Time spent recognising text.</summary>
+    public long OcrMs { get; init; }
+
+    /// <summary>Time spent fusing and assembling the Markdown.</summary>
+    public long AssemblyMs { get; init; }
+}
+
+/// <summary>Where one page's Markdown came from, and what it cost.</summary>
+public sealed class OcrPageProvenance
+{
+    /// <summary><b>1-indexed</b> page number.</summary>
+    public int PageNumber { get; init; }
+
+    /// <summary>Whether this page's text is native, OCR, or a fusion of both.</summary>
+    public PageContentSource Source { get; init; }
+
+    /// <summary>
+    /// The model that ran, or <see langword="null"/> when
+    /// <see cref="Source"/> is <see cref="PageContentSource.Native"/>.
+    /// </summary>
+    public OcrModelIdentity? OcrModel { get; init; }
+
+    /// <summary>Resolution the page was rasterised at, when it was.</summary>
+    public double? RenderDpi { get; init; }
+
+    /// <summary>Mean confidence of the accepted OCR spans, when OCR ran.</summary>
+    public double? OcrConfidence { get; init; }
+
+    /// <summary>Per-stage timings for this page.</summary>
+    public OcrTimings Timings { get; init; } = new OcrTimings();
+
+    /// <summary>Non-fatal problems encountered while processing this page.</summary>
+    public IReadOnlyList<string> Warnings { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// True when local OCR read this page poorly enough that a hosted
+    /// document-parsing service would likely do better.
+    /// </summary>
+    public bool HostedRecommended { get; init; }
+}
+
+/// <summary>Final Markdown and provenance for one page.</summary>
+public sealed class OcrPageResult
+{
+    /// <summary><b>1-indexed</b> page number.</summary>
+    public int PageNumber { get; init; }
+
+    /// <summary>The page's Markdown, whatever its source.</summary>
+    public string Markdown { get; init; } = string.Empty;
+
+    /// <summary>Where this page's Markdown came from.</summary>
+    public OcrPageProvenance Provenance { get; init; } = new OcrPageProvenance();
+}
+
+/// <summary>
+/// The result of <see cref="Pdf.ProcessWithOcr(string, OcrOptions?)"/>: native
+/// extraction with OCR filled in on the pages that needed it. Every page list
+/// here is <b>1-indexed</b>.
+/// </summary>
+public sealed class OcrPdfResult
+{
+    /// <summary>The whole document's Markdown, in selected-page order.</summary>
+    public string Markdown { get; init; } = string.Empty;
+
+    /// <summary>Per-page Markdown and provenance.</summary>
+    public IReadOnlyList<OcrPageResult> Pages { get; init; } = Array.Empty<OcrPageResult>();
+
+    /// <summary>Total pages in the document, whatever was selected.</summary>
+    public int PageCount { get; init; }
+
+    /// <summary>Pages native extraction flagged as wanting OCR.</summary>
+    public IReadOnlyList<int> PagesRecommendedForOcr { get; init; } = Array.Empty<int>();
+
+    /// <summary>
+    /// Pages that were actually rendered and recognised. Empty when
+    /// <see cref="OcrOptions.Mode"/> was <see cref="OcrMode.Off"/>, or when
+    /// <see cref="OcrMode.Auto"/> found nothing worth OCR-ing.
+    /// </summary>
+    public IReadOnlyList<int> PagesRoutedToOcr { get; init; } = Array.Empty<int>();
+
+    /// <summary>Pages local OCR read poorly enough to suggest a hosted service.</summary>
+    public IReadOnlyList<int> PagesRecommendingHosted { get; init; } = Array.Empty<int>();
+
+    /// <summary>Why each flagged page was flagged; see <see cref="OcrReasons"/>.</summary>
+    public IReadOnlyList<PageOcrReasons> OcrReasonsByPage { get; init; } = Array.Empty<PageOcrReasons>();
+
+    /// <summary>Selected pages where tables were detected.</summary>
+    public IReadOnlyList<int> PagesWithTables { get; init; } = Array.Empty<int>();
+
+    /// <summary>Selected pages where a multi-column layout was detected.</summary>
+    public IReadOnlyList<int> PagesWithColumns { get; init; } = Array.Empty<int>();
+
+    /// <summary>True when any selected page has tables or multi-column text.</summary>
+    public bool IsComplex { get; init; }
+
+    /// <summary>End-to-end wall-clock time for the call.</summary>
+    public long ProcessingTimeMs { get; init; }
+
+    /// <summary>Time spent rasterising pages. Zero when no page was routed.</summary>
+    public long RenderTimeMs { get; init; }
+
+    /// <summary>Time spent recognising text. Zero when no page was routed.</summary>
+    public long OcrTimeMs { get; init; }
+}
+
 /// <summary>Text extracted from one requested region.</summary>
 public sealed class RegionText
 {

@@ -170,6 +170,72 @@ internal sealed class MarkdownProfileConverter : SnakeCaseEnumConverter<Markdown
     };
 }
 
+internal sealed class OcrModeConverter : SnakeCaseEnumConverter<OcrMode>
+{
+    protected override bool TryParse(string value, out OcrMode result)
+    {
+        switch (value)
+        {
+            case "off":
+                result = OcrMode.Off;
+                return true;
+            case "auto":
+                result = OcrMode.Auto;
+                return true;
+            case "force":
+                result = OcrMode.Force;
+                return true;
+            default:
+                result = default;
+                return false;
+        }
+    }
+
+    protected override string Format(OcrMode value) => value switch
+    {
+        OcrMode.Off => "off",
+        OcrMode.Auto => "auto",
+        OcrMode.Force => "force",
+        _ => throw new JsonException($"Unrecognised OcrMode value '{value}'."),
+    };
+}
+
+/// <summary>
+/// Maps the page-content source. Unlike the other enum converters this one
+/// accepts an unknown wire value rather than throwing: the native list is
+/// open-ended, and a page whose source this binding cannot name is still a
+/// page whose Markdown the caller wants.
+/// </summary>
+internal sealed class PageContentSourceConverter : SnakeCaseEnumConverter<PageContentSource>
+{
+    protected override bool TryParse(string value, out PageContentSource result)
+    {
+        switch (value)
+        {
+            case "native":
+                result = PageContentSource.Native;
+                return true;
+            case "ocr":
+                result = PageContentSource.Ocr;
+                return true;
+            case "fused":
+                result = PageContentSource.Fused;
+                return true;
+            default:
+                result = PageContentSource.Unknown;
+                return true;
+        }
+    }
+
+    protected override string Format(PageContentSource value) => value switch
+    {
+        PageContentSource.Native => "native",
+        PageContentSource.Ocr => "ocr",
+        PageContentSource.Fused => "fused",
+        _ => "unknown",
+    };
+}
+
 /// <summary>
 /// Writes a <see cref="ScanStrategy"/> as the tagged object the native
 /// library expects: <c>{"type":"sample","count":8}</c>.

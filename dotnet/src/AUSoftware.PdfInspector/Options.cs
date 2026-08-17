@@ -176,6 +176,69 @@ public sealed class MarkdownOptions
 }
 
 /// <summary>
+/// Options for <see cref="Pdf.ProcessWithOcr(string, OcrOptions?)"/>. Every
+/// property is optional; anything left unset keeps the native default.
+/// </summary>
+/// <remarks>
+/// Separate from <see cref="PdfOptions"/> on purpose: this call takes
+/// <b>1-indexed</b> pages and carries render and model settings that no other
+/// entry point understands.
+/// </remarks>
+public sealed class OcrOptions
+{
+    /// <summary>
+    /// When OCR may run. Defaults to <see cref="OcrMode.Auto"/>.
+    /// </summary>
+    public OcrMode? Mode { get; set; }
+
+    /// <summary>
+    /// Restrict processing to these <b>1-indexed</b> pages. Page 0 is
+    /// rejected. Defaults to the whole document.
+    /// </summary>
+    public IReadOnlyList<int>? Pages { get; set; }
+
+    /// <summary>Password for an encrypted PDF.</summary>
+    public string? Password { get; set; }
+
+    /// <summary>
+    /// Resolution used to rasterise pages that get routed to OCR. Defaults to
+    /// 150 DPI. Higher values cost time and memory on every routed page.
+    /// </summary>
+    public double? Dpi { get; set; }
+
+    /// <summary>
+    /// Discard recognised spans below this confidence. Must be between 0 and 1
+    /// inclusive; defaults to 0, which keeps everything.
+    /// </summary>
+    public double? MinimumConfidence { get; set; }
+
+    /// <summary>
+    /// Page confidence below which the result sets
+    /// <see cref="OcrPageProvenance.HostedRecommended"/>. Must be between 0
+    /// and 1 inclusive; defaults to 0.5.
+    /// </summary>
+    public double? HostedRecommendationConfidence { get; set; }
+
+    /// <summary>
+    /// Directory holding an offline model set. Defaults to the shared model
+    /// cache in the user's local application data.
+    /// </summary>
+    public string? ModelDirectory { get; set; }
+
+    /// <summary>
+    /// Forbid model downloads. OCR then needs <see cref="ModelDirectory"/> or
+    /// an already-warm cache, and fails rather than reaching the network.
+    /// Default: false.
+    /// </summary>
+    public bool? Offline { get; set; }
+
+    /// <summary>
+    /// Markdown tuning, applied to native and OCR output alike.
+    /// </summary>
+    public MarkdownOptions? Markdown { get; set; }
+}
+
+/// <summary>
 /// A bounding box in PDF points with a <b>top-left</b> origin — the
 /// convention layout models produce after coordinate conversion.
 /// </summary>

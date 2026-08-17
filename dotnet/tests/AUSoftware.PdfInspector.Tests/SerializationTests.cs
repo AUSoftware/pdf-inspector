@@ -17,6 +17,9 @@ public class SerializationTests
     private static string Serialize(PdfOptions options) =>
         JsonSerializer.Serialize(options, PdfJsonContext.Default.PdfOptionsPayload);
 
+    private static string Serialize(OcrOptions options) =>
+        JsonSerializer.Serialize(options, PdfJsonContext.Default.OcrOptionsPayload);
+
     [Fact]
     public void EmptyOptions_SerialiseToAnEmptyObject()
     {
@@ -121,6 +124,7 @@ public class SerializationTests
     [InlineData("parse", PdfErrorKind.Parse)]
     [InlineData("encrypted", PdfErrorKind.Encrypted)]
     [InlineData("invalid_structure", PdfErrorKind.InvalidStructure)]
+    [InlineData("ocr", PdfErrorKind.Ocr)]
     [InlineData("panic", PdfErrorKind.Panic)]
     [InlineData("internal", PdfErrorKind.Internal)]
     [InlineData("something_new", PdfErrorKind.Unknown)]
@@ -154,5 +158,81 @@ public class SerializationTests
         Assert.NotEqual(new BoundingBox(1, 2, 3, 4), new BoundingBox(1, 2, 3, 5));
         Assert.True(new BoundingBox(1, 2, 3, 4) == new BoundingBox(1, 2, 3, 4));
         Assert.True(new BoundingBox(1, 2, 3, 4) != new BoundingBox(0, 2, 3, 4));
+    }
+
+    [Fact]
+    public void EmptyOcrOptions_SerialiseToAnEmptyObject()
+    {
+        // The native side layers the payload over its own `auto` preset, so an
+        // empty object has to mean "every default", not "every field zeroed".
+        Assert.Equal("{}", Serialize(new OcrOptions()));
+    }
+
+    [Fact]
+    public void OcrOptions_UseTheNativeFieldNames()
+    {
+        string json = Serialize(new OcrOptions
+        {
+            Mode = OcrMode.Force,
+            Pages = new[] { 1, 3 },
+            Password = "hunter2",
+            Dpi = 300,
+            MinimumConfidence = 0.25,
+            HostedRecommendationConfidence = 0.75,
+            ModelDirectory = "/models",
+            Offline = true,
+        });
+
+        Assert.Equal(
+            """{"mode":"force","pages":[1,3],"password":"hunter2","dpi":300,"minimum_confidence":0.25,"hosted_recommendation_confidence":0.75,"model_directory":"/models","offline":true}""",
+            json);
+    }
+
+    [Fact]
+    public void OcrOptions_NestMarkdownTuningUnderTheSameKey()
+    {
+        string json = Serialize(new OcrOptions
+        {
+            Markdown = new MarkdownOptions { DetectHeaders = false },
+        });
+
+        Assert.Equal("""{"markdown":{"detect_headers":false}}""", json);
+    }
+
+    [Theory]
+    [InlineData("off", OcrMode.Off)]
+    [InlineData("auto", OcrMode.Auto)]
+    [InlineData("force", OcrMode.Force)]
+    public void OcrModeValues_RoundTripThroughTheirWireNames(string wire, OcrMode expected)
+    {
+        Assert.Equal(
+            expected,
+            JsonSerializer.Deserialize<OcrMode>($"\"{wire}\"", JsonSerializerOptions.Default));
+        Assert.Equal(
+            $"\"{wire}\"",
+            JsonSerializer.Serialize(expected, JsonSerializerOptions.Default));
+    }
+
+    [Theory]
+    [InlineData("native", PageContentSource.Native)]
+    [InlineData("ocr", PageContentSource.Ocr)]
+    [InlineData("fused", PageContentSource.Fused)]
+    public void PageContentSourceValues_RoundTripThroughTheirWireNames(
+        string wire,
+        PageContentSource expected)
+    {
+        Assert.Equal(
+            expected,
+            JsonSerializer.Deserialize<PageContentSource>($"\"{wire}\"", JsonSerializerOptions.Default));
+    }
+
+    [Fact]
+    public void UnknownPageContentSource_DegradesRatherThanThrowing()
+    {
+        // Deliberately unlike PdfType: a page whose source this binding cannot
+        // name still carries Markdown the caller wants.
+        Assert.Equal(
+            PageContentSource.Unknown,
+            JsonSerializer.Deserialize<PageContentSource>("\"telepathy\"", JsonSerializerOptions.Default));
     }
 }

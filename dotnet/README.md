@@ -54,6 +54,7 @@ documents that never touch disk.
 | Method | Use it for |
 | --- | --- |
 | `Pdf.Process` | The full pipeline: detect, extract, convert to Markdown |
+| `Pdf.ProcessWithOcr` | The full pipeline with built-in OCR on the pages that need it |
 | `Pdf.Detect` | Type and OCR metadata without extracting text |
 | `Pdf.Classify` | The cheapest routing decision — type, page count, OCR pages |
 | `Pdf.ExtractText` | Plain text, no structure |
@@ -62,6 +63,60 @@ documents that never touch disk.
 | `Pdf.ExtractPagesMarkdown` | Markdown page by page, for hybrid OCR pipelines |
 | `Pdf.ExtractTextInRegions` | Text inside bounding boxes a layout model proposed |
 | `Pdf.NativeVersion` | Which native library actually loaded |
+
+### Built-in OCR
+
+`ProcessWithOcr` runs the normal pipeline and falls back to OCR on the pages
+whose native text is missing or unusable, returning one Markdown document plus
+per-page provenance:
+
+```csharp
+OcrPdfResult result = Pdf.ProcessWithOcr(path);
+
+Console.WriteLine(result.Markdown);
+Console.WriteLine($"OCR ran on pages: {string.Join(", ", result.PagesRoutedToOcr)}");
+
+foreach (OcrPageResult page in result.Pages)
+{
+    OcrPageProvenance p = page.Provenance;
+    Console.WriteLine($"page {page.PageNumber}: {p.Source} (confidence {p.OcrConfidence})");
+
+    if (p.HostedRecommended)
+    {
+        // Local OCR read this page poorly; a hosted parser would likely do better.
+    }
+}
+```
+
+The default `OcrMode.Auto` only renders the pages native extraction flagged, so
+a clean text PDF never loads the OCR runtime at all. `OcrMode.Off` skips OCR
+entirely, and `OcrMode.Force` OCRs every selected page even where native text
+looks fine.
+
+```csharp
+OcrPdfResult result = Pdf.ProcessWithOcr(path, new OcrOptions
+{
+    Mode = OcrMode.Force,
+    Pages = new[] { 1, 2 },      // 1-indexed
+    Dpi = 300,
+    MinimumConfidence = 0.5,
+    ModelDirectory = "/opt/pdf-inspector/models",
+    Offline = true,
+});
+```
+
+**OCR needs a runtime this package does not ship.** The first routed page loads
+PDFium and ONNX Runtime and resolves the pinned model set, downloading it once
+into a shared cache unless `Offline` is set — in which case it needs
+`ModelDirectory` or an already-warm cache and fails rather than reaching the
+network. Point `PDFIUM_LIB_PATH` and `ORT_DYLIB_PATH` at the shared libraries
+when they are not on the platform search path; see
+[docs/ocr-runtime.md](../docs/ocr-runtime.md) for the validated builds. When
+any of that is missing the call throws `PdfInspectorException` with
+`Kind == PdfErrorKind.Ocr`.
+
+If you would rather send pages to your own OCR service, keep using `Classify`
+and `ExtractPagesMarkdown` as below — that path loads nothing extra.
 
 ### Routing scanned documents to OCR
 
@@ -139,6 +194,7 @@ method's XML documentation states which it uses:
 | `PdfOptions.Pages` for `ExtractPagesMarkdown` | 0-indexed, and the results come back in the order you asked for |
 | `PdfResult.PagesNeedingOcr`, `PagesWithTables`, `PagesWithColumns` | 1-indexed |
 | `PdfClassification.PagesNeedingOcr` | 0-indexed |
+| `OcrOptions.Pages` and every page list on `OcrPdfResult` | 1-indexed |
 | `TextItem.Page`, `StructureElement.Page` | 1-indexed |
 | `PageMarkdown.Page`, `PageRegions.Page` | 0-indexed |
 
@@ -180,9 +236,13 @@ catch (PdfInspectorException e) when (e.Kind == PdfErrorKind.Encrypted)
 ```
 
 `Kind` covers `NotAPdf`, `Encrypted`, `Io`, `Parse`, `InvalidStructure`,
-`InvalidArgument`, `InvalidOptions`, `Panic`, and `Internal`. A kind this
-binding does not recognise maps to `Unknown`, with the original string on
+`InvalidArgument`, `InvalidOptions`, `Ocr`, `Panic`, and `Internal`. A kind
+this binding does not recognise maps to `Unknown`, with the original string on
 `NativeKind`.
+
+`Ocr` only ever comes from `ProcessWithOcr`, and it usually means the local OCR
+runtime or its models could not be loaded rather than anything wrong with the
+PDF — see [Built-in OCR](#built-in-ocr).
 
 ### Threading
 

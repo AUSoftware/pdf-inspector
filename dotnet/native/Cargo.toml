@@ -16,7 +16,10 @@ name = "pdf_inspector_ffi"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-pdf-inspector = { path = "../.." }
+# `ocr` matches the Node and Python bindings: the OCR pipeline is compiled in,
+# but PDFium, ONNX Runtime, and the model files stay external and are touched
+# only once a page is actually routed to OCR.
+pdf-inspector = { path = "../..", features = ["ocr"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

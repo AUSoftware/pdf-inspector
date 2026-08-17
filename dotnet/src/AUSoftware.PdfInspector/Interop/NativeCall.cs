@@ -148,6 +148,7 @@ internal static unsafe class NativeCall
         "encrypted" => PdfErrorKind.Encrypted,
         "invalid_structure" => PdfErrorKind.InvalidStructure,
         "not_a_pdf" => PdfErrorKind.NotAPdf,
+        "ocr" => PdfErrorKind.Ocr,
         "panic" => PdfErrorKind.Panic,
         "internal" => PdfErrorKind.Internal,
         _ => PdfErrorKind.Unknown,

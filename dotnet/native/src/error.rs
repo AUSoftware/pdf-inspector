@@ -5,6 +5,7 @@
 //! The `kind` is a stable machine-readable discriminant; `message` is a
 //! human-readable detail that callers should treat as opaque.
 
+use pdf_inspector::vision::OcrPipelineError;
 use pdf_inspector::PdfError;
 use serde::Serialize;
 
@@ -26,6 +27,10 @@ pub mod kind {
     pub const INVALID_STRUCTURE: &str = "invalid_structure";
     /// The input is not a PDF at all.
     pub const NOT_A_PDF: &str = "not_a_pdf";
+    /// The OCR pipeline failed: PDFium or ONNX Runtime could not be loaded,
+    /// a model could not be resolved, or recognition itself failed. The PDF
+    /// is usually fine — the local OCR runtime is what is missing.
+    pub const OCR: &str = "ocr";
     /// A panic was caught at the ABI boundary. Unwinding past this point
     /// would be undefined behaviour, so it is reported as an error instead.
     pub const PANIC: &str = "panic";
@@ -67,5 +72,26 @@ impl From<PdfError> for FfiError {
             PdfError::NotAPdf(_) => kind::NOT_A_PDF,
         };
         Self::new(kind, e.to_string())
+    }
+}
+
+impl From<OcrPipelineError> for FfiError {
+    fn from(e: OcrPipelineError) -> Self {
+        match e {
+            // A document-level failure is the same failure it would be on the
+            // non-OCR entry points, so it keeps the same discriminant.
+            OcrPipelineError::Pdf(inner) => Self::from(inner),
+            // Both of these reject a value the caller supplied, so they belong
+            // with the other option-validation failures rather than with the
+            // runtime ones.
+            OcrPipelineError::InvalidSelectedPage { .. }
+            | OcrPipelineError::InvalidMinimumConfidence { .. } => {
+                Self::invalid_options(e.to_string())
+            }
+            // Rendering, model resolution, and recognition failures. The
+            // variant list is `#[non_exhaustive]`, so anything added upstream
+            // lands here rather than breaking the build.
+            _ => Self::new(kind::OCR, e.to_string()),
+        }
     }
 }

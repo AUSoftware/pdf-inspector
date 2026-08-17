@@ -84,6 +84,62 @@ public static unsafe class Pdf
             PdfJsonContext.Default.PdfResultEnvelope);
 
     // -----------------------------------------------------------------
+    // Full pipeline with OCR
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// Runs the full pipeline over a file, falling back to OCR on the pages
+    /// whose native text is missing or unusable.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Under the default <see cref="OcrMode.Auto"/> only the pages native
+    /// extraction flagged are rendered and recognised, so a clean text PDF
+    /// never loads the OCR runtime at all. When a page is routed, PDFium and
+    /// ONNX Runtime are loaded on demand and the model set is resolved from
+    /// <see cref="OcrOptions.ModelDirectory"/> or the shared cache —
+    /// downloading it once unless <see cref="OcrOptions.Offline"/> is set.
+    /// </para>
+    /// <para>
+    /// Every page list on the result is <b>1-indexed</b>, as is
+    /// <see cref="OcrOptions.Pages"/>.
+    /// </para>
+    /// </remarks>
+    /// <param name="path">Path to the PDF.</param>
+    /// <param name="options">Optional settings; see <see cref="OcrOptions"/>.</param>
+    /// <returns>The Markdown plus per-page provenance and timings.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="path"/> is null.</exception>
+    /// <exception cref="PdfInspectorException">
+    /// The PDF could not be processed, or — with
+    /// <see cref="PdfErrorKind.Ocr"/> — the OCR runtime or its models could
+    /// not be loaded.
+    /// </exception>
+    public static OcrPdfResult ProcessWithOcr(string path, OcrOptions? options = null) =>
+        NativeCall.FromFile(
+            path,
+            Serialize(options),
+            NativeMethods.ProcessPdfWithOcrFile,
+            PdfJsonContext.Default.OcrPdfResultEnvelope);
+
+    /// <summary>
+    /// Runs the full pipeline with OCR fallback over an in-memory document.
+    /// </summary>
+    /// <param name="data">The PDF bytes.</param>
+    /// <param name="options">See <see cref="ProcessWithOcr(string, OcrOptions?)"/>.</param>
+    /// <returns>The Markdown plus per-page provenance and timings.</returns>
+    /// <exception cref="PdfInspectorException">
+    /// The PDF could not be processed, or — with
+    /// <see cref="PdfErrorKind.Ocr"/> — the OCR runtime or its models could
+    /// not be loaded.
+    /// </exception>
+    public static OcrPdfResult ProcessWithOcr(ReadOnlySpan<byte> data, OcrOptions? options = null) =>
+        NativeCall.FromBytes(
+            data,
+            Serialize(options),
+            NativeMethods.ProcessPdfWithOcrBytes,
+            PdfJsonContext.Default.OcrPdfResultEnvelope);
+
+    // -----------------------------------------------------------------
     // Detection
     // -----------------------------------------------------------------
 
@@ -365,6 +421,9 @@ public static unsafe class Pdf
 
     private static string? Serialize(PdfOptions? options) =>
         options is null ? null : JsonSerializer.Serialize(options, PdfJsonContext.Default.PdfOptionsPayload);
+
+    private static string? Serialize(OcrOptions? options) =>
+        options is null ? null : JsonSerializer.Serialize(options, PdfJsonContext.Default.OcrOptionsPayload);
 
     private static string SerializeRegions(IEnumerable<PageRegions> pageRegions)
     {

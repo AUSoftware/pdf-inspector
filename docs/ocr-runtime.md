@@ -1,6 +1,7 @@
 # OCR runtime setup
 
-Selective OCR is available from the Rust library and CLI, Python, and Node.js.
+Selective OCR is available from the Rust library and CLI, Python, Node.js, and
+.NET.
 Clean native-text documents do not load an OCR dependency or download a model.
 When `auto` routes at least one page, the process needs PDFium, ONNX Runtime,
 and the pinned PP-OCRv6 Small model set.

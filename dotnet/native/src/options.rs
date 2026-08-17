@@ -12,6 +12,7 @@ use std::collections::HashSet;
 
 use pdf_inspector::detector::{DetectionConfig, ScanStrategy};
 use pdf_inspector::markdown::{MarkdownOptions, MarkdownProfile};
+use pdf_inspector::vision::{ModelDownloadPolicy, OcrMode, OcrPdfOptions};
 use pdf_inspector::{PdfOptions, ProcessMode};
 use serde::Deserialize;
 
@@ -199,6 +200,87 @@ impl OptionsDto {
     }
 }
 
+/// When the OCR pipeline may run.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OcrModeDto {
+    Off,
+    Auto,
+    Force,
+}
+
+impl From<OcrModeDto> for OcrMode {
+    fn from(m: OcrModeDto) -> Self {
+        match m {
+            OcrModeDto::Off => OcrMode::Off,
+            OcrModeDto::Auto => OcrMode::Auto,
+            OcrModeDto::Force => OcrMode::Force,
+        }
+    }
+}
+
+/// The options payload for the OCR entry points.
+///
+/// Deliberately separate from [`OptionsDto`]: the OCR pipeline takes
+/// **1-indexed** pages and carries render/model settings that no other entry
+/// point understands, so folding it into the shared payload would make the
+/// indexing of `pages` depend on which function was called.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "snake_case", deny_unknown_fields)]
+pub struct OcrRequestDto {
+    /// Routing behaviour. Defaults to `auto`, matching Node and Python.
+    pub mode: Option<OcrModeDto>,
+    /// Optional **1-indexed** page selection.
+    pub pages: Option<Vec<u32>>,
+    pub password: Option<String>,
+    /// Rasterisation resolution for routed pages. Defaults to 150 DPI.
+    pub dpi: Option<f32>,
+    /// Drop OCR spans below this inclusive 0–1 confidence.
+    pub minimum_confidence: Option<f32>,
+    /// Recommend hosted parsing below this inclusive 0–1 page confidence.
+    pub hosted_recommendation_confidence: Option<f32>,
+    /// Directory holding an offline model set.
+    pub model_directory: Option<String>,
+    /// Forbid model downloads; require a model directory or a warm cache.
+    pub offline: Option<bool>,
+    /// Markdown tuning shared by native and OCR assembly.
+    pub markdown: Option<MarkdownDto>,
+}
+
+impl OcrRequestDto {
+    /// Build core [`OcrPdfOptions`], layering the supplied fields over the
+    /// `auto` preset.
+    pub fn to_ocr_options(&self) -> OcrPdfOptions {
+        let mut options = OcrPdfOptions::auto();
+        if let Some(mode) = self.mode {
+            options.ocr.mode = mode.into();
+        }
+        if let Some(pages) = &self.pages {
+            options.page_numbers = Some(pages.iter().copied().collect());
+        }
+        options.password = self.password.clone();
+        if let Some(dpi) = self.dpi {
+            options.render.dpi = dpi;
+        }
+        if let Some(confidence) = self.minimum_confidence {
+            options.ocr.minimum_confidence = confidence;
+        }
+        if let Some(confidence) = self.hosted_recommendation_confidence {
+            options.hosted_recommendation_confidence = confidence;
+        }
+        if let Some(directory) = &self.model_directory {
+            options.ocr.model_directory = Some(directory.into());
+        }
+        if self.offline == Some(true) {
+            options.ocr.model_downloads = ModelDownloadPolicy::Offline;
+        }
+        if let Some(markdown) = self.markdown.clone() {
+            options.markdown = markdown.apply(options.markdown);
+        }
+        options
+    }
+}
+
 /// Regions requested for one page.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -287,6 +369,64 @@ mod tests {
     #[test]
     fn unknown_option_fields_are_rejected() {
         let err = serde_json::from_str::<OptionsDto>(r#"{"detect_headers":true}"#).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn empty_ocr_request_defaults_to_auto() {
+        let dto: OcrRequestDto = serde_json::from_str("{}").unwrap();
+        let options = dto.to_ocr_options();
+        assert_eq!(options.ocr.mode, OcrMode::Auto);
+        assert!(options.page_numbers.is_none());
+        assert!(options.password.is_none());
+        assert_eq!(options.ocr.model_downloads, ModelDownloadPolicy::IfMissing);
+    }
+
+    #[test]
+    fn ocr_request_overrides_only_supplied_fields() {
+        let dto: OcrRequestDto = serde_json::from_str(
+            r#"{"mode":"off","pages":[3,1],"dpi":300.0,"offline":true,
+                "minimum_confidence":0.25,"hosted_recommendation_confidence":0.75,
+                "model_directory":"/models","markdown":{"detect_headers":false}}"#,
+        )
+        .unwrap();
+        let options = dto.to_ocr_options();
+
+        assert_eq!(options.ocr.mode, OcrMode::Off);
+        // `page_numbers` is a set, so the caller's order does not survive.
+        assert_eq!(
+            options
+                .page_numbers
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        assert_eq!(options.render.dpi, 300.0);
+        assert_eq!(options.ocr.minimum_confidence, 0.25);
+        assert_eq!(options.hosted_recommendation_confidence, 0.75);
+        assert_eq!(
+            options.ocr.model_directory.as_deref(),
+            Some(std::path::Path::new("/models"))
+        );
+        assert_eq!(options.ocr.model_downloads, ModelDownloadPolicy::Offline);
+        assert!(!options.markdown.detect_headers);
+        // Untouched markdown fields keep their defaults.
+        assert!(options.markdown.detect_lists);
+    }
+
+    #[test]
+    fn offline_false_leaves_the_download_policy_alone() {
+        let dto: OcrRequestDto = serde_json::from_str(r#"{"offline":false}"#).unwrap();
+        assert_eq!(
+            dto.to_ocr_options().ocr.model_downloads,
+            ModelDownloadPolicy::IfMissing
+        );
+    }
+
+    #[test]
+    fn unknown_ocr_request_fields_are_rejected() {
+        let err = serde_json::from_str::<OcrRequestDto>(r#"{"page_numbers":[1]}"#).unwrap_err();
         assert!(err.to_string().contains("unknown field"));
     }
 

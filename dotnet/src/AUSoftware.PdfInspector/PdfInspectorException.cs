@@ -44,6 +44,14 @@ public enum PdfErrorKind
 
     /// <summary>The native library could not produce a response.</summary>
     Internal,
+
+    /// <summary>
+    /// The OCR pipeline failed: PDFium or ONNX Runtime could not be loaded, a
+    /// model could not be resolved, or recognition itself failed. The PDF is
+    /// usually fine — the local OCR runtime is what is missing. Only
+    /// <see cref="Pdf.ProcessWithOcr(string, OcrOptions?)"/> raises this.
+    /// </summary>
+    Ocr,
 }
 
 /// <summary>

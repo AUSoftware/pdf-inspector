@@ -170,6 +170,175 @@ fn password_option_decrypts_an_encrypted_pdf() {
 }
 
 // ---------------------------------------------------------------------------
+// process_pdf_with_ocr
+//
+// These stay on the paths that route no page to OCR, so they never need
+// PDFium, ONNX Runtime, or a model download. Exercising a real recognition
+// pass belongs in the OCR runtime job, not here.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ocr_off_returns_the_native_result_in_the_ocr_shape() {
+    let bytes = fixture_bytes("2013-app2.pdf");
+    let options = c(r#"{"mode":"off"}"#);
+    let data = data(unsafe {
+        pdfi_process_pdf_with_ocr_bytes(bytes.as_ptr(), bytes.len(), options.as_ptr())
+    });
+
+    assert!(!data["markdown"].as_str().unwrap().is_empty());
+    assert!(data["page_count"].as_u64().unwrap() > 0);
+    assert_eq!(data["pages_routed_to_ocr"].as_array().unwrap().len(), 0);
+    assert_eq!(data["ocr_time_ms"], 0);
+    assert_eq!(data["render_time_ms"], 0);
+    assert!(data["is_complex"].is_boolean());
+
+    let page = &data["pages"][0];
+    assert_eq!(page["page_number"], 1);
+    assert_eq!(page["provenance"]["source"], "native");
+    assert_eq!(page["provenance"]["page_number"], 1);
+    assert!(page["provenance"]["ocr_model"].is_null());
+    assert_eq!(page["provenance"]["hosted_recommended"], false);
+    assert!(page["provenance"]["timings"]["render_ms"].is_number());
+    assert!(page["provenance"]["warnings"].is_array());
+}
+
+#[test]
+fn ocr_auto_over_a_clean_text_pdf_routes_nothing() {
+    // No options at all: `auto` is the default. This fixture flags no page for
+    // OCR, so the pipeline must finish without ever loading PDFium — which is
+    // what makes the default safe on a machine with no OCR runtime installed.
+    let bytes = fixture_bytes("shannon-entropy-p1-2.pdf");
+    let data = data(unsafe {
+        pdfi_process_pdf_with_ocr_bytes(bytes.as_ptr(), bytes.len(), std::ptr::null())
+    });
+
+    assert_eq!(data["pages_routed_to_ocr"].as_array().unwrap().len(), 0);
+    assert!(!data["markdown"].as_str().unwrap().is_empty());
+    assert_eq!(data["ocr_time_ms"], 0);
+}
+
+#[test]
+fn ocr_auto_without_a_runtime_fails_cleanly_rather_than_panicking() {
+    // This fixture does flag a page, so `auto` reaches for PDFium. Whether the
+    // runtime is present depends on the machine, so pin the contract instead
+    // of the outcome: success, or an `ocr` error — never a panic, and never a
+    // misreported PDF error.
+    let bytes = fixture_bytes("2013-app2.pdf");
+    let value = take(unsafe {
+        pdfi_process_pdf_with_ocr_bytes(bytes.as_ptr(), bytes.len(), std::ptr::null())
+    });
+
+    if value["ok"] == Value::Bool(false) {
+        assert_eq!(value["error"]["kind"], "ocr");
+        assert!(!value["error"]["message"].as_str().unwrap().is_empty());
+    } else {
+        assert!(!value["data"]["markdown"].as_str().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn ocr_file_and_bytes_agree() {
+    let path = c(fixture("2013-app2.pdf").to_str().unwrap());
+    let bytes = fixture_bytes("2013-app2.pdf");
+    let options = c(r#"{"mode":"off"}"#);
+
+    let from_file =
+        data(unsafe { pdfi_process_pdf_with_ocr_file(path.as_ptr(), options.as_ptr()) });
+    let from_bytes = data(unsafe {
+        pdfi_process_pdf_with_ocr_bytes(bytes.as_ptr(), bytes.len(), options.as_ptr())
+    });
+
+    assert_eq!(from_file["markdown"], from_bytes["markdown"]);
+    assert_eq!(from_file["page_count"], from_bytes["page_count"]);
+}
+
+#[test]
+fn ocr_pages_are_one_indexed_and_narrow_the_output() {
+    let bytes = fixture_bytes("shannon-entropy-p1-2.pdf");
+    let options = c(r#"{"mode":"off","pages":[1]}"#);
+    let one_page = data(unsafe {
+        pdfi_process_pdf_with_ocr_bytes(bytes.as_ptr(), bytes.len(), options.as_ptr())
+    });
+
+    assert_eq!(one_page["pages"].as_array().unwrap().len(), 1);
+    assert_eq!(one_page["pages"][0]["page_number"], 1);
+    // `page_count` is the whole document, not the selection.
+    assert!(one_page["page_count"].as_u64().unwrap() >= 1);
+}
+
+#[test]
+fn ocr_markdown_options_reach_the_converter() {
+    let bytes = fixture_bytes("shannon-entropy-p1-2.pdf");
+    let without = c(r#"{"mode":"off","markdown":{"detect_headers":false}}"#);
+    let plain = data(unsafe {
+        pdfi_process_pdf_with_ocr_bytes(bytes.as_ptr(), bytes.len(), without.as_ptr())
+    });
+
+    let baseline = c(r#"{"mode":"off"}"#);
+    let default = data(unsafe {
+        pdfi_process_pdf_with_ocr_bytes(bytes.as_ptr(), bytes.len(), baseline.as_ptr())
+    });
+
+    assert_ne!(plain["markdown"], default["markdown"]);
+    assert!(!plain["markdown"].as_str().unwrap().contains("\n# "));
+}
+
+#[test]
+fn ocr_password_option_decrypts_an_encrypted_pdf() {
+    let path = c(fixture("encrypted-secret123.pdf").to_str().unwrap());
+    let options = c(r#"{"mode":"off"}"#);
+
+    let without =
+        error_kind(unsafe { pdfi_process_pdf_with_ocr_file(path.as_ptr(), options.as_ptr()) });
+    assert_eq!(without, "encrypted");
+
+    let options = c(r#"{"mode":"off","password":"secret123"}"#);
+    let with = data(unsafe { pdfi_process_pdf_with_ocr_file(path.as_ptr(), options.as_ptr()) });
+    assert!(!with["markdown"].as_str().unwrap().is_empty());
+}
+
+#[test]
+fn ocr_page_zero_is_rejected_as_an_option_error() {
+    let bytes = fixture_bytes("2013-app2.pdf");
+    let options = c(r#"{"mode":"off","pages":[0]}"#);
+    let kind = error_kind(unsafe {
+        pdfi_process_pdf_with_ocr_bytes(bytes.as_ptr(), bytes.len(), options.as_ptr())
+    });
+    assert_eq!(kind, "invalid_options");
+}
+
+#[test]
+fn ocr_out_of_range_confidence_is_rejected_as_an_option_error() {
+    let bytes = fixture_bytes("2013-app2.pdf");
+    let options = c(r#"{"mode":"off","minimum_confidence":1.5}"#);
+    let kind = error_kind(unsafe {
+        pdfi_process_pdf_with_ocr_bytes(bytes.as_ptr(), bytes.len(), options.as_ptr())
+    });
+    assert_eq!(kind, "invalid_options");
+}
+
+#[test]
+fn ocr_unknown_option_field_reports_invalid_options() {
+    let bytes = fixture_bytes("2013-app2.pdf");
+    // The Node binding calls this `page_numbers`; ours is `pages`, and the
+    // mistake has to surface rather than being silently dropped.
+    let options = c(r#"{"page_numbers":[1]}"#);
+    let kind = error_kind(unsafe {
+        pdfi_process_pdf_with_ocr_bytes(bytes.as_ptr(), bytes.len(), options.as_ptr())
+    });
+    assert_eq!(kind, "invalid_options");
+}
+
+#[test]
+fn ocr_rejects_non_pdf_bytes() {
+    let bytes = b"this is not a pdf".to_vec();
+    let kind = error_kind(unsafe {
+        pdfi_process_pdf_with_ocr_bytes(bytes.as_ptr(), bytes.len(), std::ptr::null())
+    });
+    assert_eq!(kind, "not_a_pdf");
+}
+
+// ---------------------------------------------------------------------------
 // classify / extract_text
 // ---------------------------------------------------------------------------
 

@@ -32,11 +32,11 @@ use std::slice;
 use serde::Serialize;
 
 use dto::{
-    ClassificationDto, PageRegionsDto, PagesExtractionDto, PdfResultDto, StructureElementDto,
-    TextItemDto,
+    ClassificationDto, OcrPdfResultDto, PageRegionsDto, PagesExtractionDto, PdfResultDto,
+    StructureElementDto, TextItemDto,
 };
 use error::{kind, FfiError};
-use options::{OptionsDto, RegionsRequest};
+use options::{OcrRequestDto, OptionsDto, RegionsRequest};
 
 /// Version of this shared library, kept in lockstep with the core crate.
 const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\0");
@@ -266,6 +266,58 @@ pub unsafe extern "C" fn pdfi_process_pdf_bytes(
             pdf_inspector::process_pdf_mem_with_options(buffer?, options?.to_pdf_options())
                 .map_err(FfiError::from)?;
         Ok(PdfResultDto::from(result))
+    })
+}
+
+// ---------------------------------------------------------------------------
+// process_pdf_with_ocr — native extraction plus selective OCR
+// ---------------------------------------------------------------------------
+
+/// Native extraction over a PDF file with selective OCR on the pages that
+/// need it. Takes the OCR request payload, not the shared options payload;
+/// its `pages` is **1-indexed**.
+///
+/// Mode defaults to `auto`, which routes only the pages native extraction
+/// flagged. `auto` over a clean text PDF routes nothing, so PDFium, ONNX
+/// Runtime, and the model cache are never touched — they are loaded lazily,
+/// the first time a page is actually rendered.
+///
+/// # Safety
+/// See the module docs: `path` must be a valid NUL-terminated UTF-8 string,
+/// `options_json` null or valid JSON, and the result freed with
+/// [`pdfi_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn pdfi_process_pdf_with_ocr_file(
+    path: *const c_char,
+    options_json: *const c_char,
+) -> *mut c_char {
+    let path = required_str(path, "path");
+    let options = parse_json::<OcrRequestDto>(options_json);
+    respond(move || {
+        let result = pdf_inspector::vision::process_pdf_with_ocr(path?, options?.to_ocr_options())
+            .map_err(FfiError::from)?;
+        Ok(OcrPdfResultDto::from(result))
+    })
+}
+
+/// Native extraction with selective OCR over PDF bytes.
+/// See [`pdfi_process_pdf_with_ocr_file`].
+///
+/// # Safety
+/// `data` must point to `len` readable bytes; see the module docs.
+#[no_mangle]
+pub unsafe extern "C" fn pdfi_process_pdf_with_ocr_bytes(
+    data: *const u8,
+    len: usize,
+    options_json: *const c_char,
+) -> *mut c_char {
+    let buffer = required_bytes(data, len);
+    let options = parse_json::<OcrRequestDto>(options_json);
+    respond(move || {
+        let result =
+            pdf_inspector::vision::process_pdf_with_ocr_mem(buffer?, options?.to_ocr_options())
+                .map_err(FfiError::from)?;
+        Ok(OcrPdfResultDto::from(result))
     })
 }
 

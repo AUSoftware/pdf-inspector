@@ -44,7 +44,9 @@ internal sealed class RegionsPayload
 [JsonSerializable(typeof(Envelope<IReadOnlyList<StructureElement>>), TypeInfoPropertyName = "StructureElementsEnvelope")]
 [JsonSerializable(typeof(Envelope<PagesExtractionResult>), TypeInfoPropertyName = "PagesExtractionEnvelope")]
 [JsonSerializable(typeof(Envelope<IReadOnlyList<PageRegionText>>), TypeInfoPropertyName = "PageRegionsEnvelope")]
+[JsonSerializable(typeof(Envelope<OcrPdfResult>), TypeInfoPropertyName = "OcrPdfResultEnvelope")]
 [JsonSerializable(typeof(PdfOptions), TypeInfoPropertyName = "PdfOptionsPayload")]
+[JsonSerializable(typeof(OcrOptions), TypeInfoPropertyName = "OcrOptionsPayload")]
 [JsonSerializable(typeof(RegionsPayload), TypeInfoPropertyName = "RegionsPayload")]
 internal sealed partial class PdfJsonContext : JsonSerializerContext
 {

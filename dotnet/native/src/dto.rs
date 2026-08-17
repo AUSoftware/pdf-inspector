@@ -7,6 +7,9 @@
 
 use pdf_inspector::detector::PdfType;
 use pdf_inspector::types::ItemType;
+use pdf_inspector::vision::{
+    FusedPageMarkdown, OcrPdfResult, PageContentSource, PageProvenance, VisionTimings,
+};
 use pdf_inspector::{
     PageMarkdown, PageOcrReasons, PageRegionResult, PagesExtractionResult, PdfClassification,
     PdfProcessResult, RegionText, StructureElement, TextItem,
@@ -236,6 +239,135 @@ impl From<RegionText> for RegionTextDto {
             text: r.text,
             needs_ocr: r.needs_ocr,
             ocr_reason: r.ocr_reason,
+        }
+    }
+}
+
+/// Stable wire name for the source of a page's final Markdown.
+///
+/// `PageContentSource` is `#[non_exhaustive]`, so a variant added upstream
+/// reports as `"unknown"` rather than being silently relabelled as one of the
+/// sources the binding does know.
+pub fn page_content_source_name(source: PageContentSource) -> &'static str {
+    match source {
+        PageContentSource::Native => "native",
+        PageContentSource::Ocr => "ocr",
+        PageContentSource::Fused => "fused",
+        _ => "unknown",
+    }
+}
+
+/// Exact OCR model identity retained in page provenance.
+#[derive(Debug, Serialize)]
+pub struct OcrModelIdentityDto {
+    pub name: String,
+    pub revision: String,
+}
+
+/// Per-page OCR stage timings.
+#[derive(Debug, Serialize)]
+pub struct OcrTimingsDto {
+    pub render_ms: u64,
+    pub ocr_ms: u64,
+    pub assembly_ms: u64,
+}
+
+impl From<VisionTimings> for OcrTimingsDto {
+    fn from(t: VisionTimings) -> Self {
+        Self {
+            render_ms: t.render_ms,
+            ocr_ms: t.ocr_ms,
+            assembly_ms: t.assembly_ms,
+        }
+    }
+}
+
+/// Where one page's Markdown came from, and how much it cost.
+#[derive(Debug, Serialize)]
+pub struct OcrProvenanceDto {
+    /// 1-indexed page number.
+    pub page_number: u32,
+    pub source: &'static str,
+    pub ocr_model: Option<OcrModelIdentityDto>,
+    pub render_dpi: Option<f32>,
+    pub ocr_confidence: Option<f32>,
+    pub timings: OcrTimingsDto,
+    pub warnings: Vec<String>,
+    pub hosted_recommended: bool,
+}
+
+impl From<PageProvenance> for OcrProvenanceDto {
+    fn from(p: PageProvenance) -> Self {
+        Self {
+            page_number: p.page_number,
+            source: page_content_source_name(p.source),
+            ocr_model: p.ocr_model.map(|model| OcrModelIdentityDto {
+                name: model.name,
+                revision: model.revision,
+            }),
+            render_dpi: p.render_dpi,
+            ocr_confidence: p.ocr_confidence,
+            timings: p.timings.into(),
+            warnings: p.warnings,
+            hosted_recommended: p.hosted_recommended,
+        }
+    }
+}
+
+/// Final Markdown and provenance for one page.
+#[derive(Debug, Serialize)]
+pub struct OcrPageDto {
+    /// 1-indexed page number.
+    pub page_number: u32,
+    pub markdown: String,
+    pub provenance: OcrProvenanceDto,
+}
+
+impl From<FusedPageMarkdown> for OcrPageDto {
+    fn from(p: FusedPageMarkdown) -> Self {
+        Self {
+            page_number: p.page_number,
+            markdown: p.markdown,
+            provenance: p.provenance.into(),
+        }
+    }
+}
+
+/// Complete native + OCR result. All page lists are **1-indexed**.
+#[derive(Debug, Serialize)]
+pub struct OcrPdfResultDto {
+    pub markdown: String,
+    pub pages: Vec<OcrPageDto>,
+    /// Total pages in the document, independent of any page selection.
+    pub page_count: u32,
+    pub pages_recommended_for_ocr: Vec<u32>,
+    pub pages_routed_to_ocr: Vec<u32>,
+    pub pages_recommending_hosted: Vec<u32>,
+    pub ocr_reasons_by_page: Vec<PageOcrReasonsDto>,
+    pub pages_with_tables: Vec<u32>,
+    pub pages_with_columns: Vec<u32>,
+    pub is_complex: bool,
+    pub processing_time_ms: u64,
+    pub render_time_ms: u64,
+    pub ocr_time_ms: u64,
+}
+
+impl From<OcrPdfResult> for OcrPdfResultDto {
+    fn from(r: OcrPdfResult) -> Self {
+        Self {
+            markdown: r.markdown,
+            pages: r.pages.into_iter().map(OcrPageDto::from).collect(),
+            page_count: r.page_count,
+            pages_recommended_for_ocr: r.pages_recommended_for_ocr,
+            pages_routed_to_ocr: r.pages_routed_to_ocr,
+            pages_recommending_hosted: r.pages_recommending_hosted,
+            ocr_reasons_by_page: ocr_reasons(&r.ocr_reasons_by_page),
+            pages_with_tables: r.pages_with_tables,
+            pages_with_columns: r.pages_with_columns,
+            is_complex: r.is_complex,
+            processing_time_ms: r.processing_time_ms,
+            render_time_ms: r.render_time_ms,
+            ocr_time_ms: r.ocr_time_ms,
         }
     }
 }

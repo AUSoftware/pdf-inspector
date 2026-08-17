@@ -46,6 +46,12 @@ internal static unsafe class NativeMethods
     [DllImport(LibraryName, EntryPoint = "pdfi_process_pdf_bytes", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ProcessPdfBytes(byte* data, nuint length, byte* optionsJson);
 
+    [DllImport(LibraryName, EntryPoint = "pdfi_process_pdf_with_ocr_file", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProcessPdfWithOcrFile(byte* path, byte* optionsJson);
+
+    [DllImport(LibraryName, EntryPoint = "pdfi_process_pdf_with_ocr_bytes", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProcessPdfWithOcrBytes(byte* data, nuint length, byte* optionsJson);
+
     [DllImport(LibraryName, EntryPoint = "pdfi_detect_pdf_file", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr DetectPdfFile(byte* path, byte* optionsJson);
 

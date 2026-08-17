@@ -61,3 +61,46 @@ public enum MarkdownProfile
     /// <summary>Prefer compact output, e.g. collapsing long dot leaders.</summary>
     Compact,
 }
+
+/// <summary>When <see cref="Pdf.ProcessWithOcr(string, OcrOptions?)"/> may run OCR.</summary>
+[JsonConverter(typeof(OcrModeConverter))]
+public enum OcrMode
+{
+    /// <summary>
+    /// Never run OCR — return the plain native extraction in the OCR result
+    /// shape. Nothing outside this package is ever loaded.
+    /// </summary>
+    Off,
+
+    /// <summary>
+    /// OCR only the pages native extraction flagged. The default: a document
+    /// with no flagged pages never touches the OCR runtime.
+    /// </summary>
+    Auto,
+
+    /// <summary>
+    /// OCR every selected page, even ones with good native text. Always needs
+    /// the OCR runtime.
+    /// </summary>
+    Force,
+}
+
+/// <summary>Where a page's final Markdown came from.</summary>
+[JsonConverter(typeof(PageContentSourceConverter))]
+public enum PageContentSource
+{
+    /// <summary>
+    /// A source this binding does not recognise, because the native library is
+    /// newer than the package. Treat it as "content of unknown provenance".
+    /// </summary>
+    Unknown = 0,
+
+    /// <summary>The PDF's own text layer.</summary>
+    Native,
+
+    /// <summary>OCR output only.</summary>
+    Ocr,
+
+    /// <summary>Native text and OCR spans were merged.</summary>
+    Fused,
+}
