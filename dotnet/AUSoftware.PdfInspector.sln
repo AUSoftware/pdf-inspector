@@ -1,0 +1,36 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{3782D038-1F18-4EAF-840A-AF014AACB79E}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AUSoftware.PdfInspector", "src\AUSoftware.PdfInspector\AUSoftware.PdfInspector.csproj", "{22943E86-E9B6-4DE3-87A7-F66655BF6E53}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{5C83D82C-1D70-4A64-8266-D7759EAED145}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AUSoftware.PdfInspector.Tests", "tests\AUSoftware.PdfInspector.Tests\AUSoftware.PdfInspector.Tests.csproj", "{4528BE47-91BB-4A8D-9C7C-FC33B8C1CFE5}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{22943E86-E9B6-4DE3-87A7-F66655BF6E53}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{22943E86-E9B6-4DE3-87A7-F66655BF6E53}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{22943E86-E9B6-4DE3-87A7-F66655BF6E53}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{22943E86-E9B6-4DE3-87A7-F66655BF6E53}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4528BE47-91BB-4A8D-9C7C-FC33B8C1CFE5}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4528BE47-91BB-4A8D-9C7C-FC33B8C1CFE5}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4528BE47-91BB-4A8D-9C7C-FC33B8C1CFE5}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4528BE47-91BB-4A8D-9C7C-FC33B8C1CFE5}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{22943E86-E9B6-4DE3-87A7-F66655BF6E53} = {3782D038-1F18-4EAF-840A-AF014AACB79E}
+		{4528BE47-91BB-4A8D-9C7C-FC33B8C1CFE5} = {5C83D82C-1D70-4A64-8266-D7759EAED145}
+	EndGlobalSection
+EndGlobal

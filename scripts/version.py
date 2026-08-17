@@ -33,13 +33,18 @@ TOML_VERSIONS = (
     ("Python package", Path("pyproject.toml"), "project"),
     ("NAPI crate", Path("napi/Cargo.toml"), "package"),
     ("WASM package", Path("wasm/Cargo.toml"), "package"),
+    ("FFI crate", Path("dotnet/native/Cargo.toml"), "package"),
 )
 LOCK_VERSIONS = (
     ("NAPI lock: core", Path("napi/Cargo.lock"), "pdf-inspector"),
     ("NAPI lock: binding", Path("napi/Cargo.lock"), "pdf-inspector-napi"),
     ("WASM lock: core", Path("wasm/Cargo.lock"), "pdf-inspector"),
     ("WASM lock: binding", Path("wasm/Cargo.lock"), "pdf-inspector-wasm"),
+    ("FFI lock: core", Path("dotnet/native/Cargo.lock"), "pdf-inspector"),
+    ("FFI lock: binding", Path("dotnet/native/Cargo.lock"), "pdf-inspector-ffi"),
 )
+DOTNET_PROPS = Path("dotnet/Directory.Build.props")
+DOTNET_VERSION = re.compile(r"(<VersionPrefix>)([^<]+)(</VersionPrefix>)")
 SITE_WASM_VERSION = re.compile(
     r"(@firecrawl/pdf-inspector-wasm@)([^/\"]+)(/pdf_inspector_wasm\.js)"
 )
@@ -148,6 +153,14 @@ def _bun_versions(root: Path) -> dict[str, str]:
     return versions
 
 
+def _dotnet_version(root: Path) -> str:
+    text = (root / DOTNET_PROPS).read_text(encoding="utf-8")
+    match = DOTNET_VERSION.search(text)
+    if not match:
+        raise ValueError(f"No <VersionPrefix> found in {DOTNET_PROPS}")
+    return match.group(2)
+
+
 def _site_wasm_version(root: Path) -> str:
     text = (root / "site/index.html").read_text(encoding="utf-8")
     match = SITE_WASM_VERSION.search(text)
@@ -164,6 +177,7 @@ def package_versions(root: Path = ROOT) -> dict[str, str]:
     versions.update(_node_versions(root))
     versions.update(_bun_versions(root))
     versions["Website WASM module"] = _site_wasm_version(root)
+    versions[".NET package"] = _dotnet_version(root)
     versions.update(
         {
             label: _read_lock_version(root / relative, package)
@@ -220,6 +234,15 @@ def set_versions(version: str, root: Path = ROOT) -> None:
         if count != 1:
             raise ValueError(f"Missing Bun lock dependency: {dependency}")
     bun_path.write_text(bun_text, encoding="utf-8")
+
+    props_path = root / DOTNET_PROPS
+    props_text = props_path.read_text(encoding="utf-8")
+    props_text, count = DOTNET_VERSION.subn(
+        rf"\g<1>{version}\g<3>", props_text, count=1
+    )
+    if count != 1:
+        raise ValueError(f"No <VersionPrefix> found in {DOTNET_PROPS}")
+    props_path.write_text(props_text, encoding="utf-8")
 
     site_path = root / "site/index.html"
     site_text = site_path.read_text(encoding="utf-8")

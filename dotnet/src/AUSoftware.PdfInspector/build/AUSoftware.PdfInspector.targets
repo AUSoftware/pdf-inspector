@@ -1,0 +1,32 @@
+<Project>
+
+  <!--
+    .NET Framework projects do not resolve NuGet's runtimes/{rid}/native
+    assets, so copy the right shared library next to the built application.
+    Modern .NET (Core / 5+) resolves the assets itself and skips this.
+  -->
+  <Target Name="PdfInspectorCopyNativeAssets"
+          BeforeTargets="ResolveReferences"
+          Condition="'$(MSBuildRuntimeType)' != 'Core' Or '$(TargetFrameworkIdentifier)' == '.NETFramework'">
+
+    <PropertyGroup>
+      <PdfInspectorRid Condition="'$(PdfInspectorRid)' == '' And '$(PlatformTarget)' == 'x86'">win-x86</PdfInspectorRid>
+      <PdfInspectorRid Condition="'$(PdfInspectorRid)' == '' And '$(PlatformTarget)' == 'ARM64'">win-arm64</PdfInspectorRid>
+      <PdfInspectorRid Condition="'$(PdfInspectorRid)' == ''">win-x64</PdfInspectorRid>
+      <PdfInspectorNativeDir>$(MSBuildThisFileDirectory)../runtimes/$(PdfInspectorRid)/native/</PdfInspectorNativeDir>
+    </PropertyGroup>
+
+    <ItemGroup Condition="Exists('$(PdfInspectorNativeDir)')">
+      <Content Include="$(PdfInspectorNativeDir)*.dll">
+        <Link>%(Filename)%(Extension)</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <Visible>false</Visible>
+      </Content>
+    </ItemGroup>
+
+    <Warning Condition="!Exists('$(PdfInspectorNativeDir)')"
+             Code="PDFI001"
+             Text="PdfInspector: no native library for '$(PdfInspectorRid)' in this package. Set PdfInspectorRid to a runtime identifier the package ships, or deploy the native library alongside your application." />
+  </Target>
+
+</Project>
