@@ -51,6 +51,9 @@ jobs:
       - name: Check WASM formatting
         run: cargo fmt --manifest-path wasm/Cargo.toml -- --check
 
+      - name: Check FFI formatting
+        run: cargo fmt --manifest-path dotnet/native/Cargo.toml -- --check
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
@@ -70,6 +73,9 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy -- -D warnings
+
+      - name: Lint FFI bindings
+        run: cargo clippy --manifest-path dotnet/native/Cargo.toml --all-targets -- -D warnings
 
   build:
     name: Build
@@ -127,3 +133,43 @@ jobs:
 
       - name: Test WebAssembly package
         run: wasm-pack test --node --release wasm
+
+  dotnet:
+    name: .NET (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: |
+            dotnet/native -> target
+          key: dotnet
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Test the C ABI
+        run: cargo test --manifest-path dotnet/native/Cargo.toml
+
+      - name: Build native, managed, and run the .NET tests
+        if: runner.os != 'Windows'
+        run: ./build.sh --test
+        working-directory: dotnet
+
+      - name: Build native, managed, and run the .NET tests
+        if: runner.os == 'Windows'
+        run: ./build.ps1 -Test
+        shell: pwsh
+        working-directory: dotnet

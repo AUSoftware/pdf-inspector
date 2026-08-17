@@ -16,11 +16,20 @@ class VersionTests(unittest.TestCase):
         (self.root / "napi").mkdir()
         (self.root / "site").mkdir()
         (self.root / "wasm").mkdir()
+        (self.root / "dotnet").mkdir()
+        (self.root / "dotnet/native").mkdir()
 
         self._write_manifest("Cargo.toml", "package", "0.1.0")
         self._write_manifest("pyproject.toml", "project", "0.1.0")
         self._write_manifest("napi/Cargo.toml", "package", "0.1.0")
         self._write_manifest("wasm/Cargo.toml", "package", "0.1.0")
+        self._write_manifest("dotnet/native/Cargo.toml", "package", "0.1.0")
+        (self.root / "dotnet/Directory.Build.props").write_text(
+            "<Project>\n  <PropertyGroup>\n"
+            "    <VersionPrefix>0.1.0</VersionPrefix>\n"
+            "  </PropertyGroup>\n</Project>\n",
+            encoding="utf-8",
+        )
 
         package = {
             "name": "@firecrawl/pdf-inspector",
@@ -50,6 +59,9 @@ class VersionTests(unittest.TestCase):
         )
         self._write_lock(
             "wasm/Cargo.lock", ("pdf-inspector", "pdf-inspector-wasm")
+        )
+        self._write_lock(
+            "dotnet/native/Cargo.lock", ("pdf-inspector", "pdf-inspector-ffi")
         )
 
     def tearDown(self):

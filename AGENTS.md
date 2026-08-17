@@ -64,6 +64,30 @@ src/
 - **Regression suite**: sibling repo `pdf-evals` with ~200 snapshot PDFs. Run `cargo build --release` then `bench.py test` in that repo before committing. While iterating, prefer a subset run (`bench.py test -q` for the quick set, or `-s <name>` for a named test set) and save the full `bench.py test` for the final pre-commit check.
 - **Semantic quality**: run `bench.py score` in `pdf-evals` for the semantic verdict (TEDS + MHS + reading order + char/word + list preservation, composited). Character-level diff alone misclassifies structural improvements (e.g., column-detection rewrites) as regressions — `score` is the tie-breaker. See `pdf-evals/CLAUDE.md` "Semantic scoring".
 
+## .NET binding
+
+`dotnet/` holds a C ABI crate (`dotnet/native`, crate `pdf-inspector-ffi`) and
+the managed package (`dotnet/src/PdfInspector`, NuGet id `PdfInspector`). The
+ABI is JSON-over-C: each entry point takes UTF-8 arguments plus an optional
+options JSON string and returns a `{"ok":…,"data"|"error":…}` envelope that
+the caller frees with `pdfi_free_string`. Panics are caught at the boundary
+and reported as `{"kind":"panic"}`.
+
+```bash
+cd dotnet && ./build.sh --test      # native + managed build and tests
+cargo test  --manifest-path dotnet/native/Cargo.toml   # C ABI tests
+cargo clippy --manifest-path dotnet/native/Cargo.toml --all-targets -- -D warnings
+```
+
+- Adding a native entry point means updating `dotnet/native/src/lib.rs`,
+  the DTOs, `NativeMethods.cs`, and `Pdf.cs` together.
+- The Rust option DTOs use `deny_unknown_fields`, so a renamed C# property
+  becomes a runtime `invalid_options` error — `SerializationTests` pins the
+  wire format to catch it at build time instead.
+- `dotnet/native` is a standalone crate with its own `Cargo.lock`, like
+  `napi/` and `wasm/`. `scripts/version.py` keeps its version in sync with
+  the core crate and with `dotnet/Directory.Build.props`.
+
 ## Debugging
 
 ```bash

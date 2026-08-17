@@ -1,0 +1,29 @@
+[package]
+name = "pdf-inspector-ffi"
+version = "1.14.2"
+edition = "2021"
+authors = ["Firecrawl Team"]
+description = "C ABI shared library for pdf-inspector, consumed by the .NET binding"
+license = "MIT"
+repository = "https://github.com/firecrawl/pdf-inspector"
+readme = "../README.md"
+publish = false
+
+# `cdylib` is what .NET P/Invokes into; `rlib` lets the crate's own tests
+# exercise the exported functions in-process.
+[lib]
+name = "pdf_inspector_ffi"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pdf-inspector = { path = "../.." }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3.3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "debuginfo"

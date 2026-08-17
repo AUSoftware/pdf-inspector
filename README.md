@@ -5,7 +5,7 @@
 [![PyPI](https://img.shields.io/pypi/v/pdf-inspector.svg)](https://pypi.org/project/pdf-inspector/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Fast Rust library for PDF classification and text extraction. Detects whether a PDF is text-based or scanned, extracts text with position awareness, and converts to clean Markdown — all without OCR. Includes bindings for [Python](docs/python.md), [Node.js](napi/README.md), and [browser WebAssembly](wasm/README.md).
+Fast Rust library for PDF classification and text extraction. Detects whether a PDF is text-based or scanned, extracts text with position awareness, and converts to clean Markdown — all without OCR. Includes bindings for [Python](docs/python.md), [Node.js](napi/README.md), [.NET](dotnet/README.md), and [browser WebAssembly](wasm/README.md).
 
 Built by [Firecrawl](https://firecrawl.dev) to handle text-based PDFs locally in under 200ms, skipping expensive OCR services for the ~54% of PDFs that don't need them.
 
@@ -77,6 +77,22 @@ console.log(result.markdown);  // Markdown string or null
 ```
 
 > Full API reference: [napi/README.md](napi/README.md)
+
+### .NET
+
+```bash
+dotnet add package PdfInspector
+```
+
+```csharp
+using PdfInspector;
+
+PdfResult result = Pdf.Process("document.pdf");
+Console.WriteLine(result.PdfType);   // TextBased, Scanned, ImageBased, Mixed
+Console.WriteLine(result.Markdown);  // Markdown string or null
+```
+
+> Full API reference: [dotnet/README.md](dotnet/README.md)
 
 ### Browser WebAssembly
 
@@ -210,6 +226,7 @@ src/
   bin/                  — CLI tools (pdf2md, detect_pdf)
 napi/                   — Node.js/Bun bindings (napi-rs)
 wasm/                   — Browser bindings (wasm-bindgen)
+dotnet/                 — .NET bindings (C ABI shared library + NuGet package)
 ```
 
 ## How classification works

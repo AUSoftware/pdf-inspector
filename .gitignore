@@ -2,12 +2,14 @@
 /target/
 /wasm/target/
 /wasm/pkg/
+/dotnet/native/target/
 debug/
 *.pdb
 
 # Cargo lock (optional for libraries)
 Cargo.lock
 !/wasm/Cargo.lock
+!/dotnet/native/Cargo.lock
 
 # IDE
 .idea/
@@ -42,3 +44,10 @@ test_output/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# .NET
+bin/
+obj/
+/dotnet/runtimes/
+/dotnet/artifacts/
+*.user

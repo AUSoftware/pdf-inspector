@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- netstandard2.0 keeps .NET Framework 4.6.2+ and Mono/Unity working;
+         net8.0 gets in-box System.Text.Json and the DllImport resolver. -->
+    <TargetFrameworks>netstandard2.0;net8.0</TargetFrameworks>
+    <AssemblyName>PdfInspector</AssemblyName>
+    <RootNamespace>PdfInspector</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+
+    <PackageId>PdfInspector</PackageId>
+    <Title>pdf-inspector</Title>
+    <Description>Fast PDF text extraction to structured Markdown, with scanned-vs-text detection, table and column analysis. .NET binding over the native pdf-inspector library.</Description>
+    <PackageTags>pdf;markdown;text-extraction;ocr;tables;document-ai</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IncludeBuildOutput>true</IncludeBuildOutput>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="PdfInspector.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <None Include="../../../LICENSE" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <!-- .NET Framework consumers resolve native assets through this targets
+       file rather than the runtime's RID graph. -->
+  <ItemGroup>
+    <None Include="build/PdfInspector.targets" Pack="true" PackagePath="build/" />
+  </ItemGroup>
+
+  <!-- Native shared libraries, staged per RID by dotnet/build.sh. Whatever
+       has been built at pack time is included; nothing is required at
+       compile time. -->
+  <ItemGroup Condition="'$(NativeAssetsDir)' != '' And Exists('$(NativeAssetsDir)')">
+    <None Include="$(NativeAssetsDir)/**/*" Pack="true" PackagePath="runtimes/" Visible="false" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <PackageReference Include="System.Memory" Version="4.5.5" />
+  </ItemGroup>
+
+</Project>
