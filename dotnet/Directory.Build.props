@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <!-- Kept in lockstep with Cargo.toml / package.json / pyproject.toml. -->
-    <VersionPrefix>1.14.2</VersionPrefix>
+    <VersionPrefix>1.15.0</VersionPrefix>
 
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>

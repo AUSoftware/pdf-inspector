@@ -1,6 +1,6 @@
 [package]
 name = "pdf-inspector-ffi"
-version = "1.14.2"
+version = "1.15.0"
 edition = "2021"
 authors = ["Firecrawl Team"]
 description = "C ABI shared library for pdf-inspector, consumed by the .NET binding"

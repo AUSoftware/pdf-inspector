@@ -32,7 +32,9 @@ jobs:
         include:
           - { os: ubuntu-latest, rid: linux-x64 }
           - { os: ubuntu-24.04-arm, rid: linux-arm64 }
-          - { os: macos-13, rid: osx-x64 }
+          # macos-13 was retired by GitHub; macos-15-intel is the remaining
+          # Intel runner label (available through 2027).
+          - { os: macos-15-intel, rid: osx-x64 }
           - { os: macos-latest, rid: osx-arm64 }
           - { os: windows-latest, rid: win-x64 }
     steps:
