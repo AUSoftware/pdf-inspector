@@ -1005,6 +1005,10 @@ pub(crate) fn merge_text_items(items: Vec<TextItem>) -> Vec<TextItem> {
         let preserve_stream_order = !rtl && should_preserve_overlapping_stream_order(&group);
         if rtl {
             group.sort_by(|a, b| b.x.total_cmp(&a.x));
+            // Embedded LTR phrases must recover screen order before merging
+            // bakes the concatenation in — later sort_line_items passes can
+            // no longer separate a merged item.
+            crate::text_utils::restore_embedded_ltr_runs(&mut group, |i| i.text.as_str());
         } else if !preserve_stream_order {
             group.sort_by(|a, b| a.x.total_cmp(&b.x));
         }
@@ -2847,6 +2851,31 @@ mod tests {
         assert!(!is_rtl_text(["Hello world"].iter()));
         // Empty → not RTL
         assert!(!is_rtl_text(std::iter::empty::<&str>()));
+    }
+
+    #[test]
+    fn test_is_rtl_text_weak_chars_do_not_vote() {
+        // Arabic-Indic digits (U+0660-0669) are bidi class AN, not strong RTL:
+        // a digits-only line must stay neutral, like ASCII-digit lines.
+        assert!(!is_rtl_text(["\u{0661}\u{0662}\u{0663}"].iter()));
+        // Extended Arabic-Indic digits (U+06F0-06F9) likewise
+        assert!(!is_rtl_text(["\u{06F1}\u{06F2}\u{06F3}"].iter()));
+        // Arabic decimal/thousands separators (U+066B/U+066C) with digits
+        assert!(!is_rtl_text(
+            ["\u{0661}\u{066B}\u{0662}\u{0663}\u{066C}\u{0664}"].iter()
+        ));
+        // Arabic letters alongside Arabic-Indic digits → still RTL
+        assert!(is_rtl_text(
+            ["\u{0645}\u{0631}\u{062D}\u{0628}\u{0627} \u{0661}\u{0662}"].iter()
+        ));
+        // Arabic letters with combining marks (NSM) → still RTL
+        assert!(is_rtl_text(["\u{0645}\u{064E}\u{0631}\u{064D}"].iter()));
+        // Combining marks alone are NSM, not strong RTL, even though they are
+        // Other_Alphabetic: harakat-only and niqqud-only lines stay neutral
+        assert!(!is_rtl_text(["\u{064E}\u{064F}\u{0650}\u{0651}"].iter()));
+        assert!(!is_rtl_text(["\u{05B8}\u{05B4}\u{05BC}"].iter()));
+        // Marks + Arabic-Indic digits (the full weak-only mix) → still neutral
+        assert!(!is_rtl_text(["\u{0661}\u{064E}\u{0662}"].iter()));
     }
 
     #[test]

@@ -1233,7 +1233,7 @@ fn test_not_a_pdf_extract_text_mem() {
 /// This catches regressions where code changes silently alter extraction
 /// or markdown output. If a change is intentional, update the snapshot:
 ///   cargo run --release --bin pdf2md -- tests/fixtures/<name>.pdf > tests/snapshots/<name>.md
-fn assert_snapshot(fixture: &str) {
+fn assert_snapshot(fixture: &str) -> String {
     let fixture_path = format!("tests/fixtures/{}.pdf", fixture);
     let snapshot_path = format!("tests/snapshots/{}.md", fixture);
 
@@ -1278,6 +1278,8 @@ fn assert_snapshot(fixture: &str) {
             snapshot_path,
         );
     }
+
+    actual.to_string()
 }
 
 #[test]
@@ -1308,6 +1310,34 @@ fn test_snapshot_real_estate_pricing() {
 #[test]
 fn test_snapshot_2013_app2() {
     assert_snapshot("2013-app2");
+}
+
+/// Base-Hebrew text stored in visual (screen left-to-right) order: each show
+/// op's characters are reversed relative to reading order and ops paint
+/// left-to-right across the line. Extraction must reverse each run back to
+/// logical order.
+#[test]
+fn test_snapshot_hebrew_visual_order() {
+    // The contains checks restate the intent independently of the snapshot
+    // file, so a bad snapshot refresh can't silently bless reversed output.
+    let output = assert_snapshot("hebrew_visual_order");
+    assert!(
+        output.contains("שלום עולם") && output.contains("דוח על הסיכונים"),
+        "visual-order Hebrew must extract in logical order, got: {output}"
+    );
+}
+
+/// Base-Hebrew text stored in logical (reading) order: each show op holds one
+/// word in reading order and successive ops are positioned right-to-left
+/// (the OCR-text-layer convention). Extraction must NOT reverse these runs —
+/// a codepoint-only trigger would corrupt them.
+#[test]
+fn test_snapshot_hebrew_logical_order() {
+    let output = assert_snapshot("hebrew_logical_order");
+    assert!(
+        output.contains("שלום עולם") && output.contains("דוח על הסיכונים"),
+        "logical-order Hebrew must stay in logical order, got: {output}"
+    );
 }
 
 /// First two pages of Shannon's "A Mathematical Theory of Communication"
@@ -3493,6 +3523,28 @@ fn test_extract_pages_markdown_basic() {
     // Text-based PDF should produce non-empty markdown
     assert!(!result.pages[0].markdown.is_empty());
     assert!(!result.pages[0].needs_ocr);
+}
+
+#[test]
+fn test_extract_pages_markdown_keeps_line_based_tables() {
+    // The per-page path (used by every `--ocr auto` run) once passed an
+    // empty line slice to markdown conversion, silently dropping every
+    // table that only the line-based detector finds. This fixture's table
+    // is rule-anchored: it must survive the pages API exactly as it does
+    // the whole-document API.
+    let buf = std::fs::read("tests/fixtures/bits_pilani_feedback.pdf").unwrap();
+    let result = extract_pages_markdown_mem(&buf, None).unwrap();
+
+    let all_markdown: String = result
+        .pages
+        .iter()
+        .map(|p| p.markdown.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        all_markdown.contains("|BIO|"),
+        "line-based table rows missing from pages API output"
+    );
 }
 
 #[test]
