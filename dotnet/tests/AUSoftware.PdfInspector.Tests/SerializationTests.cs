@@ -148,6 +148,33 @@ public class SerializationTests
     }
 
     [Fact]
+    public void TextItemRunMetadata_DeserialisesFromItsSnakeCaseNames()
+    {
+        // The native side names these fields; the snake_case naming policy is
+        // the only thing binding them to the properties, so pin them here.
+        const string json = """
+        {"ok":true,"data":[{
+          "text":"x","x":1,"y":2,"width":3,"height":4,
+          "rotation":90,"advance_known":false,
+          "font":"ABCDEF+CMMI10","font_tag":"F2","font_size":10,
+          "page":1,"is_bold":false,"is_italic":false,
+          "is_underline":false,"is_strikeout":false,
+          "baseline_shift":-2.5,"item_type":"text","mcid":null
+        }]}
+        """;
+
+        Envelope<IReadOnlyList<TextItem>>? envelope =
+            JsonSerializer.Deserialize(json, PdfJsonContext.Default.TextItemsEnvelope);
+
+        TextItem item = Assert.Single(envelope!.Data!);
+        Assert.Equal(90.0, item.Rotation);
+        Assert.False(item.AdvanceKnown);
+        Assert.Equal("ABCDEF+CMMI10", item.Font);
+        Assert.Equal("F2", item.FontTag);
+        Assert.Equal(-2.5, item.BaselineShift);
+    }
+
+    [Fact]
     public void BoundingBox_HasValueSemantics()
     {
         Assert.Equal(new BoundingBox(1, 2, 3, 4), new BoundingBox(1, 2, 3, 4));

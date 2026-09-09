@@ -221,6 +221,20 @@ fn positions_carry_geometry_and_font_metadata() {
     assert_eq!(first["item_type"], "text");
     // `url` is only present on link items.
     assert!(first.get("url").is_none());
+
+    // Run-level metadata added in 1.16.0-1.18.0. `font` is the /BaseFont
+    // family name; `font_tag` is the resource tag it used to carry.
+    assert!(first["font"].is_string());
+    assert!(first["font_tag"].is_string());
+    assert!(first["advance_known"].is_boolean());
+    let rotation = first["rotation"].as_f64().unwrap();
+    assert!(
+        (0.0..360.0).contains(&rotation),
+        "rotation normalised to [0, 360): {rotation}"
+    );
+    // Body text on this fixture is upright and sits on its own baseline.
+    assert_eq!(rotation, 0.0);
+    assert_eq!(first["baseline_shift"].as_f64().unwrap(), 0.0);
 }
 
 #[test]
