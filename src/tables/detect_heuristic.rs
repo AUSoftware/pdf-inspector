@@ -3,10 +3,11 @@
 use crate::types::TextItem;
 use log::debug;
 
+use super::cell_text::join_cell_items;
 use super::financial::try_split_financial_item;
 use super::grid::{
     find_column_boundaries, find_column_index, find_row_boundaries, find_row_index,
-    join_cell_items, recover_header_row,
+    recover_header_row,
 };
 use super::{Table, TableDetectionMode};
 
@@ -30,7 +31,10 @@ fn merge_adjacent_items_preserving(
         return (vec![], vec![]);
     }
 
-    // Group items by Y position (5pt tolerance for same line)
+    // Group items by Y position (5pt tolerance for same line). Raw glyph
+    // baselines on purpose: see the note in `detect_lines::collect_anchored_rows`
+    // — clustering detection rows on `line_y()` changed which table hypotheses
+    // win on the eval corpus, so only cell assignment/rendering is script-aware.
     let y_tolerance = 5.0;
     let mut line_groups: Vec<(f32, Vec<(usize, &TextItem)>)> = Vec::new();
 
@@ -66,6 +70,7 @@ fn merge_adjacent_items_preserving(
             let (first_idx, first_item) = group[i];
             let mut text = first_item.text.clone();
             let mut end_x = first_item.x + first_item.width;
+            let mut box_right = first_item.x + first_item.width;
             let mut indices = vec![first_idx];
             let x_gap_max = first_item.font_size * 0.5;
 
@@ -76,6 +81,16 @@ fn merge_adjacent_items_preserving(
                 // Must be similar font size (within 20%)
                 if (next_item.font_size - first_item.font_size).abs() > first_item.font_size * 0.20
                 {
+                    break;
+                }
+
+                // Merging walks +x in reading order: a rotated table header
+                // (or an upside-down run) never joins a neighbouring cell,
+                // matching `merge_text_items`.
+                if !first_item.is_upright() || !next_item.is_upright() {
+                    break;
+                }
+                if first_item.advance_known != next_item.advance_known {
                     break;
                 }
 
@@ -113,6 +128,7 @@ fn merge_adjacent_items_preserving(
                 }
                 text.push_str(&next_item.text);
                 end_x = next_item.x + next_item.width;
+                box_right = box_right.max(next_item.x + next_item.width);
                 indices.push(next_idx);
                 j += 1;
             }
@@ -121,7 +137,11 @@ fn merge_adjacent_items_preserving(
                 text,
                 x: first_item.x,
                 y: first_item.y,
-                width: end_x - first_item.x,
+                width: if first_item.advance_known {
+                    end_x - first_item.x
+                } else {
+                    box_right - first_item.x
+                },
                 height: first_item.height,
                 font: first_item.font.clone(),
                 font_tag: first_item.font_tag.clone(),
@@ -131,8 +151,21 @@ fn merge_adjacent_items_preserving(
                 is_italic: first_item.is_italic,
                 is_underline: first_item.is_underline,
                 is_strikeout: first_item.is_strikeout,
+                rotation: first_item.rotation,
+                advance_known: first_item.advance_known,
                 item_type: first_item.item_type.clone(),
                 mcid: first_item.mcid,
+                // A consolidated run keeps its script flag only when every
+                // fragment carried the same one; a run spliced from a script
+                // and body text is neither.
+                baseline_shift: if indices
+                    .iter()
+                    .all(|index| items[*index].baseline_shift == first_item.baseline_shift)
+                {
+                    first_item.baseline_shift
+                } else {
+                    0.0
+                },
             });
             index_map.push(indices);
 
@@ -1000,7 +1033,10 @@ fn detect_table_in_region(
 
     for (idx, item) in items {
         let col = find_column_index(&columns, item.x);
-        let row = find_row_index(&rows, item.y);
+        let row = find_row_index(&rows, item.line_y());
+        if super::crosses_other_rows(item, &rows, row) {
+            continue;
+        }
 
         if let (Some(col), Some(row)) = (col, row) {
             cell_items[row][col].push(item);
@@ -1042,7 +1078,7 @@ fn detect_table_in_region(
                 crate::text_utils::sort_rtl_cell_items(
                     col_items,
                     |i| i.x,
-                    |i| i.y,
+                    |i| i.line_y(),
                     |i| i.text.as_str(),
                 );
             } else {
@@ -2208,11 +2244,11 @@ fn try_add_label_column(
 
     table.columns.insert(0, label_col_x);
     for (row_idx, row_labels) in label_items_per_row.iter().enumerate() {
-        let label_text = row_labels
-            .iter()
-            .map(|(_, item)| item.text.as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
+        let mut label_text = String::new();
+        let mut last = None;
+        for (_, item) in row_labels {
+            super::cell_text::push_cell_item(&mut label_text, &mut last, item, &item.text);
+        }
         table.cells[row_idx].insert(0, label_text);
         for (idx, _) in row_labels {
             table.item_indices.push(*idx);
@@ -2238,8 +2274,11 @@ mod tests {
             is_italic: false,
             is_underline: false,
             is_strikeout: false,
+            rotation: 0.0,
+            advance_known: true,
             item_type: ItemType::Text,
             mcid: None,
+            baseline_shift: 0.0,
         }
     }
 
@@ -2381,8 +2420,11 @@ mod tests {
             is_italic: false,
             is_underline: false,
             is_strikeout: strikeout,
+            rotation: 0.0,
+            advance_known: true,
             item_type: ItemType::Text,
             mcid: None,
+            baseline_shift: 0.0,
         }
     }
 

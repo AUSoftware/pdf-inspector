@@ -2,7 +2,9 @@
 
 use crate::glyph_names::glyph_to_char;
 use crate::tounicode::FontCMaps;
-use crate::types::{FontEncodingMap, FontWidthInfo, PageFontEncodings, PageFontWidths};
+use crate::types::{
+    FontEncoding, FontEncodingMap, FontWidthInfo, PageFontEncodings, PageFontWidths,
+};
 use log::debug;
 use lopdf::{Document, Encoding, Object, ObjectId};
 use std::collections::HashMap;
@@ -223,6 +225,46 @@ pub(crate) fn build_type3_scales(
         }
     }
     scales
+}
+
+/// Resource names of Type3 fonts whose `FontMatrix` mirrors the y axis
+/// (`d < 0`). dvips/PK bitmap fonts declare `[1 0 0 -1 0 0]` and pair it with
+/// a y-flipped text matrix so the glyphs render upright; the run geometry
+/// must undo the flip when deciding which side of the baseline the glyph box
+/// lies on (see `geometry::run_geometry`).
+pub(crate) fn build_type3_y_flips(
+    doc: &Document,
+    fonts: &std::collections::BTreeMap<Vec<u8>, &lopdf::Dictionary>,
+) -> std::collections::HashSet<String> {
+    let mut flipped = std::collections::HashSet::new();
+    for (font_name, font_dict) in fonts {
+        let is_type3 = font_dict
+            .get(b"Subtype")
+            .ok()
+            .and_then(|o| o.as_name().ok())
+            .is_some_and(|n| n == b"Type3");
+        if !is_type3 {
+            continue;
+        }
+        let Some(matrix) = font_dict
+            .get(b"FontMatrix")
+            .ok()
+            .and_then(|o| resolve_array(doc, o))
+        else {
+            continue;
+        };
+        let Some(d) = matrix.get(3) else {
+            continue;
+        };
+        let d = match d {
+            Object::Reference(r) => doc.get_object(*r).ok().and_then(|o| o.as_float().ok()),
+            other => other.as_float().ok(),
+        };
+        if d.is_some_and(|d| d < 0.0) {
+            flipped.insert(String::from_utf8_lossy(font_name).to_string());
+        }
+    }
+    flipped
 }
 
 /// The name a `TextItem` carries for its font: the `/BaseFont` family name
@@ -732,12 +774,95 @@ pub(crate) fn build_font_encodings(
                 has_gid_fonts = true;
             }
             if !result.map.is_empty() {
-                encodings.insert(resource_name, result.map);
+                let identity_overrides =
+                    stale_identity_cmap_overrides(doc, font_dict, cmaps, &result);
+                encodings.insert(
+                    resource_name,
+                    FontEncoding {
+                        differences: result.map,
+                        identity_overrides,
+                    },
+                );
             }
         }
     }
 
     (encodings, has_gid_fonts)
+}
+
+/// Some subset producers change the simple font's glyph encoding but retain
+/// its original ToUnicode. Repair only corroborated ASCII identity entries:
+/// at least three distinct letters move to ASCII slots, their Unicode values remain
+/// elsewhere in the old CMap, and the embedded CFF contains those exact glyphs.
+/// Other repairs need the same evidence, allowing a single-character case
+/// counterpart in the old CMap once the exact matches establish staleness.
+/// Keep repairs per font, since different encodings can share one CMap stream.
+fn stale_identity_cmap_overrides(
+    doc: &Document,
+    font_dict: &lopdf::Dictionary,
+    cmaps: &FontCMaps,
+    encoding: &EncodingResult,
+) -> FontEncodingMap {
+    let verified = || -> Option<FontEncodingMap> {
+        if font_dict.get(b"Subtype").ok()?.as_name().ok()? != b"Type1" {
+            return None;
+        }
+        let cmap_ref = font_dict.get(b"ToUnicode").ok()?.as_reference().ok()?;
+        let entry = cmaps.get_by_obj(cmap_ref.0)?;
+        if entry.primary.code_byte_length != 1 || entry.remapped.is_some() {
+            return None;
+        }
+        let elsewhere: std::collections::HashSet<String> = (0..=255)
+            .filter_map(|code| entry.primary.lookup(code))
+            .collect();
+        let single_case_match =
+            |case: String| case.chars().count() == 1 && elsewhere.contains(&case);
+        let candidates: FontEncodingMap = encoding
+            .map
+            .iter()
+            .filter_map(|(&code, &ch)| {
+                (code.is_ascii_graphic()
+                    && !ch.is_ascii()
+                    && (ch.is_alphabetic() || ch == '\u{00a0}')
+                    && entry.primary.lookup(code as u16).as_deref()
+                        == Some(&(code as char).to_string())
+                    && (elsewhere.contains(&ch.to_string())
+                        || (ch.is_alphabetic()
+                            && (single_case_match(ch.to_lowercase().to_string())
+                                || single_case_match(ch.to_uppercase().to_string())))))
+                .then_some((code, ch))
+            })
+            .collect();
+        let exact_anchor_count = |map: &FontEncodingMap| {
+            map.values()
+                .copied()
+                .filter(|ch| ch.is_alphabetic() && elsewhere.contains(&ch.to_string()))
+                .collect::<std::collections::HashSet<char>>()
+                .len()
+        };
+        if exact_anchor_count(&candidates) < 3 {
+            return None;
+        }
+        let descriptor = resolve_dict(doc, font_dict.get(b"FontDescriptor").ok()?)?;
+        let font_ref = descriptor.get(b"FontFile3").ok()?.as_reference().ok()?;
+        let stream = doc.get_object(font_ref).ok()?.as_stream().ok()?;
+        if stream.dict.get(b"Subtype").ok()?.as_name().ok()? != b"Type1C" {
+            return None;
+        }
+        let data = font_file_data(doc, font_ref)?;
+        let cff = ttf_parser::cff::Table::parse(&data)?;
+        let overrides: FontEncodingMap = candidates
+            .into_iter()
+            .filter(|(code, _)| {
+                encoding
+                    .glyph_names
+                    .get(code)
+                    .is_some_and(|name| cff.glyph_index_by_name(name).is_some())
+            })
+            .collect();
+        (exact_anchor_count(&overrides) >= 3).then_some(overrides)
+    };
+    verified().unwrap_or_default()
 }
 
 /// True when the font's ToUnicode CMap maps the gid-named character codes,
@@ -806,6 +931,7 @@ pub(crate) fn parse_font_encoding(
 /// Result of parsing an encoding dictionary's Differences array.
 pub(crate) struct EncodingResult {
     pub map: FontEncodingMap,
+    glyph_names: HashMap<u8, String>,
     /// Character codes whose glyph names match the `gidNNNNN` pattern (raw
     /// glyph IDs). These reference the original font's glyph table and are
     /// only decodable when the font's ToUnicode CMap maps the code.
@@ -833,6 +959,7 @@ pub(crate) fn parse_encoding_dictionary(
     };
 
     let mut encoding_map = FontEncodingMap::new();
+    let mut glyph_names = HashMap::new();
     let mut current_code: u8 = 0;
     let mut ligature_count = 0u32;
     let mut gid_codes: Vec<u8> = Vec::new();
@@ -865,6 +992,7 @@ pub(crate) fn parse_encoding_dictionary(
                 }
                 if let Some(ch) = mapped_char {
                     encoding_map.insert(current_code, ch);
+                    glyph_names.insert(current_code, glyph_name);
                 } else {
                     debug!(
                         "  Differences: code=0x{:02X} glyph={:?} (unmapped)",
@@ -894,6 +1022,7 @@ pub(crate) fn parse_encoding_dictionary(
 
     Some(EncodingResult {
         map: encoding_map,
+        glyph_names,
         gid_codes,
     })
 }
@@ -1070,9 +1199,19 @@ fn embedded_style_flags(doc: &Document, ff_ref: ObjectId) -> (bool, bool) {
         return (false, false);
     };
     if let Ok(face) = ttf_parser::Face::parse(&data, 0) {
+        // PDF subsetters can remove OS/2 while retaining the bold bit in
+        // head.macStyle. Face::is_bold only reads OS/2; use the legacy flag
+        // when that table is unavailable, without overriding an explicit
+        // regular OS/2 face. The parsed face has already validated head.
+        let mac_bold = face.tables().os2.is_none()
+            && face
+                .raw_face()
+                .table(ttf_parser::Tag::from_bytes(b"head"))
+                .and_then(|head| head.get(44..46))
+                .is_some_and(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]) & 1 != 0);
         (
             face.is_italic() || face.italic_angle().abs() >= 4.0,
-            face.is_bold(),
+            face.is_bold() || mac_bold,
         )
     } else if let Some(name) = cff_font_name(&data) {
         // FontFile3 is bare CFF (no sfnt container) — ttf_parser
@@ -1185,6 +1324,13 @@ pub(crate) fn extract_text_from_operand(
                             // 1. Primary CMap
                             if let Some(s) = entry.primary.lookup(code) {
                                 if !s.contains('\u{FFFD}') {
+                                    if s == (b as char).to_string() {
+                                        if let Some(&ch) = encoding_map
+                                            .and_then(|map| map.identity_overrides.get(&b))
+                                        {
+                                            return Some(ch.to_string());
+                                        }
+                                    }
                                     return Some(s);
                                 }
                             }
@@ -1196,7 +1342,7 @@ pub(crate) fn extract_text_from_operand(
                             }
                             // 3. Differences mapped it? Use Differences result
                             if let Some(map) = encoding_map {
-                                if let Some(&ch) = map.get(&b) {
+                                if let Some(&ch) = map.differences.get(&b) {
                                     return Some(ch.to_string());
                                 }
                             }
@@ -1319,6 +1465,7 @@ pub(crate) fn extract_text_from_operand(
             // WinAnsiEncoding). We must combine Differences entries with the base encoding
             // rather than using filter_map which silently drops unmapped bytes.
             if let Some(encoding_map) = font_encodings.get(current_font) {
+                let encoding_map = &encoding_map.differences;
                 let has_diff_match = bytes.iter().any(|b| encoding_map.contains_key(b));
                 if has_diff_match {
                     let decoded: String = bytes
@@ -1898,6 +2045,77 @@ mod tests {
         );
     }
 
+    /// Synthetic sfnt containing just the tables needed to parse a face.
+    /// No source-document font bytes are needed for these style tests.
+    fn sfnt_with_style(mac_style: u16, os2_selection: Option<u16>) -> Vec<u8> {
+        let mut head = vec![0u8; 54];
+        head[18..20].copy_from_slice(&1000u16.to_be_bytes()); // unitsPerEm
+        head[44..46].copy_from_slice(&mac_style.to_be_bytes());
+        let hhea = vec![0u8; 36];
+        let mut maxp = vec![0u8; 6];
+        maxp[..4].copy_from_slice(&0x00005000u32.to_be_bytes());
+        maxp[4..6].copy_from_slice(&1u16.to_be_bytes()); // numGlyphs
+        let mut tables = vec![(*b"head", head), (*b"hhea", hhea), (*b"maxp", maxp)];
+        if let Some(selection) = os2_selection {
+            let mut os2 = vec![0u8; 78]; // version 0
+            os2[62..64].copy_from_slice(&selection.to_be_bytes());
+            tables.push((*b"OS/2", os2));
+        }
+        tables.sort_by_key(|(tag, _)| *tag);
+        let count = tables.len();
+        let mut data = vec![0u8; 12 + count * 16];
+        data[..4].copy_from_slice(&0x00010000u32.to_be_bytes());
+        data[4..6].copy_from_slice(&(count as u16).to_be_bytes());
+        for (i, (tag, table)) in tables.into_iter().enumerate() {
+            let offset = data.len() as u32;
+            let record = 12 + i * 16;
+            data[record..record + 4].copy_from_slice(&tag);
+            data[record + 8..record + 12].copy_from_slice(&offset.to_be_bytes());
+            data[record + 12..record + 16].copy_from_slice(&(table.len() as u32).to_be_bytes());
+            data.extend_from_slice(&table);
+            while !data.len().is_multiple_of(4) {
+                data.push(0);
+            }
+        }
+        data
+    }
+
+    fn descriptor_flags_from_sfnt(mac_style: u16, os2_selection: Option<u16>) -> (bool, bool) {
+        let mut doc = Document::with_version("1.4");
+        let font_file = doc.add_object(lopdf::Stream::new(
+            dictionary! {},
+            sfnt_with_style(mac_style, os2_selection),
+        ));
+        let descriptor = doc.add_object(dictionary! {
+            "Type" => "FontDescriptor",
+            "FontName" => "ABCDEF+OpaqueFace",
+            "Flags" => 4,
+            "ItalicAngle" => 0,
+            "FontFile2" => font_file,
+        });
+        let font_dict = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "TrueType",
+            "BaseFont" => "ABCDEF+OpaqueFace",
+            "FontDescriptor" => descriptor,
+        };
+        descriptor_style_flags(&doc, &font_dict, &mut FontStyleCache::new())
+    }
+
+    #[test]
+    fn embedded_mac_bold_without_os2_survives_opaque_subset_names() {
+        assert_eq!(descriptor_flags_from_sfnt(1, None), (false, true));
+        assert_eq!(descriptor_flags_from_sfnt(0, None), (false, false));
+        // Italic and other macStyle bits must not imply bold.
+        assert_eq!(descriptor_flags_from_sfnt(2, None), (false, false));
+    }
+
+    #[test]
+    fn embedded_os2_bold_remains_authoritative() {
+        assert_eq!(descriptor_flags_from_sfnt(0, Some(1 << 5)), (false, true));
+        assert_eq!(descriptor_flags_from_sfnt(1, Some(1 << 6)), (false, false));
+    }
+
     #[test]
     fn type0_descendant_descriptor_is_resolved() {
         let mut doc = Document::with_version("1.4");
@@ -2440,3 +2658,7 @@ end",
         assert_eq!(widths.get(&65535), Some(&500));
     }
 }
+
+#[cfg(test)]
+#[path = "stale_cmap_tests.rs"]
+mod stale_cmap_tests;
