@@ -142,6 +142,38 @@ method's XML documentation states which it uses:
 | `TextItem.Page`, `StructureElement.Page` | 1-indexed |
 | `PageMarkdown.Page`, `PageRegions.Page` | 0-indexed |
 
+### Run metadata
+
+`TextItem` carries more than geometry. `Rotation` is the baseline's angle in
+degrees counter-clockwise from the page's x axis (`0` upright, `90` reading
+bottom-to-top, `270` top-to-bottom, `180` upside-down); `X`/`Y`/`Width`/
+`Height` stay the run's axis-aligned box, so a vertical run is tall and thin
+rather than zero-width. `BaselineShift` is the signed offset of a
+superscript (positive) or subscript (negative) run from the body baseline it
+hangs off, and is `0` for normal text:
+
+```csharp
+foreach (TextItem item in Pdf.ExtractTextWithPositions(path))
+{
+    string text =
+        item.BaselineShift > 0 ? $"<sup>{item.Text}</sup>" :
+        item.BaselineShift < 0 ? $"<sub>{item.Text}</sub>" :
+        item.Text;
+
+    Console.WriteLine($"{text} at {item.Rotation}°");
+}
+```
+
+`AdvanceKnown` is `false` when the font carries no width information — `Width`
+is then an estimate of half an em per glyph rather than a measurement, so
+treat it as unreliable for column or table geometry.
+
+**`Font` changed meaning in 1.16.0.** It is now the `/BaseFont` family name
+("ABCDEF+CMMI10"), which identifies the actual face; the raw resource tag it
+used to carry ("F2", "T22") moved to `FontTag`. Group by `Font` to find one
+face across a document, by `(Page, FontTag)` to separate font *programs* that
+share a family name.
+
 ### Tagged PDFs
 
 `StructureElement` joins onto `TextItem` by `(Page, Mcid)`, which is how you

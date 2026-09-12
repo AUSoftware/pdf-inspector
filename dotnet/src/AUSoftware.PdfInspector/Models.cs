@@ -127,8 +127,42 @@ public sealed class TextItem
     /// <summary>Height of the run, approximated from the font size.</summary>
     public double Height { get; init; }
 
-    /// <summary>Font name as recorded in the PDF.</summary>
+    /// <summary>
+    /// Rotation of the run's baseline in degrees counter-clockwise from the
+    /// page's x axis, normalised to <c>[0, 360)</c>: <c>0</c> for ordinary
+    /// horizontal text, <c>90</c> for text reading bottom-to-top (a rotated
+    /// margin stamp), <c>270</c> for top-to-bottom, <c>180</c> for
+    /// upside-down. The <see cref="X"/>, <see cref="Y"/>, <see cref="Width"/>
+    /// and <see cref="Height"/> values describe the run's axis-aligned box,
+    /// so a vertical run is tall and thin rather than zero-width.
+    /// </summary>
+    public double Rotation { get; init; }
+
+    /// <summary>
+    /// Whether the run's advance came from font metrics. It is
+    /// <see langword="false"/> when the font carries no width information:
+    /// <see cref="Width"/> is then an estimate of half an em per painted
+    /// glyph rather than a measurement.
+    /// </summary>
+    public bool AdvanceKnown { get; init; }
+
+    /// <summary>
+    /// The <c>/BaseFont</c> family name (<c>"ABCDEF+CMMI10"</c>), which
+    /// identifies the actual face. Before 1.16.0 this carried the resource
+    /// tag now exposed as <see cref="FontTag"/>.
+    /// </summary>
     public string Font { get; init; } = string.Empty;
+
+    /// <summary>
+    /// The raw font resource tag (<c>"F2"</c>, <c>"T22"</c>) the run's show
+    /// operator selected. Scoped to the enclosing page or Form XObject's
+    /// <c>/Resources</c>, so the same tag on another page may name a
+    /// different face; within one page it distinguishes font
+    /// <i>programs</i> that share a family name, which <see cref="Font"/>
+    /// cannot. Empty for items that do not come from a show operator
+    /// (images, links, form fields).
+    /// </summary>
+    public string FontTag { get; init; } = string.Empty;
 
     /// <summary>Font size in points.</summary>
     public double FontSize { get; init; }
@@ -147,6 +181,16 @@ public sealed class TextItem
 
     /// <summary>True when a rule crosses the glyphs of this run.</summary>
     public bool IsStrikeout { get; init; }
+
+    /// <summary>
+    /// Signed baseline offset, in points, of a superscript/subscript glyph
+    /// run from the baseline of the body text it is attached to; <c>0</c> for
+    /// normal text. Positive means raised (superscript: footnote and
+    /// affiliation markers, exponents), negative means lowered (subscript).
+    /// Digit-only markers beside a word are instead fused into that word as
+    /// Unicode super/subscript characters and carry <c>0</c>.
+    /// </summary>
+    public double BaselineShift { get; init; }
 
     /// <summary>What this item represents.</summary>
     public ItemType ItemType { get; init; }

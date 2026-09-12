@@ -111,7 +111,27 @@ pub struct TextItemDto {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+    /// Rotation of the run's baseline in degrees counter-clockwise from the
+    /// page's x axis, in `[0, 360)`: `0` for ordinary horizontal text, `90`
+    /// for text reading bottom-to-top (a rotated margin stamp), `270` for
+    /// top-to-bottom, `180` for upside-down. `x`/`y`/`width`/`height` is the
+    /// run's axis-aligned box, so a vertical run is tall and thin
+    /// (height > width) rather than zero-width.
+    pub rotation: f32,
+    /// Whether the run's advance came from font metrics. `false` when the
+    /// font carries no width information (or an ActualText span's advance
+    /// could not be recovered): the box's extent along the baseline is then
+    /// an estimate of half an em per painted glyph, not a measurement.
+    pub advance_known: bool,
+    /// `/BaseFont` family name ("ABCDEF+CMMI10"), identifying the face.
     pub font: String,
+    /// The raw font resource tag ("F2", "T22") the show operator selected —
+    /// what `font` carried before 1.16.0. Scoped to the enclosing page or
+    /// Form XObject's `/Resources`, so the same tag on another page may name
+    /// a different face; within one page it separates font *programs* that
+    /// share a family name. Empty for items with no show operator (images,
+    /// links, form fields).
+    pub font_tag: String,
     pub font_size: f32,
     /// 1-indexed page number.
     pub page: u32,
@@ -119,6 +139,12 @@ pub struct TextItemDto {
     pub is_italic: bool,
     pub is_underline: bool,
     pub is_strikeout: bool,
+    /// Signed baseline offset, in points, of a super/subscript glyph run from
+    /// the body baseline it is attached to; `0` for normal text. Positive =
+    /// raised (superscript: footnote markers, exponents), negative = lowered
+    /// (subscript). Digit-only markers beside a word are already fused into
+    /// it as Unicode super/subscript characters ("word2") and carry `0`.
+    pub baseline_shift: f32,
     pub item_type: &'static str,
     /// Present only for `item_type == "link"`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -141,13 +167,17 @@ impl From<TextItem> for TextItemDto {
             y: item.y,
             width: item.width,
             height: item.height,
+            rotation: item.rotation,
+            advance_known: item.advance_known,
             font: item.font,
+            font_tag: item.font_tag,
             font_size: item.font_size,
             page: item.page,
             is_bold: item.is_bold,
             is_italic: item.is_italic,
             is_underline: item.is_underline,
             is_strikeout: item.is_strikeout,
+            baseline_shift: item.baseline_shift,
             item_type,
             url,
             mcid: item.mcid,

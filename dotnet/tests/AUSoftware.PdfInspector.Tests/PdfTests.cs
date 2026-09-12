@@ -189,6 +189,18 @@ public class PdfTests
         Assert.Equal(1, first.Page);
         Assert.Equal(ItemType.Text, first.ItemType);
         Assert.Null(first.Url);
+
+        // Run-level metadata: `Font` is the /BaseFont family name, `FontTag`
+        // the resource tag that selected it.
+        Assert.False(string.IsNullOrEmpty(first.Font));
+        Assert.False(string.IsNullOrEmpty(first.FontTag));
+        Assert.True(first.AdvanceKnown);
+        Assert.InRange(first.Rotation, 0.0, 360.0);
+        Assert.All(items, item => Assert.InRange(item.Rotation, 0.0, 360.0));
+
+        // Body text on this fixture is upright and unshifted.
+        Assert.Equal(0.0, first.Rotation);
+        Assert.Equal(0.0, first.BaselineShift);
     }
 
     [Fact]
