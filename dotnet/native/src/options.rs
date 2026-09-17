@@ -254,6 +254,10 @@ impl OptionsDto {
     }
 }
 
+/// Bounding boxes requested per page, in the shape the core crate's region
+/// APIs take them: a 0-indexed page number and its `[x1, y1, x2, y2]` rects.
+pub type PageRegionPairs = Vec<(u32, Vec<[f32; 4]>)>;
+
 /// Regions requested for one page.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -274,7 +278,7 @@ pub struct RegionsRequest {
 
 impl RegionsRequest {
     /// The requested regions, and the options they are to be read with.
-    pub fn into_parts(self) -> (Vec<(u32, Vec<[f32; 4]>)>, PositionOptions) {
+    pub fn into_parts(self) -> (PageRegionPairs, PositionOptions) {
         let options = self.position.unwrap_or_default().to_position_options();
         let pairs = self
             .page_regions

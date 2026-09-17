@@ -337,6 +337,11 @@ public static unsafe class Pdf
     /// The regions to read, by <b>0-indexed</b> page. Coordinates are PDF
     /// points with a top-left origin.
     /// </param>
+    /// <param name="position">
+    /// The frame the region rectangles are read in, and whether bold is read
+    /// from the font's weight class. Defaults to
+    /// <see cref="PositionFrame.Sheet"/> with bold unchanged.
+    /// </param>
     /// <returns>
     /// One entry per requested page, each holding one result per requested
     /// region in the same order.
@@ -361,6 +366,9 @@ public static unsafe class Pdf
     /// <param name="pageRegions">
     /// The regions to read, by <b>0-indexed</b> page. Coordinates are PDF
     /// points with a top-left origin.
+    /// </param>
+    /// <param name="position">
+    /// See <see cref="ExtractTextInRegions(string, IEnumerable{PageRegions}, PositionOptions?)"/>.
     /// </param>
     /// <returns>
     /// See <see cref="ExtractTextInRegions(string, IEnumerable{PageRegions}, PositionOptions?)"/>.
