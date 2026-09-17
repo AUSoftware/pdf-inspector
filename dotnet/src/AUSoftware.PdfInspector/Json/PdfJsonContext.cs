@@ -28,6 +28,8 @@ internal sealed class ErrorPayload
 internal sealed class RegionsPayload
 {
     public IReadOnlyList<PageRegions> PageRegions { get; init; } = Array.Empty<PageRegions>();
+
+    public PositionOptions? Position { get; init; }
 }
 
 /// <summary>

@@ -376,7 +376,14 @@ pub unsafe extern "C" fn pdfi_extract_text_bytes(data: *const u8, len: usize) ->
 // ---------------------------------------------------------------------------
 
 /// Extract positioned text items from a PDF file. Honours `pages`
-/// (**1-indexed**) and `password`; other option fields are ignored.
+/// (**1-indexed**), `password` and `position`; other option fields are
+/// ignored.
+///
+/// `password` and `position` cannot be combined: the core crate reaches the
+/// frame and weight-bold handling only through its in-memory entry point,
+/// which does not decrypt. Asking for both reports `invalid_options` rather
+/// than silently dropping one — decrypt the document and pass its bytes to
+/// [`pdfi_extract_text_with_positions_bytes`] instead.
 ///
 /// # Safety
 /// See the module docs.
@@ -389,19 +396,36 @@ pub unsafe extern "C" fn pdfi_extract_text_with_positions_file(
     let options = parse_json::<OptionsDto>(options_json);
     respond(move || {
         let options = options?;
+        let path = path?;
         let pages = options.page_set();
-        let items = pdf_inspector::extract_text_with_positions_pages_with_password(
-            path?,
-            pages.as_ref(),
-            options.password.as_deref(),
-        )
-        .map_err(FfiError::from)?;
+        let items = if options.has_position_options() {
+            if options.password.is_some() {
+                return Err(FfiError::invalid_options(
+                    "`password` cannot be combined with `position`; decrypt the \
+                     document and pass its bytes instead",
+                ));
+            }
+            let buffer = std::fs::read(path).map_err(|e| FfiError::new(kind::IO, e.to_string()))?;
+            pdf_inspector::extract_text_with_positions_mem_with_options(
+                &buffer,
+                pages.as_ref(),
+                options.position_options(),
+            )
+            .map_err(FfiError::from)?
+        } else {
+            pdf_inspector::extract_text_with_positions_pages_with_password(
+                path,
+                pages.as_ref(),
+                options.password.as_deref(),
+            )
+            .map_err(FfiError::from)?
+        };
         Ok(items.into_iter().map(TextItemDto::from).collect::<Vec<_>>())
     })
 }
 
 /// Extract positioned text items from PDF bytes. Honours `pages`
-/// (**1-indexed**); other option fields are ignored.
+/// (**1-indexed**) and `position`; other option fields are ignored.
 ///
 /// # Safety
 /// See the module docs.
@@ -414,10 +438,12 @@ pub unsafe extern "C" fn pdfi_extract_text_with_positions_bytes(
     let buffer = required_bytes(data, len);
     let options = parse_json::<OptionsDto>(options_json);
     respond(move || {
-        let pages = options?.page_set();
-        let items = pdf_inspector::extractor::extract_text_with_positions_mem_pages(
+        let options = options?;
+        let pages = options.page_set();
+        let items = pdf_inspector::extract_text_with_positions_mem_with_options(
             buffer?,
             pages.as_ref(),
+            options.position_options(),
         )
         .map_err(FfiError::from)?;
         Ok(items.into_iter().map(TextItemDto::from).collect::<Vec<_>>())
@@ -529,6 +555,8 @@ pub unsafe extern "C" fn pdfi_extract_pages_markdown_bytes(
 ///
 /// `request_json` is `{"page_regions":[{"page":0,"regions":[[x1,y1,x2,y2]]}]}`
 /// with **0-indexed** pages and coordinates in PDF points, top-left origin.
+/// An optional `"position"` member picks the frame the rects are read in and
+/// whether bold is read from the weight class.
 ///
 /// # Safety
 /// See the module docs.
@@ -541,9 +569,10 @@ pub unsafe extern "C" fn pdfi_extract_text_in_regions_file(
     let request = parse_json::<RegionsRequest>(request_json);
     respond(move || {
         let buffer = std::fs::read(path?).map_err(|e| FfiError::new(kind::IO, e.to_string()))?;
-        let pairs = request?.into_pairs();
+        let (pairs, options) = request?.into_parts();
         let result =
-            pdf_inspector::extract_text_in_regions_mem(&buffer, &pairs).map_err(FfiError::from)?;
+            pdf_inspector::extract_text_in_regions_mem_with_options(&buffer, &pairs, options)
+                .map_err(FfiError::from)?;
         Ok(result
             .into_iter()
             .map(PageRegionsDto::from)
@@ -565,9 +594,70 @@ pub unsafe extern "C" fn pdfi_extract_text_in_regions_bytes(
     let buffer = required_bytes(data, len);
     let request = parse_json::<RegionsRequest>(request_json);
     respond(move || {
-        let pairs = request?.into_pairs();
+        let (pairs, options) = request?.into_parts();
         let result =
-            pdf_inspector::extract_text_in_regions_mem(buffer?, &pairs).map_err(FfiError::from)?;
+            pdf_inspector::extract_text_in_regions_mem_with_options(buffer?, &pairs, options)
+                .map_err(FfiError::from)?;
+        Ok(result
+            .into_iter()
+            .map(PageRegionsDto::from)
+            .collect::<Vec<_>>())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// extract_tables_in_regions — table structure inside bounding boxes
+// ---------------------------------------------------------------------------
+
+/// Extract tables inside bounding boxes from a PDF file.
+///
+/// Takes the same `request_json` as [`pdfi_extract_text_in_regions_file`] and
+/// returns the same shape, but runs table detection over the items in each
+/// region: where structure is found, `text` is a Markdown pipe-table and
+/// `needs_ocr` is false. Where none is found — too few items, poor alignment,
+/// GID fonts — `text` is empty and `needs_ocr` is true, so the caller can fall
+/// back to OCR for that region.
+///
+/// # Safety
+/// See the module docs.
+#[no_mangle]
+pub unsafe extern "C" fn pdfi_extract_tables_in_regions_file(
+    path: *const c_char,
+    request_json: *const c_char,
+) -> *mut c_char {
+    let path = required_str(path, "path");
+    let request = parse_json::<RegionsRequest>(request_json);
+    respond(move || {
+        let buffer = std::fs::read(path?).map_err(|e| FfiError::new(kind::IO, e.to_string()))?;
+        let (pairs, options) = request?.into_parts();
+        let result =
+            pdf_inspector::extract_tables_in_regions_mem_with_options(&buffer, &pairs, options)
+                .map_err(FfiError::from)?;
+        Ok(result
+            .into_iter()
+            .map(PageRegionsDto::from)
+            .collect::<Vec<_>>())
+    })
+}
+
+/// Extract tables inside bounding boxes from PDF bytes.
+/// See [`pdfi_extract_tables_in_regions_file`].
+///
+/// # Safety
+/// See the module docs.
+#[no_mangle]
+pub unsafe extern "C" fn pdfi_extract_tables_in_regions_bytes(
+    data: *const u8,
+    len: usize,
+    request_json: *const c_char,
+) -> *mut c_char {
+    let buffer = required_bytes(data, len);
+    let request = parse_json::<RegionsRequest>(request_json);
+    respond(move || {
+        let (pairs, options) = request?.into_parts();
+        let result =
+            pdf_inspector::extract_tables_in_regions_mem_with_options(buffer?, &pairs, options)
+                .map_err(FfiError::from)?;
         Ok(result
             .into_iter()
             .map(PageRegionsDto::from)

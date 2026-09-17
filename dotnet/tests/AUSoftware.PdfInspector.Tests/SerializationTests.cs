@@ -113,6 +113,50 @@ public class SerializationTests
         Assert.Equal("""{"page_regions":[{"page":0,"regions":[[1,2,3,4]]}]}""", json);
     }
 
+    [Fact]
+    public void Regions_CarryPositionOptionsWhenSupplied()
+    {
+        RegionsPayload payload = new RegionsPayload
+        {
+            PageRegions = new List<PageRegions>(),
+            Position = new PositionOptions
+            {
+                Frame = PositionFrame.Display,
+                BoldFromWeight = true,
+            },
+        };
+
+        string json = JsonSerializer.Serialize(payload, PdfJsonContext.Default.RegionsPayload);
+
+        Assert.Equal(
+            """{"page_regions":[],"position":{"frame":"display","bold_from_weight":true}}""",
+            json);
+    }
+
+    [Fact]
+    public void PositionOptions_OnlyEmitSetProperties()
+    {
+        Assert.Equal(
+            """{"position":{"frame":"sheet"}}""",
+            Serialize(new PdfOptions
+            {
+                Position = new PositionOptions { Frame = PositionFrame.Sheet },
+            }));
+
+        Assert.Equal(
+            """{"position":{"bold_from_weight":false}}""",
+            Serialize(new PdfOptions
+            {
+                Position = new PositionOptions { BoldFromWeight = false },
+            }));
+
+        // An empty PositionOptions still sends an empty object, which the
+        // native side reads as "all defaults".
+        Assert.Equal(
+            """{"position":{}}""",
+            Serialize(new PdfOptions { Position = new PositionOptions() }));
+    }
+
     [Theory]
     [InlineData("not_a_pdf", PdfErrorKind.NotAPdf)]
     [InlineData("invalid_argument", PdfErrorKind.InvalidArgument)]
@@ -157,6 +201,7 @@ public class SerializationTests
           "text":"x","x":1,"y":2,"width":3,"height":4,
           "rotation":90,"advance_known":false,
           "font":"ABCDEF+CMMI10","font_tag":"F2","font_size":10,
+          "font_weight":500,"legacy_symbol_rewrite":true,
           "page":1,"is_bold":false,"is_italic":false,
           "is_underline":false,"is_strikeout":false,
           "baseline_shift":-2.5,"item_type":"text","mcid":null
@@ -172,6 +217,50 @@ public class SerializationTests
         Assert.Equal("ABCDEF+CMMI10", item.Font);
         Assert.Equal("F2", item.FontTag);
         Assert.Equal(-2.5, item.BaselineShift);
+
+        // A medium face: a weight class is reported, and it does not by
+        // itself make the run bold.
+        Assert.Equal(500, item.FontWeight);
+        Assert.False(item.IsBold);
+        Assert.True(item.LegacySymbolRewrite);
+    }
+
+    [Fact]
+    public void TextItemFontWeight_IsNullWhenNoSourceStatesOne()
+    {
+        const string json = """
+        {"ok":true,"data":[{
+          "text":"x","x":1,"y":2,"width":3,"height":4,
+          "rotation":0,"advance_known":true,
+          "font":"Helvetica","font_tag":"F1","font_size":10,
+          "font_weight":null,"legacy_symbol_rewrite":false,
+          "page":1,"is_bold":false,"is_italic":false,
+          "is_underline":false,"is_strikeout":false,
+          "baseline_shift":0,"item_type":"text","mcid":null
+        }]}
+        """;
+
+        Envelope<IReadOnlyList<TextItem>>? envelope =
+            JsonSerializer.Deserialize(json, PdfJsonContext.Default.TextItemsEnvelope);
+
+        TextItem item = Assert.Single(envelope!.Data!);
+        Assert.Null(item.FontWeight);
+        Assert.False(item.LegacySymbolRewrite);
+    }
+
+    [Fact]
+    public void PositionFrameValues_RoundTripThroughTheirWireNames()
+    {
+        Assert.Equal(
+            PositionFrame.Display,
+            JsonSerializer.Deserialize<PositionFrame>("\"display\"", JsonSerializerOptions.Default));
+        Assert.Equal(
+            "\"sheet\"",
+            JsonSerializer.Serialize(PositionFrame.Sheet, JsonSerializerOptions.Default));
+        Assert.Throws<JsonException>(
+            () => JsonSerializer.Deserialize<PositionFrame>(
+                "\"rendered\"",
+                JsonSerializerOptions.Default));
     }
 
     [Fact]

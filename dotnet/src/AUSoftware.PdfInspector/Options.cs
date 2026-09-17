@@ -37,6 +37,40 @@ public sealed class PdfOptions
 
     /// <summary>Markdown conversion tuning.</summary>
     public MarkdownOptions? Markdown { get; set; }
+
+    /// <summary>
+    /// Coordinate frame and weight handling for the positioned-text calls.
+    /// Honoured by
+    /// <see cref="Pdf.ExtractTextWithPositions(string, PdfOptions?)"/> and its
+    /// byte overload; ignored elsewhere.
+    /// </summary>
+    public PositionOptions? Position { get; set; }
+}
+
+/// <summary>
+/// Coordinate frame and font-weight handling for the positioned-text and
+/// region calls. Every property is optional; anything left
+/// <see langword="null"/> keeps the native library's default.
+/// </summary>
+public sealed class PositionOptions
+{
+    /// <summary>
+    /// The frame items are reported in, and region rectangles are read in.
+    /// Defaults to <see cref="PositionFrame.Sheet"/>.
+    /// </summary>
+    public PositionFrame? Frame { get; set; }
+
+    /// <summary>
+    /// Also read bold from the font's weight class. When true,
+    /// <see cref="TextItem.IsBold"/> is additionally true for a
+    /// <see cref="TextItem.FontWeight"/> of 600 or more, and adjacent runs
+    /// whose weight class differs stay separate items instead of merging, so
+    /// a heavier run inside a lighter paragraph keeps its own item. Default:
+    /// false, where <see cref="TextItem.IsBold"/> and item merging are
+    /// exactly what they were before the option existed.
+    /// <see cref="TextItem.FontWeight"/> is reported either way.
+    /// </summary>
+    public bool? BoldFromWeight { get; set; }
 }
 
 /// <summary>Tuning for the PDF type detector.</summary>

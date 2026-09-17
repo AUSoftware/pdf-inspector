@@ -133,6 +133,19 @@ pub struct TextItemDto {
     /// links, form fields).
     pub font_tag: String,
     pub font_size: f32,
+    /// The font's weight class on the 100..=900 scale (400 regular, 700
+    /// bold), read from the embedded font program's OS/2 table, else the
+    /// FontDescriptor's `/FontWeight`, else a weight word in the font name.
+    /// `null` when none of them says, and for items that do not come from a
+    /// font (images, links, form fields). Independent of `is_bold`, which is
+    /// unchanged unless `bold_from_weight` is set: a medium face reports
+    /// `500` with `is_bold: false`.
+    pub font_weight: Option<u16>,
+    /// At least one source character was changed by the legacy private-use
+    /// symbol cleanup. Decoding provenance, not an OCR verdict: the
+    /// rewritten value must not be taken as an authoritative Unicode alias,
+    /// and a `false` here does not vouch for the rest.
+    pub legacy_symbol_rewrite: bool,
     /// 1-indexed page number.
     pub page: u32,
     pub is_bold: bool,
@@ -172,6 +185,8 @@ impl From<TextItem> for TextItemDto {
             font: item.font,
             font_tag: item.font_tag,
             font_size: item.font_size,
+            font_weight: item.font_weight,
+            legacy_symbol_rewrite: item.legacy_symbol_rewrite,
             page: item.page,
             is_bold: item.is_bold,
             is_italic: item.is_italic,

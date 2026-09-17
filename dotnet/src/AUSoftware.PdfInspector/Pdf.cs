@@ -198,13 +198,22 @@ public static unsafe class Pdf
     /// </summary>
     /// <param name="path">Path to the PDF.</param>
     /// <param name="options">
-    /// <see cref="PdfOptions.Pages"/> (<b>1-indexed</b>) and
-    /// <see cref="PdfOptions.Password"/> are honoured; other properties are
-    /// ignored.
+    /// <see cref="PdfOptions.Pages"/> (<b>1-indexed</b>),
+    /// <see cref="PdfOptions.Password"/> and
+    /// <see cref="PdfOptions.Position"/> are honoured; other properties are
+    /// ignored. <see cref="PdfOptions.Password"/> and
+    /// <see cref="PdfOptions.Position"/> cannot be combined — the native
+    /// library reaches the frame and weight handling only through its
+    /// in-memory path, which does not decrypt, so asking for both throws
+    /// rather than silently dropping one. Decrypt the document and use the
+    /// byte overload instead.
     /// </param>
     /// <returns>The positioned text items in document order.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="path"/> is null.</exception>
-    /// <exception cref="PdfInspectorException">The PDF could not be read.</exception>
+    /// <exception cref="PdfInspectorException">
+    /// The PDF could not be read, or a password and position options were
+    /// requested together.
+    /// </exception>
     public static IReadOnlyList<TextItem> ExtractTextWithPositions(string path, PdfOptions? options = null) =>
         NativeCall.FromFile(
             path,
@@ -217,8 +226,9 @@ public static unsafe class Pdf
     /// </summary>
     /// <param name="data">The PDF bytes.</param>
     /// <param name="options">
-    /// <see cref="PdfOptions.Pages"/> (<b>1-indexed</b>) is honoured; other
-    /// properties are ignored.
+    /// <see cref="PdfOptions.Pages"/> (<b>1-indexed</b>) and
+    /// <see cref="PdfOptions.Position"/> are honoured; other properties are
+    /// ignored.
     /// </param>
     /// <returns>The positioned text items in document order.</returns>
     /// <exception cref="PdfInspectorException">The PDF could not be read.</exception>
@@ -333,10 +343,13 @@ public static unsafe class Pdf
     /// </returns>
     /// <exception cref="ArgumentNullException">An argument is null.</exception>
     /// <exception cref="PdfInspectorException">The PDF could not be read.</exception>
-    public static IReadOnlyList<PageRegionText> ExtractTextInRegions(string path, IEnumerable<PageRegions> pageRegions) =>
+    public static IReadOnlyList<PageRegionText> ExtractTextInRegions(
+        string path,
+        IEnumerable<PageRegions> pageRegions,
+        PositionOptions? position = null) =>
         NativeCall.FromFile(
             path,
-            SerializeRegions(pageRegions),
+            SerializeRegions(pageRegions, position),
             NativeMethods.ExtractTextInRegionsFile,
             PdfJsonContext.Default.PageRegionsEnvelope);
 
@@ -349,14 +362,84 @@ public static unsafe class Pdf
     /// The regions to read, by <b>0-indexed</b> page. Coordinates are PDF
     /// points with a top-left origin.
     /// </param>
-    /// <returns>See <see cref="ExtractTextInRegions(string, IEnumerable{PageRegions})"/>.</returns>
+    /// <returns>
+    /// See <see cref="ExtractTextInRegions(string, IEnumerable{PageRegions}, PositionOptions?)"/>.
+    /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="pageRegions"/> is null.</exception>
     /// <exception cref="PdfInspectorException">The PDF could not be read.</exception>
-    public static IReadOnlyList<PageRegionText> ExtractTextInRegions(ReadOnlySpan<byte> data, IEnumerable<PageRegions> pageRegions) =>
+    public static IReadOnlyList<PageRegionText> ExtractTextInRegions(
+        ReadOnlySpan<byte> data,
+        IEnumerable<PageRegions> pageRegions,
+        PositionOptions? position = null) =>
         NativeCall.FromBytes(
             data,
-            SerializeRegions(pageRegions),
+            SerializeRegions(pageRegions, position),
             NativeMethods.ExtractTextInRegionsBytes,
+            PdfJsonContext.Default.PageRegionsEnvelope);
+
+    /// <summary>
+    /// Extracts the <i>tables</i> falling inside given bounding boxes — the
+    /// same hybrid-OCR path as
+    /// <see cref="ExtractTextInRegions(string, IEnumerable{PageRegions}, PositionOptions?)"/>,
+    /// but running table detection over each region instead of reading it as
+    /// flat text.
+    /// </summary>
+    /// <param name="path">Path to the PDF.</param>
+    /// <param name="pageRegions">
+    /// The regions to read, by <b>0-indexed</b> page. Coordinates are PDF
+    /// points with a top-left origin.
+    /// </param>
+    /// <param name="position">
+    /// The frame the region rectangles are read in, and whether bold is read
+    /// from the font's weight class. Defaults to
+    /// <see cref="PositionFrame.Sheet"/> with bold unchanged.
+    /// </param>
+    /// <returns>
+    /// One entry per requested page, each holding one result per requested
+    /// region in the same order. Where table structure was found,
+    /// <see cref="RegionText.Text"/> is a Markdown pipe-table and
+    /// <see cref="RegionText.NeedsOcr"/> is false. Where none was — too few
+    /// items, poor alignment, GID fonts — the text is empty and
+    /// <see cref="RegionText.NeedsOcr"/> is true, so the caller can fall back
+    /// to OCR for that region alone.
+    /// </returns>
+    /// <exception cref="ArgumentNullException">An argument is null.</exception>
+    /// <exception cref="PdfInspectorException">The PDF could not be read.</exception>
+    public static IReadOnlyList<PageRegionText> ExtractTablesInRegions(
+        string path,
+        IEnumerable<PageRegions> pageRegions,
+        PositionOptions? position = null) =>
+        NativeCall.FromFile(
+            path,
+            SerializeRegions(pageRegions, position),
+            NativeMethods.ExtractTablesInRegionsFile,
+            PdfJsonContext.Default.PageRegionsEnvelope);
+
+    /// <summary>
+    /// Extracts the tables falling inside given bounding boxes of an
+    /// in-memory document.
+    /// </summary>
+    /// <param name="data">The PDF bytes.</param>
+    /// <param name="pageRegions">
+    /// The regions to read, by <b>0-indexed</b> page. Coordinates are PDF
+    /// points with a top-left origin.
+    /// </param>
+    /// <param name="position">
+    /// See <see cref="ExtractTablesInRegions(string, IEnumerable{PageRegions}, PositionOptions?)"/>.
+    /// </param>
+    /// <returns>
+    /// See <see cref="ExtractTablesInRegions(string, IEnumerable{PageRegions}, PositionOptions?)"/>.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="pageRegions"/> is null.</exception>
+    /// <exception cref="PdfInspectorException">The PDF could not be read.</exception>
+    public static IReadOnlyList<PageRegionText> ExtractTablesInRegions(
+        ReadOnlySpan<byte> data,
+        IEnumerable<PageRegions> pageRegions,
+        PositionOptions? position = null) =>
+        NativeCall.FromBytes(
+            data,
+            SerializeRegions(pageRegions, position),
+            NativeMethods.ExtractTablesInRegionsBytes,
             PdfJsonContext.Default.PageRegionsEnvelope);
 
     // -----------------------------------------------------------------
@@ -366,7 +449,7 @@ public static unsafe class Pdf
     private static string? Serialize(PdfOptions? options) =>
         options is null ? null : JsonSerializer.Serialize(options, PdfJsonContext.Default.PdfOptionsPayload);
 
-    private static string SerializeRegions(IEnumerable<PageRegions> pageRegions)
+    private static string SerializeRegions(IEnumerable<PageRegions> pageRegions, PositionOptions? position)
     {
         if (pageRegions is null)
         {
@@ -376,6 +459,7 @@ public static unsafe class Pdf
         RegionsPayload payload = new RegionsPayload
         {
             PageRegions = new List<PageRegions>(pageRegions),
+            Position = position,
         };
         return JsonSerializer.Serialize(payload, PdfJsonContext.Default.RegionsPayload);
     }

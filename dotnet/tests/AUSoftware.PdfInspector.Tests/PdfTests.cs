@@ -201,6 +201,72 @@ public class PdfTests
         // Body text on this fixture is upright and unshifted.
         Assert.Equal(0.0, first.Rotation);
         Assert.Equal(0.0, first.BaselineShift);
+
+        // The weight class (1.20.0). A null weight means no source stated
+        // one, which is common and not an error. Whether this fixture has a
+        // legacy symbol rewrite is not something to assert on — that field's
+        // wire binding is pinned in SerializationTests instead.
+        Assert.All(
+            items,
+            item => Assert.True(
+                item.FontWeight is null || (item.FontWeight >= 100 && item.FontWeight <= 900),
+                $"weight class is null or on the 100-900 scale: {item.FontWeight}"));
+    }
+
+    [Fact]
+    public void ExtractTextWithPositions_HonoursPositionOptions()
+    {
+        byte[] pdf = TestEnvironment.FixtureBytes(TextFixture);
+        IReadOnlyList<TextItem> sheet = Pdf.ExtractTextWithPositions(pdf);
+
+        // This fixture declares no /Rotate, so the rendered page is the
+        // sheet and both frames report identical geometry. The frame maths
+        // itself is the native library's to test; this pins the plumbing.
+        foreach (PositionFrame frame in new[] { PositionFrame.Sheet, PositionFrame.Display })
+        {
+            IReadOnlyList<TextItem> framed = Pdf.ExtractTextWithPositions(
+                pdf,
+                new PdfOptions { Position = new PositionOptions { Frame = frame } });
+
+            Assert.Equal(sheet.Count, framed.Count);
+            for (int i = 0; i < sheet.Count; i++)
+            {
+                Assert.Equal(sheet[i].Text, framed[i].Text);
+                Assert.Equal(sheet[i].X, framed[i].X);
+                Assert.Equal(sheet[i].Y, framed[i].Y);
+                Assert.Equal(sheet[i].Rotation, framed[i].Rotation);
+            }
+        }
+
+        // With BoldFromWeight on, a weight class of 600 or more reads as
+        // bold. Faces below that, and items with no stated weight, are
+        // unaffected.
+        IReadOnlyList<TextItem> weighted = Pdf.ExtractTextWithPositions(
+            pdf,
+            new PdfOptions { Position = new PositionOptions { BoldFromWeight = true } });
+        Assert.NotEmpty(weighted);
+        Assert.All(
+            weighted,
+            item => Assert.True(
+                item.FontWeight is null || item.FontWeight < 600 || item.IsBold,
+                $"a weight class of {item.FontWeight} should read as bold"));
+    }
+
+    [Fact]
+    public void ExtractTextWithPositions_RefusesAPasswordAlongsidePositionOptions()
+    {
+        // The native library cannot decrypt and re-frame in one pass, so the
+        // combination is refused rather than silently dropping one of them.
+        PdfInspectorException error = Assert.Throws<PdfInspectorException>(
+            () => Pdf.ExtractTextWithPositions(
+                TestEnvironment.Fixture(EncryptedFixture),
+                new PdfOptions
+                {
+                    Password = "secret123",
+                    Position = new PositionOptions { Frame = PositionFrame.Display },
+                }));
+
+        Assert.Equal(PdfErrorKind.InvalidOptions, error.Kind);
     }
 
     [Fact]
@@ -304,6 +370,77 @@ public class PdfTests
         Assert.Equal(0, page.Page);
         Assert.Equal(2, page.Regions.Count);
         Assert.Contains(page.Regions, region => region.Text.Length > 0);
+    }
+
+    [Fact]
+    public void ExtractTextInRegions_AcceptsPositionOptions()
+    {
+        byte[] pdf = TestEnvironment.FixtureBytes(TextFixture);
+        PageRegions request = new PageRegions(0, new[] { new BoundingBox(0, 0, 612, 400) });
+
+        string sheet = Pdf.ExtractTextInRegions(pdf, new[] { request })[0].Regions[0].Text;
+
+        // No /Rotate on this fixture, so a rect read in the display frame
+        // selects the same text as one read in the sheet frame.
+        string display = Pdf.ExtractTextInRegions(
+            pdf,
+            new[] { request },
+            new PositionOptions { Frame = PositionFrame.Display })[0].Regions[0].Text;
+
+        Assert.Equal(sheet, display);
+    }
+
+    [Fact]
+    public void ExtractTablesInRegions_ReturnsOneResultPerRequestedRegion()
+    {
+        PageRegions request = new PageRegions(
+            0,
+            new[]
+            {
+                new BoundingBox(0, 0, 612, 400),
+                new BoundingBox(0, 400, 612, 792),
+            });
+
+        IReadOnlyList<PageRegionText> pages =
+            Pdf.ExtractTablesInRegions(TestEnvironment.FixtureBytes(TextFixture), new[] { request });
+
+        PageRegionText page = Assert.Single(pages);
+        Assert.Equal(0, page.Page);
+        Assert.Equal(2, page.Regions.Count);
+
+        // A region either yields a pipe-table or asks for OCR — never both,
+        // and never neither.
+        Assert.All(
+            page.Regions,
+            region =>
+            {
+                Assert.Equal(region.Text.Length == 0, region.NeedsOcr);
+                if (!region.NeedsOcr)
+                {
+                    Assert.Contains('|', region.Text);
+                }
+            });
+    }
+
+    [Fact]
+    public void ExtractTablesInRegions_MatchesAcrossThePathAndByteOverloads()
+    {
+        PageRegions request = new PageRegions(0, new[] { new BoundingBox(0, 0, 612, 792) });
+
+        IReadOnlyList<PageRegionText> fromPath =
+            Pdf.ExtractTablesInRegions(TestEnvironment.Fixture(TextFixture), new[] { request });
+        IReadOnlyList<PageRegionText> fromBytes =
+            Pdf.ExtractTablesInRegions(TestEnvironment.FixtureBytes(TextFixture), new[] { request });
+
+        Assert.Equal(fromPath[0].Regions[0].Text, fromBytes[0].Regions[0].Text);
+        Assert.Equal(fromPath[0].Regions[0].NeedsOcr, fromBytes[0].Regions[0].NeedsOcr);
+    }
+
+    [Fact]
+    public void ExtractTablesInRegions_RejectsNullRegions()
+    {
+        Assert.Throws<ArgumentNullException>(
+            () => Pdf.ExtractTablesInRegions(TestEnvironment.Fixture(TextFixture), null!));
     }
 
     // -----------------------------------------------------------------

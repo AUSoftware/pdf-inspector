@@ -61,6 +61,7 @@ documents that never touch disk.
 | `Pdf.ExtractStructureElements` | Structure-tree roles from tagged PDFs |
 | `Pdf.ExtractPagesMarkdown` | Markdown page by page, for hybrid OCR pipelines |
 | `Pdf.ExtractTextInRegions` | Text inside bounding boxes a layout model proposed |
+| `Pdf.ExtractTablesInRegions` | Markdown tables inside those same bounding boxes |
 | `Pdf.NativeVersion` | Which native library actually loaded |
 
 ### Routing scanned documents to OCR
@@ -130,6 +131,26 @@ PdfResult result = Pdf.Process("report.pdf", new PdfOptions
 });
 ```
 
+`PdfOptions.Position` tunes the positioned-text calls, and the region calls
+take the same `PositionOptions` as their last argument:
+
+```csharp
+PositionOptions position = new PositionOptions
+{
+    Frame = PositionFrame.Display,   // line boxes up with a rendered page
+    BoldFromWeight = true,           // read bold from the weight class too
+};
+
+var items = Pdf.ExtractTextWithPositions(path, new PdfOptions { Position = position });
+var regions = Pdf.ExtractTextInRegions(path, boxes, position);
+```
+
+`Password` and `Position` cannot be combined on the file overload of
+`ExtractTextWithPositions` — the native library reaches the frame and weight
+handling only through its in-memory path, which does not decrypt, so asking
+for both throws `PdfInspectorException` with `PdfErrorKind.InvalidOptions`
+rather than quietly dropping one. Decrypt the document and pass its bytes.
+
 **Page numbering follows the underlying library and is not uniform.** Each
 method's XML documentation states which it uses:
 
@@ -141,6 +162,52 @@ method's XML documentation states which it uses:
 | `PdfClassification.PagesNeedingOcr` | 0-indexed |
 | `TextItem.Page`, `StructureElement.Page` | 1-indexed |
 | `PageMarkdown.Page`, `PageRegions.Page` | 0-indexed |
+
+### Coordinate frames
+
+Positioned items and region rectangles are read in the **sheet** frame by
+default: the visible page box as laid out in the content stream, with the
+page's `/Rotate` *not* applied. That is what every release before 1.20.0 did,
+and it stays the default.
+
+`PositionFrame.Display` reads the **rendered** page instead — the visible page
+box turned clockwise by the page's inheritable `/Rotate`, with the turn of a
+predominantly rotated page undone first. Use it when the boxes have to line up
+with a rendered page image, which is the usual case when a layout model
+proposes the rectangles:
+
+```csharp
+PageRegions boxes = new PageRegions(0, modelBoxes);   // from a rendered page
+var regions = Pdf.ExtractTextInRegions(
+    path,
+    new[] { boxes },
+    new PositionOptions { Frame = PositionFrame.Display });
+```
+
+On a page with no `/Rotate` the rendered page *is* the sheet, so both frames
+agree.
+
+### Tables inside regions
+
+`ExtractTablesInRegions` takes the same request as `ExtractTextInRegions` and
+returns the same shape, but runs table detection over each region instead of
+reading it as flat text. Where structure was found, `Text` is a Markdown
+pipe-table and `NeedsOcr` is `false`; where none was — too few items, poor
+alignment, GID fonts — `Text` is empty and `NeedsOcr` is `true`, so you can
+fall back to OCR for that one region:
+
+```csharp
+foreach (RegionText region in Pdf.ExtractTablesInRegions(path, boxes)[0].Regions)
+{
+    if (region.NeedsOcr)
+    {
+        SendToOcr(region);
+        continue;
+    }
+
+    Console.WriteLine(region.Text);   // | a | b |\n| --- | --- |\n| 1 | 2 |
+}
+```
 
 ### Run metadata
 
@@ -167,6 +234,21 @@ foreach (TextItem item in Pdf.ExtractTextWithPositions(path))
 `AdvanceKnown` is `false` when the font carries no width information — `Width`
 is then an estimate of half an em per glyph rather than a measurement, so
 treat it as unreliable for column or table geometry.
+
+`FontWeight` is the face's weight class on the 100–900 scale (400 regular, 700
+bold), read from the embedded font program's OS/2 table, else the
+`FontDescriptor`'s `/FontWeight`, else a weight word in the font name. It is
+`null` when nothing states one, which is common and not an error. It does not
+by itself change `IsBold`: a medium face reports `500` with `IsBold` false.
+Set `PositionOptions.BoldFromWeight` to have a weight class of 600 or more
+read as bold as well — adjacent runs whose weight class differs then stay
+separate items, so a heavier run inside a lighter paragraph keeps its own
+item.
+
+`LegacySymbolRewrite` marks a run whose text was changed by the legacy
+private-use symbol cleanup. It is decoding *provenance*, not an OCR verdict:
+a rewritten value is not an authoritative Unicode alias, and `false` does not
+vouch for the accuracy of the rest.
 
 **`Font` changed meaning in 1.16.0.** It is now the `/BaseFont` family name
 ("ABCDEF+CMMI10"), which identifies the actual face; the raw resource tag it
