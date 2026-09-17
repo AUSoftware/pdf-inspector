@@ -51,6 +51,29 @@ public enum ProcessMode
     Full,
 }
 
+/// <summary>
+/// The coordinate frame positioned items are reported in, and region
+/// rectangles are read in.
+/// </summary>
+[JsonConverter(typeof(PositionFrameConverter))]
+public enum PositionFrame
+{
+    /// <summary>
+    /// The visible page box as laid out in the content stream, with the
+    /// page's <c>/Rotate</c> <b>not</b> applied. The default, and what every
+    /// release before 1.20.0 did.
+    /// </summary>
+    Sheet,
+
+    /// <summary>
+    /// The rendered page: the visible page box turned clockwise by the page's
+    /// inheritable <c>/Rotate</c>, with the turn of a predominantly rotated
+    /// page undone first. Use this when the boxes have to line up with a
+    /// rendered page image — a layout model's output, for instance.
+    /// </summary>
+    Display,
+}
+
 /// <summary>Source-fidelity versus token-efficiency in Markdown post-processing.</summary>
 [JsonConverter(typeof(MarkdownProfileConverter))]
 public enum MarkdownProfile

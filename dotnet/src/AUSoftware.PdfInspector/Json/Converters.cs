@@ -170,6 +170,32 @@ internal sealed class MarkdownProfileConverter : SnakeCaseEnumConverter<Markdown
     };
 }
 
+internal sealed class PositionFrameConverter : SnakeCaseEnumConverter<PositionFrame>
+{
+    protected override bool TryParse(string value, out PositionFrame result)
+    {
+        switch (value)
+        {
+            case "sheet":
+                result = PositionFrame.Sheet;
+                return true;
+            case "display":
+                result = PositionFrame.Display;
+                return true;
+            default:
+                result = default;
+                return false;
+        }
+    }
+
+    protected override string Format(PositionFrame value) => value switch
+    {
+        PositionFrame.Sheet => "sheet",
+        PositionFrame.Display => "display",
+        _ => throw new JsonException($"Unrecognised PositionFrame value '{value}'."),
+    };
+}
+
 /// <summary>
 /// Writes a <see cref="ScanStrategy"/> as the tagged object the native
 /// library expects: <c>{"type":"sample","count":8}</c>.

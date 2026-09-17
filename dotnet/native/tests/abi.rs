@@ -235,6 +235,82 @@ fn positions_carry_geometry_and_font_metadata() {
     // Body text on this fixture is upright and sits on its own baseline.
     assert_eq!(rotation, 0.0);
     assert_eq!(first["baseline_shift"].as_f64().unwrap(), 0.0);
+
+    // Decoding provenance added in 1.19.0, weight class in 1.20.0. Both are
+    // always present: `font_weight` is null when nothing states a weight.
+    assert!(first["legacy_symbol_rewrite"].is_boolean());
+    let weight = first
+        .get("font_weight")
+        .expect("font_weight is always sent");
+    assert!(
+        weight.is_null() || weight.as_u64().is_some_and(|w| (100..=900).contains(&w)),
+        "weight class is null or on the 100..=900 scale: {weight}"
+    );
+}
+
+#[test]
+fn position_options_reach_the_extractor() {
+    let bytes = fixture_bytes("2013-app2.pdf");
+    let sheet = data(unsafe {
+        pdfi_extract_text_with_positions_bytes(bytes.as_ptr(), bytes.len(), std::ptr::null())
+    });
+
+    // Naming the default frame explicitly changes nothing, and neither does
+    // the display frame on a fixture with no /Rotate: the rendered page is
+    // the sheet. This pins the plumbing, not the frame maths.
+    for frame in ["sheet", "display"] {
+        let options = c(&format!(r#"{{"position":{{"frame":"{frame}"}}}}"#));
+        let items = data(unsafe {
+            pdfi_extract_text_with_positions_bytes(bytes.as_ptr(), bytes.len(), options.as_ptr())
+        });
+        assert_eq!(items, sheet, "{frame} frame on an unrotated page");
+    }
+
+    // `bold_from_weight` is accepted and still returns items. Whether it
+    // flips any `is_bold` depends on the fonts, so only the contract is
+    // asserted here; the core crate's tests cover the behaviour.
+    let options = c(r#"{"position":{"bold_from_weight":true},"pages":[1]}"#);
+    let items = data(unsafe {
+        pdfi_extract_text_with_positions_bytes(bytes.as_ptr(), bytes.len(), options.as_ptr())
+    });
+    let items = items.as_array().unwrap();
+    assert!(!items.is_empty());
+    assert!(items.iter().all(|item| item["is_bold"].is_boolean()));
+}
+
+#[test]
+fn unknown_position_option_reports_invalid_options() {
+    let bytes = fixture_bytes("2013-app2.pdf");
+    let options = c(r#"{"position":{"frame":"sheet","bold":true}}"#);
+    let kind = error_kind(unsafe {
+        pdfi_extract_text_with_positions_bytes(bytes.as_ptr(), bytes.len(), options.as_ptr())
+    });
+    assert_eq!(kind, "invalid_options");
+
+    let options = c(r#"{"position":{"frame":"page"}}"#);
+    let kind = error_kind(unsafe {
+        pdfi_extract_text_with_positions_bytes(bytes.as_ptr(), bytes.len(), options.as_ptr())
+    });
+    assert_eq!(kind, "invalid_options");
+}
+
+#[test]
+fn password_and_position_options_together_are_refused() {
+    let path = c(fixture("2013-app2.pdf").to_str().unwrap());
+    let options = c(r#"{"password":"hunter2","position":{"frame":"display"}}"#);
+    let kind = error_kind(unsafe {
+        pdfi_extract_text_with_positions_file(path.as_ptr(), options.as_ptr())
+    });
+    assert_eq!(
+        kind, "invalid_options",
+        "the core crate cannot decrypt and re-frame in one pass, so the          combination is refused rather than silently dropping one"
+    );
+
+    // Either one alone is fine on the same entry point.
+    let options = c(r#"{"position":{"frame":"display"},"pages":[1]}"#);
+    let items =
+        data(unsafe { pdfi_extract_text_with_positions_file(path.as_ptr(), options.as_ptr()) });
+    assert!(!items.as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -314,6 +390,73 @@ fn region_extraction_returns_one_result_per_region() {
             .any(|r| !r["text"].as_str().unwrap().is_empty()),
         "at least one half-page region should carry text"
     );
+}
+
+#[test]
+fn region_extraction_accepts_position_options() {
+    let bytes = fixture_bytes("2013-app2.pdf");
+    let sheet = c(r#"{"page_regions":[{"page":0,"regions":[[0,0,612,400]]}]}"#);
+    let expected = data(unsafe {
+        pdfi_extract_text_in_regions_bytes(bytes.as_ptr(), bytes.len(), sheet.as_ptr())
+    });
+
+    // No /Rotate on this fixture, so rects read in the display frame select
+    // the same text as rects read in the sheet frame.
+    let display = c(
+        r#"{"page_regions":[{"page":0,"regions":[[0,0,612,400]]}],"position":{"frame":"display"}}"#,
+    );
+    let actual = data(unsafe {
+        pdfi_extract_text_in_regions_bytes(bytes.as_ptr(), bytes.len(), display.as_ptr())
+    });
+    assert_eq!(actual, expected);
+
+    let unknown = c(r#"{"page_regions":[],"position":{"frame":"rendered"}}"#);
+    let kind = error_kind(unsafe {
+        pdfi_extract_text_in_regions_bytes(bytes.as_ptr(), bytes.len(), unknown.as_ptr())
+    });
+    assert_eq!(kind, "invalid_options");
+}
+
+#[test]
+fn table_region_extraction_returns_one_result_per_region() {
+    let bytes = fixture_bytes("2013-app2.pdf");
+    let request = c(r#"{"page_regions":[{"page":0,"regions":[[0,0,612,400],[0,400,612,792]]}]}"#);
+    let data = data(unsafe {
+        pdfi_extract_tables_in_regions_bytes(bytes.as_ptr(), bytes.len(), request.as_ptr())
+    });
+
+    let pages = data.as_array().unwrap();
+    assert_eq!(pages.len(), 1);
+    assert_eq!(pages[0]["page"], 0);
+    let regions = pages[0]["regions"].as_array().unwrap();
+    assert_eq!(regions.len(), 2);
+    for region in regions {
+        // A region either yields a pipe-table or asks for OCR; it never
+        // returns detected structure and a fallback request at once.
+        let text = region["text"].as_str().unwrap();
+        let needs_ocr = region["needs_ocr"].as_bool().unwrap();
+        assert_eq!(text.is_empty(), needs_ocr, "{region}");
+        if !needs_ocr {
+            assert!(
+                text.contains('|'),
+                "detected tables are pipe-tables: {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn table_region_extraction_from_a_file_matches_the_bytes_entry_point() {
+    let path = c(fixture("2013-app2.pdf").to_str().unwrap());
+    let bytes = fixture_bytes("2013-app2.pdf");
+    let request = c(r#"{"page_regions":[{"page":0,"regions":[[0,0,612,792]]}]}"#);
+
+    let from_file =
+        data(unsafe { pdfi_extract_tables_in_regions_file(path.as_ptr(), request.as_ptr()) });
+    let from_bytes = data(unsafe {
+        pdfi_extract_tables_in_regions_bytes(bytes.as_ptr(), bytes.len(), request.as_ptr())
+    });
+    assert_eq!(from_file, from_bytes);
 }
 
 // ---------------------------------------------------------------------------

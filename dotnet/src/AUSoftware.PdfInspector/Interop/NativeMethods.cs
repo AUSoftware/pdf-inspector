@@ -87,4 +87,10 @@ internal static unsafe class NativeMethods
 
     [DllImport(LibraryName, EntryPoint = "pdfi_extract_text_in_regions_bytes", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ExtractTextInRegionsBytes(byte* data, nuint length, byte* requestJson);
+
+    [DllImport(LibraryName, EntryPoint = "pdfi_extract_tables_in_regions_file", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ExtractTablesInRegionsFile(byte* path, byte* requestJson);
+
+    [DllImport(LibraryName, EntryPoint = "pdfi_extract_tables_in_regions_bytes", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ExtractTablesInRegionsBytes(byte* data, nuint length, byte* requestJson);
 }

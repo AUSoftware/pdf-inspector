@@ -167,6 +167,29 @@ public sealed class TextItem
     /// <summary>Font size in points.</summary>
     public double FontSize { get; init; }
 
+    /// <summary>
+    /// The font's weight class on the 100–900 scale (400 regular, 700 bold),
+    /// read from the embedded font program's OS/2 table, else the
+    /// <c>FontDescriptor</c>'s <c>/FontWeight</c>, else a weight word in the
+    /// font name (<c>"Light"</c>, <c>"Medium"</c>, <c>"-Md"</c>,
+    /// <c>"Black"</c>, <c>"W6"</c>). <see langword="null"/> when none of them
+    /// says, and for items that do not come from a font (images, links, form
+    /// fields). Independent of <see cref="IsBold"/> unless
+    /// <see cref="PositionOptions.BoldFromWeight"/> is set: a medium face
+    /// reports 500 with <see cref="IsBold"/> false.
+    /// </summary>
+    public int? FontWeight { get; init; }
+
+    /// <summary>
+    /// At least one character in <see cref="Text"/> was changed by the legacy
+    /// private-use symbol cleanup. This is decoding provenance, not an OCR
+    /// verdict: a rewritten value must not be taken as an authoritative
+    /// Unicode alias, and <see langword="false"/> does not vouch for the
+    /// accuracy of the rest. Merged items keep the evidence of every run that
+    /// contributed to them.
+    /// </summary>
+    public bool LegacySymbolRewrite { get; init; }
+
     /// <summary>1-indexed page number.</summary>
     public int Page { get; init; }
 

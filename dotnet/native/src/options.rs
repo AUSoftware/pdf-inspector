@@ -12,7 +12,7 @@ use std::collections::HashSet;
 
 use pdf_inspector::detector::{DetectionConfig, ScanStrategy};
 use pdf_inspector::markdown::{MarkdownOptions, MarkdownProfile};
-use pdf_inspector::{PdfOptions, ProcessMode};
+use pdf_inspector::{PdfOptions, PositionFrame, PositionOptions, ProcessMode};
 use serde::Deserialize;
 
 /// How far the pipeline should run.
@@ -151,6 +151,48 @@ impl MarkdownDto {
     }
 }
 
+/// Coordinate frame the positioned-text and region APIs work in.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameDto {
+    Sheet,
+    Display,
+}
+
+impl From<FrameDto> for PositionFrame {
+    fn from(f: FrameDto) -> Self {
+        match f {
+            FrameDto::Sheet => PositionFrame::Sheet,
+            FrameDto::Display => PositionFrame::Display,
+        }
+    }
+}
+
+/// Options of the positioned-text and region entry points. Omitted fields
+/// keep the crate defaults: the sheet frame, bold not read from the weight
+/// class.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(default, rename_all = "snake_case", deny_unknown_fields)]
+pub struct PositionOptionsDto {
+    pub frame: Option<FrameDto>,
+    pub bold_from_weight: Option<bool>,
+}
+
+impl PositionOptionsDto {
+    /// Build core [`PositionOptions`], layering the supplied fields over
+    /// defaults.
+    pub fn to_position_options(self) -> PositionOptions {
+        let mut options = PositionOptions::new();
+        if let Some(frame) = self.frame {
+            options = options.frame(frame.into());
+        }
+        if let Some(bold_from_weight) = self.bold_from_weight {
+            options = options.bold_from_weight(bold_from_weight);
+        }
+        options
+    }
+}
+
 /// The shared options payload.
 ///
 /// Not every function honours every field — `pages` indexing in particular
@@ -164,6 +206,7 @@ pub struct OptionsDto {
     pub mode: Option<ModeDto>,
     pub detection: Option<DetectionDto>,
     pub markdown: Option<MarkdownDto>,
+    pub position: Option<PositionOptionsDto>,
 }
 
 impl OptionsDto {
@@ -191,6 +234,18 @@ impl OptionsDto {
         self.pages.as_deref()
     }
 
+    /// The positioned-text options, defaulted when the caller sent none.
+    pub fn position_options(&self) -> PositionOptions {
+        self.position.unwrap_or_default().to_position_options()
+    }
+
+    /// Whether the caller asked for anything but the default frame and
+    /// weight handling. The entry points that cannot honour those options
+    /// alongside a password use this to tell the two paths apart.
+    pub fn has_position_options(&self) -> bool {
+        self.position_options() != PositionOptions::default()
+    }
+
     /// The `pages` field as a set, for the page-filtering extractors.
     pub fn page_set(&self) -> Option<HashSet<u32>> {
         self.pages
@@ -198,6 +253,10 @@ impl OptionsDto {
             .map(|pages| pages.iter().copied().collect())
     }
 }
+
+/// Bounding boxes requested per page, in the shape the core crate's region
+/// APIs take them: a 0-indexed page number and its `[x1, y1, x2, y2]` rects.
+pub type PageRegionPairs = Vec<(u32, Vec<[f32; 4]>)>;
 
 /// Regions requested for one page.
 #[derive(Debug, Clone, Deserialize)]
@@ -214,14 +273,19 @@ pub struct PageRegionsRequest {
 #[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct RegionsRequest {
     pub page_regions: Vec<PageRegionsRequest>,
+    pub position: Option<PositionOptionsDto>,
 }
 
 impl RegionsRequest {
-    pub fn into_pairs(self) -> Vec<(u32, Vec<[f32; 4]>)> {
-        self.page_regions
+    /// The requested regions, and the options they are to be read with.
+    pub fn into_parts(self) -> (PageRegionPairs, PositionOptions) {
+        let options = self.position.unwrap_or_default().to_position_options();
+        let pairs = self
+            .page_regions
             .into_iter()
             .map(|p| (p.page, p.regions))
-            .collect()
+            .collect();
+        (pairs, options)
     }
 }
 
@@ -291,10 +355,70 @@ mod tests {
     }
 
     #[test]
-    fn region_request_parses_into_pairs() {
+    fn region_request_parses_into_parts() {
         let request: RegionsRequest =
             serde_json::from_str(r#"{"page_regions":[{"page":0,"regions":[[1.0,2.0,3.0,4.0]]}]}"#)
                 .unwrap();
-        assert_eq!(request.into_pairs(), vec![(0, vec![[1.0, 2.0, 3.0, 4.0]])]);
+        let (pairs, options) = request.into_parts();
+        assert_eq!(pairs, vec![(0, vec![[1.0, 2.0, 3.0, 4.0]])]);
+        // An absent `position` means the crate defaults.
+        assert_eq!(options, PositionOptions::default());
+    }
+
+    #[test]
+    fn region_request_carries_position_options() {
+        let request: RegionsRequest = serde_json::from_str(
+            r#"{"page_regions":[],"position":{"frame":"display","bold_from_weight":true}}"#,
+        )
+        .unwrap();
+        let (pairs, options) = request.into_parts();
+        assert!(pairs.is_empty());
+        assert_eq!(options.frame, PositionFrame::Display);
+        assert!(options.bold_from_weight);
+    }
+
+    #[test]
+    fn position_options_default_to_the_sheet_frame() {
+        let dto: OptionsDto = serde_json::from_str("{}").unwrap();
+        assert_eq!(dto.position_options(), PositionOptions::default());
+        assert_eq!(dto.position_options().frame, PositionFrame::Sheet);
+        assert!(!dto.has_position_options());
+    }
+
+    #[test]
+    fn position_options_override_only_supplied_fields() {
+        let dto: OptionsDto =
+            serde_json::from_str(r#"{"position":{"bold_from_weight":true}}"#).unwrap();
+        let options = dto.position_options();
+        assert!(options.bold_from_weight);
+        // The frame is untouched.
+        assert_eq!(options.frame, PositionFrame::Sheet);
+        assert!(dto.has_position_options());
+
+        let dto: OptionsDto = serde_json::from_str(r#"{"position":{"frame":"display"}}"#).unwrap();
+        let options = dto.position_options();
+        assert_eq!(options.frame, PositionFrame::Display);
+        assert!(!options.bold_from_weight);
+        assert!(dto.has_position_options());
+    }
+
+    #[test]
+    fn explicitly_default_position_options_are_not_treated_as_overrides() {
+        // The file entry point refuses `password` alongside real position
+        // options, so spelling out the defaults must not trip that check.
+        let dto: OptionsDto =
+            serde_json::from_str(r#"{"position":{"frame":"sheet","bold_from_weight":false}}"#)
+                .unwrap();
+        assert!(!dto.has_position_options());
+    }
+
+    #[test]
+    fn unknown_position_fields_are_rejected() {
+        let err = serde_json::from_str::<OptionsDto>(r#"{"position":{"bold":true}}"#).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+
+        let err =
+            serde_json::from_str::<OptionsDto>(r#"{"position":{"frame":"page"}}"#).unwrap_err();
+        assert!(err.to_string().contains("unknown variant"));
     }
 }
