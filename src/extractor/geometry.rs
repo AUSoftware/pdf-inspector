@@ -62,6 +62,29 @@ impl PageRotation {
         *width = new_width;
         *height = new_height;
     }
+
+    /// Undo [`PageRotation::rotate_box`]: take a box expressed in the turned
+    /// frame back to the page frame it was turned from. Extents are
+    /// normalised the same way, so the result has non-negative extents.
+    pub(crate) fn unrotate_box(self, x: &mut f32, y: &mut f32, width: &mut f32, height: &mut f32) {
+        let (x0, x1) = (x.min(*x + *width), x.max(*x + *width));
+        let (y0, y1) = (y.min(*y + *height), y.max(*y + *height));
+        let (new_x, new_y, new_width, new_height) = match self {
+            PageRotation::Upright => (x0, y0, x1 - x0, y1 - y0),
+            // Forward `(x, y) → (y, -x)`: the turned x range is the page y
+            // range and the turned y range is the negated page x range, so
+            // the page's left edge is the negated turned top edge.
+            PageRotation::Ccw => (-y1, x0, y1 - y0, x1 - x0),
+            // Forward `(x, y) → (-y, x)`: the turned x range is the negated
+            // page y range and the turned y range is the page x range, so
+            // the page's bottom edge is the negated turned right edge.
+            PageRotation::Cw => (y0, -x1, y1 - y0, x1 - x0),
+        };
+        *x = new_x;
+        *y = new_y;
+        *width = new_width;
+        *height = new_height;
+    }
 }
 
 /// Text rise (Ts) displaces the glyph origin by (0, rise) in unscaled text
@@ -83,6 +106,21 @@ pub(crate) fn rise_adjusted(tm: &[f32; 6], rise: f32) -> [f32; 6] {
     ]
 }
 
+/// `tm` with its origin carried `advance_ts` text-space units along the
+/// baseline (scaled by `Tz`): where a run painted after that much pen travel
+/// begins.
+pub(crate) fn advanced_tm(tm: &[f32; 6], advance_ts: f32, horizontal_scale: f32) -> [f32; 6] {
+    let advance = advance_ts * horizontal_scale;
+    [
+        tm[0],
+        tm[1],
+        tm[2],
+        tm[3],
+        tm[4] + advance * tm[0],
+        tm[5] + advance * tm[1],
+    ]
+}
+
 /// Axis-aligned device-space box of one shown run plus its baseline angle.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct RunGeometry {
@@ -93,6 +131,15 @@ pub(crate) struct RunGeometry {
     pub(crate) rotation: f32,
     /// Whether `advance_ts` was known: see `TextItem::advance_known`.
     pub(crate) advance_known: bool,
+}
+
+impl RunGeometry {
+    /// Whether the run reads along +x: the same half-plane as
+    /// `TextItem::is_upright`.
+    pub(crate) fn is_upright(&self) -> bool {
+        let rotation = self.rotation.rem_euclid(360.0);
+        rotation <= 45.0 || rotation >= 315.0
+    }
 }
 
 /// Compute the axis-aligned box a shown run occupies in device space.
@@ -304,6 +351,30 @@ pub(crate) fn normalize_degrees(degrees: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unrotate_box_undoes_rotate_box() {
+        for rotation in [PageRotation::Upright, PageRotation::Ccw, PageRotation::Cw] {
+            for (x, y, w, h) in [
+                (188.0, 100.0, 12.0, 36.0),
+                (28.0, 420.0, 12.0, 200.0),
+                (-50.0, -20.0, 30.0, 10.0),
+            ] {
+                let (mut tx, mut ty, mut tw, mut th) = (x, y, w, h);
+                rotation.rotate_box(&mut tx, &mut ty, &mut tw, &mut th);
+                rotation.unrotate_box(&mut tx, &mut ty, &mut tw, &mut th);
+                assert_eq!((tx, ty, tw, th), (x, y, w, h), "{rotation:?}");
+            }
+        }
+        // The turned box may arrive with negative extents; the page box
+        // comes back normalised.
+        let (mut x, mut y, mut w, mut h) = (620.0, -28.0, -200.0, -12.0);
+        PageRotation::Ccw.unrotate_box(&mut x, &mut y, &mut w, &mut h);
+        assert_eq!((x, y, w, h), (28.0, 420.0, 12.0, 200.0));
+        let (mut x, mut y, mut w, mut h) = (-500.0, 312.0, -200.0, -12.0);
+        PageRotation::Cw.unrotate_box(&mut x, &mut y, &mut w, &mut h);
+        assert_eq!((x, y, w, h), (300.0, 500.0, 12.0, 200.0));
+    }
 
     #[test]
     fn page_rotation_turns_boxes_and_points_consistently() {
@@ -639,5 +710,21 @@ mod tests {
         assert_eq!(baseline_rotation(1.0, -1e-7), 0.0);
         assert_eq!(normalize_degrees(-90.0), 270.0);
         assert_eq!(normalize_degrees(360.0), 0.0);
+    }
+
+    #[test]
+    fn advanced_tm_carries_the_origin_along_the_scaled_baseline() {
+        // 9.5pt text at (68, 418): 2.973 text-space units of pen travel land
+        // 28.24pt to the right and leave the linear part alone.
+        let tm = [9.5, 0.0, 0.0, 9.5, 68.0, 418.0];
+        let moved = advanced_tm(&tm, 2.973, 1.0);
+        assert!((moved[4] - 96.2435).abs() < 1e-3, "{moved:?}");
+        assert_eq!(&moved[..4], &tm[..4]);
+        assert_eq!(moved[5], 418.0);
+        // `Tz 50` halves the travel; a 90° matrix travels along y.
+        assert!((advanced_tm(&tm, 2.973, 0.5)[4] - 82.12175).abs() < 1e-3);
+        let turned = advanced_tm(&[0.0, 12.0, -12.0, 0.0, 100.0, 200.0], 2.0, 1.0);
+        assert_eq!((turned[4], turned[5]), (100.0, 224.0));
+        assert_eq!(advanced_tm(&tm, 0.0, 1.0), tm);
     }
 }

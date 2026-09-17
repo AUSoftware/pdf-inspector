@@ -35,6 +35,7 @@ pub mod adobe_korea1;
 pub mod detector;
 pub mod extractor;
 pub mod glyph_names;
+mod mac_glyph_order;
 pub mod markdown;
 pub mod process_mode;
 pub mod structure_tree;
@@ -53,8 +54,11 @@ pub use detector::{
 pub use extractor::geometry::PageRotation;
 pub use extractor::{
     extract_text, extract_text_with_positions, extract_text_with_positions_and_rotations_mem,
-    extract_text_with_positions_mem, extract_text_with_positions_pages,
-    extract_text_with_positions_pages_with_password,
+    extract_text_with_positions_and_rotations_mem_in_frame,
+    extract_text_with_positions_and_rotations_mem_with_options, extract_text_with_positions_mem,
+    extract_text_with_positions_mem_in_frame, extract_text_with_positions_mem_with_options,
+    extract_text_with_positions_pages, extract_text_with_positions_pages_with_password,
+    PositionFrame, PositionOptions,
 };
 pub use markdown::{
     to_markdown, to_markdown_from_items, to_markdown_from_items_with_rects,
@@ -831,10 +835,12 @@ mod ocr_header_footer_tests {
             height: 10.0,
             font: "Test".to_string(),
             font_tag: String::new(),
+            legacy_symbol_rewrite: false,
             font_size: 10.0,
             page,
             is_bold: false,
             is_italic: false,
+            font_weight: None,
             is_underline: false,
             is_strikeout: false,
             rotation: 0.0,
@@ -1027,9 +1033,13 @@ fn non_placeholder_alnum(items: &[TextItem]) -> usize {
 /// * `page_regions` — list of `(page_number_0indexed, Vec<[x1, y1, x2, y2]>)`.
 ///   Coordinates are in **PDF points** with **top-left origin**, relative to
 ///   the page's **visible page box** (`CropBox ∩ MediaBox`, else the
-///   MediaBox) — the frame of a rendered page image, and the frame
+///   MediaBox) as laid out in the content stream — the frame
 ///   [`extract_text_with_positions_mem`] reports items in (with `y` flipped
-///   by the box height). `/Rotate` is not applied.
+///   by the box height). `/Rotate` is not applied and a page whose text is
+///   predominantly rotated is turned (see [`PageRotation`]), so this matches
+///   a rendered page image only for pages with `/Rotate 0` whose text is not
+///   predominantly rotated; rects taken from a rendered page go through
+///   [`extract_text_in_regions_mem_in_frame`] with [`PositionFrame::Display`].
 ///
 /// # Returns
 ///
@@ -1038,6 +1048,39 @@ pub fn extract_text_in_regions_mem(
     buffer: &[u8],
     page_regions: &[(u32, Vec<[f32; 4]>)],
 ) -> Result<Vec<PageRegionResult>, PdfError> {
+    extract_text_in_regions_mem_in_frame(buffer, page_regions, PositionFrame::Sheet)
+}
+
+/// [`extract_text_in_regions_mem`] with the frame of the region rects given
+/// explicitly. [`PositionFrame::Sheet`] reads them as that function does;
+/// [`PositionFrame::Display`] reads them on the rendered page — the visible
+/// page box turned clockwise by the page's inheritable `/Rotate`, top-left
+/// origin, `y` down — the frame a layout model working on a page image
+/// reports boxes in. Pages whose text is predominantly rotated are handled
+/// the same way in both frames.
+pub fn extract_text_in_regions_mem_in_frame(
+    buffer: &[u8],
+    page_regions: &[(u32, Vec<[f32; 4]>)],
+    frame: PositionFrame,
+) -> Result<Vec<PageRegionResult>, PdfError> {
+    extract_text_in_regions_mem_with_options(
+        buffer,
+        page_regions,
+        PositionOptions::new().frame(frame),
+    )
+}
+
+/// [`extract_text_in_regions_mem_in_frame`] with every option given as a
+/// [`PositionOptions`]: the frame the region rects are read in, and whether
+/// bold is also read from the font's weight class (`bold_from_weight`, which
+/// also keeps runs of different weight apart while the region's lines are
+/// assembled). The default options are [`extract_text_in_regions_mem`].
+pub fn extract_text_in_regions_mem_with_options(
+    buffer: &[u8],
+    page_regions: &[(u32, Vec<[f32; 4]>)],
+    options: PositionOptions,
+) -> Result<Vec<PageRegionResult>, PdfError> {
+    let frame = options.frame;
     validate_pdf_bytes(buffer)?;
     let (doc, _page_count) = load_document_from_mem(buffer)?;
     let pages = doc.get_pages();
@@ -1056,6 +1099,7 @@ pub fn extract_text_in_regions_mem(
     let mut gid_pages: HashSet<u32> = HashSet::new();
     let mut page_thresholds: HashMap<u32, f32> = HashMap::new();
     let mut rotated_pages: HashMap<u32, RegionCoordSpace> = HashMap::new();
+    let mut display_pages: HashMap<u32, extractor::DisplayPage> = HashMap::new();
     let mut style_cache = extractor::FontStyleCache::new();
 
     for (page_num, &page_id) in pages.iter() {
@@ -1075,16 +1119,22 @@ pub fn extract_text_in_regions_mem(
             skipped_invisible,
             page_box,
             ..
-        } = extractor::extract_page_text_items_in_page_box(
+        } = extractor::extract_page_text_items_in_page_box_with_options(
             &doc,
             page_id,
             *page_num,
             &font_cmaps,
-            false,
+            options.text_extraction(false),
             &mut style_cache,
             &mut form_budget,
         )?;
         page_heights.insert(*page_num, page_box.height());
+        if frame == PositionFrame::Display {
+            display_pages.insert(
+                *page_num,
+                extractor::DisplayPage::new(&doc, page_id, page_box),
+            );
+        }
         // OCR-layer fallback: scanned pages often carry their text as an
         // invisible (Tr 3) layer behind the page raster. The visible-only
         // pass sees nothing there but `[Image: ...]` placeholders, so every
@@ -1104,12 +1154,12 @@ pub fn extract_text_in_regions_mem(
             !matches!(it.item_type, types::ItemType::Image) && !it.text.trim().is_empty()
         });
         if skipped_invisible && !has_visible_text {
-            if let Ok(invisible) = extractor::extract_page_text_items_in_page_box(
+            if let Ok(invisible) = extractor::extract_page_text_items_in_page_box_with_options(
                 &doc,
                 page_id,
                 *page_num,
                 &font_cmaps,
-                true,
+                options.text_extraction(true),
                 &mut style_cache,
                 &mut form_budget,
             ) {
@@ -1156,6 +1206,7 @@ pub fn extract_text_in_regions_mem(
             .get(&page_1idx)
             .copied()
             .unwrap_or(RegionCoordSpace::Standard);
+        let display = display_pages.get(&page_1idx).copied();
 
         let mut page_results = Vec::with_capacity(regions.len());
 
@@ -1170,7 +1221,7 @@ pub fn extract_text_in_regions_mem(
         let all_bounds: Vec<RegionBounds> = regions
             .iter()
             .map(|rect| {
-                let [rx1, ry1, rx2, ry2] = *rect;
+                let [rx1, ry1, rx2, ry2] = sheet_region_rect(*rect, display);
                 region_bounds(rx1, ry1, rx2, ry2, page_h, coords)
             })
             .collect();
@@ -1263,6 +1314,31 @@ pub fn extract_tables_in_regions_mem(
     buffer: &[u8],
     page_regions: &[(u32, Vec<[f32; 4]>)],
 ) -> Result<Vec<PageRegionResult>, PdfError> {
+    extract_tables_in_regions_mem_in_frame(buffer, page_regions, PositionFrame::Sheet)
+}
+
+/// [`extract_tables_in_regions_mem`] with the frame of the region rects given
+/// explicitly — see [`extract_text_in_regions_mem_in_frame`].
+pub fn extract_tables_in_regions_mem_in_frame(
+    buffer: &[u8],
+    page_regions: &[(u32, Vec<[f32; 4]>)],
+    frame: PositionFrame,
+) -> Result<Vec<PageRegionResult>, PdfError> {
+    extract_tables_in_regions_mem_with_options(
+        buffer,
+        page_regions,
+        PositionOptions::new().frame(frame),
+    )
+}
+
+/// [`extract_tables_in_regions_mem_in_frame`] with every option given as a
+/// [`PositionOptions`] — see [`extract_text_in_regions_mem_with_options`].
+pub fn extract_tables_in_regions_mem_with_options(
+    buffer: &[u8],
+    page_regions: &[(u32, Vec<[f32; 4]>)],
+    options: PositionOptions,
+) -> Result<Vec<PageRegionResult>, PdfError> {
+    let frame = options.frame;
     validate_pdf_bytes(buffer)?;
     let (doc, _page_count) = load_document_from_mem(buffer)?;
     let pages = doc.get_pages();
@@ -1277,6 +1353,7 @@ pub fn extract_tables_in_regions_mem(
     let mut gid_pages: HashSet<u32> = HashSet::new();
     let mut page_thresholds: HashMap<u32, f32> = HashMap::new();
     let mut rotated_pages: HashMap<u32, RegionCoordSpace> = HashMap::new();
+    let mut display_pages: HashMap<u32, extractor::DisplayPage> = HashMap::new();
     let mut style_cache = extractor::FontStyleCache::new();
 
     for (page_num, &page_id) in pages.iter() {
@@ -1291,16 +1368,22 @@ pub fn extract_tables_in_regions_mem(
             coords_rotated,
             page_box,
             ..
-        } = extractor::extract_page_text_items_in_page_box(
+        } = extractor::extract_page_text_items_in_page_box_with_options(
             &doc,
             page_id,
             *page_num,
             &font_cmaps,
-            false,
+            options.text_extraction(false),
             &mut style_cache,
             &mut extractor::FormWalkBudget::new(),
         )?;
         page_heights.insert(*page_num, page_box.height());
+        if frame == PositionFrame::Display {
+            display_pages.insert(
+                *page_num,
+                extractor::DisplayPage::new(&doc, page_id, page_box),
+            );
+        }
         let threshold = text_utils::fix_letterspaced_items(&mut items);
         if threshold > 0.10 {
             page_thresholds.insert(*page_num, threshold);
@@ -1327,11 +1410,12 @@ pub fn extract_tables_in_regions_mem(
             .get(&page_1idx)
             .copied()
             .unwrap_or(RegionCoordSpace::Standard);
+        let display = display_pages.get(&page_1idx).copied();
 
         let mut page_results = Vec::with_capacity(regions.len());
 
         for rect in regions {
-            let [rx1, ry1, rx2, ry2] = *rect;
+            let [rx1, ry1, rx2, ry2] = sheet_region_rect(*rect, display);
 
             // Note: we intentionally DO NOT bail on page_has_gid here.
             // The GID flag means some font on the page uses unresolvable
@@ -3618,6 +3702,16 @@ impl From<extractor::geometry::PageRotation> for RegionCoordSpace {
     }
 }
 
+/// A region rect in the sheet frame's top-left space: unchanged when the
+/// caller gave it there, turned back from the rendered page when it came in
+/// the display frame (`display` is the page's mapping in that case).
+fn sheet_region_rect(rect: [f32; 4], display: Option<extractor::DisplayPage>) -> [f32; 4] {
+    match display {
+        Some(page) => page.region_to_sheet(rect),
+        None => rect,
+    }
+}
+
 #[derive(Clone, Copy)]
 struct RegionBounds {
     x_min: f32,
@@ -5533,10 +5627,12 @@ mod text_cluster_column_undercount_tests {
             height: 10.0,
             font: "F".into(),
             font_tag: String::new(),
+            legacy_symbol_rewrite: false,
             font_size: 10.0,
             page: 1,
             is_bold: false,
             is_italic: false,
+            font_weight: None,
             is_underline: false,
             is_strikeout: false,
             rotation: 0.0,
@@ -5813,10 +5909,12 @@ mod table_candidate_selection_tests {
             height: 10.0,
             font: "F1".to_string(),
             font_tag: String::new(),
+            legacy_symbol_rewrite: false,
             font_size: 10.0,
             page: 1,
             is_bold: false,
             is_italic: false,
+            font_weight: None,
             is_underline: false,
             is_strikeout: false,
             rotation: 0.0,
@@ -6647,10 +6745,12 @@ mod tests {
             height,
             font: "Helvetica".to_string(),
             font_tag: String::new(),
+            legacy_symbol_rewrite: false,
             font_size: height,
             page: 1,
             is_bold: false,
             is_italic: false,
+            font_weight: None,
             is_underline: false,
             is_strikeout: false,
             rotation: 0.0,
@@ -7858,10 +7958,12 @@ mod rotated_run_region_tests {
             advance_known: true,
             font: "Helvetica".to_string(),
             font_tag: "F1".to_string(),
+            legacy_symbol_rewrite: false,
             font_size: if rotation == 0.0 { height } else { width },
             page: 1,
             is_bold: false,
             is_italic: false,
+            font_weight: None,
             is_underline: false,
             is_strikeout: false,
             item_type: ItemType::Text,

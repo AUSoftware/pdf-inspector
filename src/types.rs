@@ -21,6 +21,10 @@ pub(crate) type FontEncodingMap = HashMap<u8, char>;
 pub(crate) struct FontEncoding {
     pub(crate) differences: FontEncodingMap,
     pub(crate) identity_overrides: FontEncodingMap,
+    /// Codes whose embedded glyph has no outline but a positive advance:
+    /// painted, they leave a gap and nothing else, so they read as spaces
+    /// whatever the font's ToUnicode claims (see `blank_glyph_codes`).
+    pub(crate) blank_codes: std::collections::HashSet<u8>,
 }
 
 /// All font encodings for a page
@@ -125,6 +129,13 @@ pub struct PdfRect {
 /// `extract_text_with_positions_and_rotations_mem`) and the shift is turned
 /// the same way; `/Rotate` is not applied. Inside the markdown pipeline
 /// items stay in raw user space.
+///
+/// [`PositionFrame::Display`](crate::PositionFrame) (see
+/// [`extract_text_with_positions_mem_in_frame`](crate::extract_text_with_positions_mem_in_frame))
+/// reports items in the rendered page's frame instead: the visible page box
+/// turned clockwise by the page's inheritable `/Rotate`, with the turn of a
+/// rotated page undone, so the box and `rotation` describe the item as a
+/// renderer draws it.
 #[derive(Debug, Clone)]
 pub struct TextItem {
     /// The text content
@@ -190,14 +201,33 @@ pub struct TextItem {
     /// that don't originate from a content-stream show operator (images,
     /// links, form fields, OCR).
     pub font_tag: String,
+    /// At least one source character was changed by the legacy private-use
+    /// symbol cleanup. This is decoding provenance, not an OCR verdict:
+    /// the rewritten value must not be assumed to be an authoritative
+    /// Unicode alias. Merged items retain evidence from every contributing run;
+    /// later text splits conservatively retain their source run's evidence.
+    pub legacy_symbol_rewrite: bool,
     /// Font size
     pub font_size: f32,
     /// Page number (1-indexed)
     pub page: u32,
-    /// Whether the font is bold
+    /// Whether the font is bold: a bold word in the font name, the
+    /// FontDescriptor's ForceBold flag or the embedded program's bold
+    /// selection, or text filled and stroked to look heavier. With
+    /// [`PositionOptions::bold_from_weight`](crate::PositionOptions) it is
+    /// also `true` when `font_weight` is 600 or more.
     pub is_bold: bool,
     /// Whether the font is italic
     pub is_italic: bool,
+    /// The font's weight class on the 100..=900 scale shared by CSS
+    /// `font-weight` and the OS/2 `usWeightClass` field (400 regular, 700
+    /// bold), read from the embedded font program's OS/2 table, else the
+    /// FontDescriptor's `/FontWeight`, else a weight word in the font name
+    /// ("Light", "Medium", "-Md", "Black", "W6"). `None` when none of them
+    /// says, and for items that don't come from a font (images, links, form
+    /// fields, OCR). Independent of `is_bold`, which stays as it was: a
+    /// medium face reports `Some(500)` and `is_bold: false`.
+    pub font_weight: Option<u16>,
     /// Whether the text is underlined (drawn rule/thin rect under the
     /// baseline — PDFs have no underline font flag, so this is detected
     /// geometrically after extraction; see `extractor::underline`).
@@ -672,10 +702,12 @@ mod formatting_tests {
             height: 12.0,
             font: "F1".to_string(),
             font_tag: String::new(),
+            legacy_symbol_rewrite: false,
             font_size: 12.0,
             page: 1,
             is_bold: false,
             is_italic: false,
+            font_weight: None,
             is_underline: false,
             is_strikeout: strikeout,
             rotation: 0.0,

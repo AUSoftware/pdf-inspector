@@ -1,5 +1,6 @@
 //! Font width parsing, encoding, and text decoding.
 
+use super::get_number;
 use crate::glyph_names::glyph_to_char;
 use crate::tounicode::FontCMaps;
 use crate::types::{
@@ -760,6 +761,7 @@ pub(crate) fn build_font_encodings(
     doc: &Document,
     fonts: &std::collections::BTreeMap<Vec<u8>, &lopdf::Dictionary>,
     cmaps: &FontCMaps,
+    font_cache: &mut FontStyleCache,
 ) -> (PageFontEncodings, bool) {
     let mut encodings = PageFontEncodings::new();
     let mut has_gid_fonts = false;
@@ -767,6 +769,8 @@ pub(crate) fn build_font_encodings(
     for (font_name, font_dict) in fonts {
         let resource_name = String::from_utf8_lossy(font_name).to_string();
 
+        let mut differences = FontEncodingMap::new();
+        let mut identity_overrides = FontEncodingMap::new();
         if let Some(result) = parse_font_encoding(doc, font_dict) {
             if !result.gid_codes.is_empty()
                 && !tounicode_maps_codes(font_dict, cmaps, &result.gid_codes)
@@ -774,20 +778,167 @@ pub(crate) fn build_font_encodings(
                 has_gid_fonts = true;
             }
             if !result.map.is_empty() {
-                let identity_overrides =
-                    stale_identity_cmap_overrides(doc, font_dict, cmaps, &result);
-                encodings.insert(
-                    resource_name,
-                    FontEncoding {
-                        differences: result.map,
-                        identity_overrides,
-                    },
-                );
+                identity_overrides = stale_identity_cmap_overrides(doc, font_dict, cmaps, &result);
+                differences = result.map;
             }
+        }
+        let blank_codes = blank_glyph_codes(doc, font_dict, font_cache);
+        if !differences.is_empty() || !blank_codes.is_empty() {
+            encodings.insert(
+                resource_name,
+                FontEncoding {
+                    differences,
+                    identity_overrides,
+                    blank_codes,
+                },
+            );
         }
     }
 
     (encodings, has_gid_fonts)
+}
+
+/// Whether `code`, decoded as `label`, is a blank glyph standing in for a
+/// word space: the glyph paints nothing but advances. A tab or no-break
+/// space label is spacing already and reads as a plain space too; labels
+/// that are invisible formatting (soft hyphen, zero-width joiners, byte
+/// order mark) keep their meaning, since a blank glyph is exactly what they
+/// render as.
+fn blank_glyph_reads_as_space(encoding: Option<&FontEncoding>, code: u8, label: &str) -> bool {
+    encoding.is_some_and(|map| map.blank_codes.contains(&code))
+        && label.chars().any(|c| !is_invisible_format(c))
+}
+
+/// Characters that render as nothing by design: soft hyphen, zero-width
+/// spaces and joiners, bidi marks, embeddings and isolates, invisible math
+/// operators, byte order mark. A blank glyph labelled with one of these is
+/// the label's own rendering, not a stale space.
+fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
+}
+
+/// Codes of a symbolic TrueType font whose glyph has no outline but a
+/// positive advance. Painted, such a glyph leaves a gap and nothing else, so
+/// the code reads as a space whatever the font's ToUnicode says. Word 2011
+/// for Mac writes subsets whose ToUnicode labels the space glyph with the
+/// code it landed on ("$", "!", "&"), turning every word space into
+/// punctuation. Only symbolic fonts without an `/Encoding` are considered:
+/// they map codes through their own `cmap`, which is the evidence used here.
+/// A font with no outlined glyph at all (an invisible text layer) is left
+/// alone. Results are cached per embedded font program.
+fn blank_glyph_codes(
+    doc: &Document,
+    font_dict: &lopdf::Dictionary,
+    font_cache: &mut FontStyleCache,
+) -> std::collections::HashSet<u8> {
+    use ttf_parser::PlatformId;
+
+    let font_file = || -> Option<ObjectId> {
+        if font_dict.get(b"Subtype").ok()?.as_name().ok()? != b"TrueType"
+            || font_dict.get(b"Encoding").is_ok()
+        {
+            return None;
+        }
+        let descriptor = resolve_dict(doc, font_dict.get(b"FontDescriptor").ok()?)?;
+        // Flags bit 3: symbolic. Non-symbolic fonts route codes through a
+        // standard encoding, not their own cmap.
+        if descriptor.get(b"Flags").ok()?.as_i64().ok()? & 4 == 0 {
+            return None;
+        }
+        descriptor.get(b"FontFile2").ok()?.as_reference().ok()
+    };
+    let Some(ff_ref) = font_file() else {
+        return Default::default();
+    };
+    if let Some(cached) = font_cache.blank_codes_by_font_file.get(&ff_ref) {
+        return cached.clone();
+    }
+    let compute = || -> Option<std::collections::HashSet<u8>> {
+        let data = font_file_data(doc, ff_ref)?;
+        let face = ttf_parser::Face::parse(&data, 0).ok()?;
+        let cmap = face.tables().cmap?;
+        // Symbolic fonts address their glyphs through a (1,0) table by
+        // code, or a (3,0) table by code in one of the private ranges
+        // F000-F2FF, with the bare code as the last resort (PDF 32000-1,
+        // 9.6.6.4).
+        let glyph_for = |code: u8| -> Option<ttf_parser::GlyphId> {
+            let code = u32::from(code);
+            for subtable in cmap.subtables {
+                let candidates: &[u32] = match (subtable.platform_id, subtable.encoding_id) {
+                    (PlatformId::Macintosh, 0) => &[code],
+                    (PlatformId::Windows, 0) => {
+                        &[0xF000 + code, 0xF100 + code, 0xF200 + code, code]
+                    }
+                    _ => continue,
+                };
+                for &candidate in candidates {
+                    if let Some(gid) = subtable.glyph_index(candidate) {
+                        if gid.0 != 0 {
+                            return Some(gid);
+                        }
+                    }
+                }
+            }
+            None
+        };
+        let mut blank = std::collections::HashSet::new();
+        let mut outlined = 0usize;
+        let mut mapped = 0usize;
+        // Control codes never carry a word space; Word's subsets start at
+        // 0x21 and other producers keep 0x00-0x1F for genuinely blank
+        // control glyphs.
+        for code in 0x20u8..=255 {
+            let Some(gid) = glyph_for(code) else {
+                continue;
+            };
+            mapped += 1;
+            if face.glyph_bounding_box(gid).is_some() {
+                outlined += 1;
+                continue;
+            }
+            // The glyph program's own advance keeps the result a property
+            // of the font file, which is what the cache is keyed by.
+            if face.glyph_hor_advance(gid).is_some_and(|w| w > 0) {
+                blank.insert(code);
+            }
+        }
+        // Word for Mac also writes a subset per run, so a space painted on
+        // its own arrives as a font holding nothing but `.notdef` and that
+        // blank glyph, with one code mapped. With no outline anywhere, at
+        // most two mapped codes still read as such a space subset; more is
+        // an invisible text layer, which keeps its text.
+        if blank.is_empty() || (outlined == 0 && mapped > 2) {
+            return None;
+        }
+        debug!(
+            "blank glyph codes for {}: {:?}",
+            font_dict
+                .get(b"BaseFont")
+                .ok()
+                .and_then(|o| o.as_name().ok())
+                .map(|n| String::from_utf8_lossy(n).into_owned())
+                .unwrap_or_default(),
+            {
+                let mut codes: Vec<u8> = blank.iter().copied().collect();
+                codes.sort_unstable();
+                codes
+            }
+        );
+        Some(blank)
+    };
+    let blank = compute().unwrap_or_default();
+    font_cache
+        .blank_codes_by_font_file
+        .insert(ff_ref, blank.clone());
+    blank
 }
 
 /// Some subset producers change the simple font's glyph encoding but retain
@@ -1115,15 +1266,19 @@ pub(crate) fn get_font_file2_obj_num(doc: &Document, font_dict: &lopdf::Dictiona
         .map(|r| r.0)
 }
 
-/// Document-scoped memo of embedded-font style flags, keyed by the
-/// FontFile2/FontFile3 stream's object id. The same font program is
+/// Document-scoped memo of facts read from embedded font programs, keyed
+/// by the FontFile2/FontFile3 stream's object id: style flags, and the
+/// blank-glyph codes of `blank_glyph_codes`. The same font program is
 /// referenced from every page that uses the font, and decompressing +
-/// parsing it dominates `descriptor_style_flags` — without the memo that
+/// parsing it dominates `font_style` — without the memo that
 /// cost repeats per page whenever the descriptor leaves a flag unset
 /// (the common case: regular fonts report neither italic nor bold).
 #[derive(Debug, Default)]
 pub(crate) struct FontStyleCache {
-    by_font_file: HashMap<ObjectId, (bool, bool)>,
+    by_font_file: HashMap<ObjectId, FontStyle>,
+    /// Blank-glyph codes per embedded font program (see `blank_glyph_codes`),
+    /// so a font shared across pages is scanned once.
+    blank_codes_by_font_file: HashMap<ObjectId, std::collections::HashSet<u8>>,
 }
 
 impl FontStyleCache {
@@ -1132,18 +1287,50 @@ impl FontStyleCache {
     }
 }
 
-/// Style flags from the FontDescriptor, which survive subset fonts whose
-/// BaseFont names are opaque tags ("Tc1", "ABCDEF+F1") that defeat the
-/// name-based bold/italic heuristics.
+/// Style of a font resource: italic and bold, and the weight class.
 ///
+/// The flags survive subset fonts whose BaseFont names are opaque tags
+/// ("Tc1", "ABCDEF+F1") that defeat the name-based bold/italic heuristics.
 /// Italic: `ItalicAngle` beyond a few degrees, or Flags bit 7 (Italic,
 /// value 64). Bold: Flags bit 19 (ForceBold, value 1<<18). The small
 /// ItalicAngle threshold skips fonts that declare a token slant.
-pub(crate) fn descriptor_style_flags(
+///
+/// `weight` is the 100..=900 weight class, read in this order: the embedded
+/// font program's OS/2 `usWeightClass` (the weight word of the PostScript
+/// name for a bare CFF program, which has no OS/2 table), the descriptor's
+/// `/FontWeight`, then the weight word of the `/BaseFont` name (see
+/// `text_utils::font_weight_from_name`). `None` when none of them says, and
+/// for anything but an ordinary text font (Type0, Type1, MMType1,
+/// TrueType): a Type3 font is a set of glyph procedures whose name and
+/// descriptor say nothing about the ink they draw.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct FontStyle {
+    pub(crate) italic: bool,
+    pub(crate) bold: bool,
+    pub(crate) weight: Option<u16>,
+}
+
+impl FontStyle {
+    /// `(italic, bold)`.
+    pub(crate) fn flags(self) -> (bool, bool) {
+        (self.italic, self.bold)
+    }
+}
+
+/// The [`FontStyle`] of a font resource, from its descriptor, its embedded
+/// program and its name.
+pub(crate) fn font_style(
     doc: &Document,
     font_dict: &lopdf::Dictionary,
     style_cache: &mut FontStyleCache,
-) -> (bool, bool) {
+) -> FontStyle {
+    let has_weight_class = is_ordinary_text_font(font_dict);
+    let name_weight = font_dict
+        .get(b"BaseFont")
+        .ok()
+        .filter(|_| has_weight_class)
+        .and_then(|obj| obj.as_name().ok())
+        .and_then(|name| crate::text_utils::font_weight_from_name(&String::from_utf8_lossy(name)));
     let descriptor = font_dict
         .get(b"FontDescriptor")
         .ok()
@@ -1156,17 +1343,16 @@ pub(crate) fn descriptor_style_flags(
             resolve_dict(doc, cid_font_dict.get(b"FontDescriptor").ok()?)
         });
     let Some(descriptor) = descriptor else {
-        return (false, false);
+        return FontStyle {
+            weight: name_weight,
+            ..FontStyle::default()
+        };
     };
 
     let italic_angle = descriptor
         .get(b"ItalicAngle")
         .ok()
-        .and_then(|obj| match obj {
-            Object::Integer(i) => Some(*i as f32),
-            Object::Real(r) => Some(*r),
-            _ => None,
-        })
+        .and_then(get_number)
         .unwrap_or(0.0);
     let flags = descriptor
         .get(b"Flags")
@@ -1174,56 +1360,104 @@ pub(crate) fn descriptor_style_flags(
         .and_then(|obj| obj.as_i64().ok())
         .unwrap_or(0);
 
-    let mut italic = italic_angle.abs() >= 4.0 || flags & (1 << 6) != 0;
-    let mut bold = flags & (1 << 18) != 0;
+    let mut style = FontStyle {
+        italic: italic_angle.abs() >= 4.0 || flags & (1 << 6) != 0,
+        bold: flags & (1 << 18) != 0,
+        weight: None,
+    };
 
     // Descriptors lie: subset generators write ItalicAngle 0 for genuinely
     // italic faces. The embedded font file keeps the truth — OS/2
-    // fsSelection (via `Face::is_italic`) and the post table's italicAngle.
-    if !italic || !bold {
-        if let Some(ff_ref) = font_file_ref(descriptor) {
-            let (emb_italic, emb_bold) = *style_cache
-                .by_font_file
-                .entry(ff_ref)
-                .or_insert_with(|| embedded_style_flags(doc, ff_ref));
-            italic = italic || emb_italic;
-            bold = bold || emb_bold;
-        }
+    // fsSelection (via `Face::is_italic`) and the post table's italicAngle —
+    // and it alone carries the weight class.
+    if let Some(ff_ref) = font_file_ref(descriptor) {
+        let embedded = *style_cache
+            .by_font_file
+            .entry(ff_ref)
+            .or_insert_with(|| embedded_style(doc, ff_ref));
+        style.italic |= embedded.italic;
+        style.bold |= embedded.bold;
+        style.weight = embedded.weight;
     }
-    (italic, bold)
+    style.weight = if has_weight_class {
+        style
+            .weight
+            .or_else(|| {
+                descriptor
+                    .get(b"FontWeight")
+                    .ok()
+                    .and_then(|obj| resolve_number(doc, obj))
+                    .and_then(weight_class)
+            })
+            .or(name_weight)
+    } else {
+        None
+    };
+    style
 }
 
-/// Style flags parsed from an embedded font program stream.
-fn embedded_style_flags(doc: &Document, ff_ref: ObjectId) -> (bool, bool) {
+/// Whether a font dictionary is an ordinary text font — Type0, Type1,
+/// MMType1 or TrueType — as opposed to a Type3 font or an unknown subtype.
+fn is_ordinary_text_font(font_dict: &lopdf::Dictionary) -> bool {
+    font_dict
+        .get(b"Subtype")
+        .ok()
+        .and_then(|obj| obj.as_name().ok())
+        .is_some_and(|subtype| matches!(subtype, b"Type0" | b"Type1" | b"MMType1" | b"TrueType"))
+}
+
+/// A number from an integer or real object, following an indirect reference.
+fn resolve_number(doc: &Document, obj: &Object) -> Option<f32> {
+    match obj {
+        Object::Reference(id) => doc.get_object(*id).ok().and_then(get_number),
+        direct => get_number(direct),
+    }
+}
+
+/// A weight class value from `usWeightClass` or `/FontWeight`, clamped into
+/// the 100..=900 scale; `None` for zero, negative or non-numeric values,
+/// which both fields use for "unset".
+fn weight_class(value: f32) -> Option<u16> {
+    if !value.is_finite() || value < 1.0 {
+        return None;
+    }
+    Some(value.round().clamp(100.0, 900.0) as u16)
+}
+
+/// Style parsed from an embedded font program stream.
+fn embedded_style(doc: &Document, ff_ref: ObjectId) -> FontStyle {
     let Some(data) = font_file_data(doc, ff_ref) else {
-        return (false, false);
+        return FontStyle::default();
     };
     if let Ok(face) = ttf_parser::Face::parse(&data, 0) {
         // PDF subsetters can remove OS/2 while retaining the bold bit in
         // head.macStyle. Face::is_bold only reads OS/2; use the legacy flag
         // when that table is unavailable, without overriding an explicit
         // regular OS/2 face. The parsed face has already validated head.
-        let mac_bold = face.tables().os2.is_none()
+        let os2 = face.tables().os2;
+        let mac_bold = os2.is_none()
             && face
                 .raw_face()
                 .table(ttf_parser::Tag::from_bytes(b"head"))
                 .and_then(|head| head.get(44..46))
                 .is_some_and(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]) & 1 != 0);
-        (
-            face.is_italic() || face.italic_angle().abs() >= 4.0,
-            face.is_bold() || mac_bold,
-        )
+        FontStyle {
+            italic: face.is_italic() || face.italic_angle().abs() >= 4.0,
+            bold: face.is_bold() || mac_bold,
+            weight: os2.and_then(|os2| weight_class(f32::from(os2.weight().to_number()))),
+        }
     } else if let Some(name) = cff_font_name(&data) {
         // FontFile3 is bare CFF (no sfnt container) — ttf_parser
         // can't open it, but the CFF Name INDEX keeps the real
         // PostScript name ("XXXXXX+Amplitude-LightItalic") even
         // when the descriptor was rewritten to claim upright.
-        (
-            crate::text_utils::is_italic_font(&name),
-            crate::text_utils::is_bold_font(&name),
-        )
+        FontStyle {
+            italic: crate::text_utils::is_italic_font(&name),
+            bold: crate::text_utils::is_bold_font(&name),
+            weight: crate::text_utils::font_weight_from_name(&name),
+        }
     } else {
-        (false, false)
+        FontStyle::default()
     }
 }
 
@@ -1290,7 +1524,7 @@ fn font_file_data(doc: &Document, ff_ref: ObjectId) -> Option<Vec<u8>> {
     )
 }
 
-/// Decode text from a PDF string operand using font CMaps, encodings, and fallbacks.
+/// Decode a PDF string and record whether legacy symbol cleanup changed a character.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn extract_text_from_operand(
     obj: &Object,
@@ -1303,7 +1537,7 @@ pub(crate) fn extract_text_from_operand(
     encoding_cache: &HashMap<String, Encoding<'_>>,
     cmap_decisions: &mut CMapDecisionCache,
     font_widths: &PageFontWidths,
-) -> Option<String> {
+) -> Option<(String, bool)> {
     let is_type0_cid_font = font_widths
         .get(current_font)
         .is_some_and(|info| info.is_cid);
@@ -1317,43 +1551,52 @@ pub(crate) fn extract_text_from_operand(
                 // This prevents partial CMap results from blocking the Differences path.
                 if entry.primary.code_byte_length == 1 {
                     let encoding_map = font_encodings.get(current_font);
+                    let decode_byte = |b: u8| -> Option<String> {
+                        let code = b as u16;
+                        // 1. Primary CMap
+                        if let Some(s) = entry.primary.lookup(code) {
+                            if !s.contains('\u{FFFD}') {
+                                if s == (b as char).to_string() {
+                                    if let Some(&ch) =
+                                        encoding_map.and_then(|map| map.identity_overrides.get(&b))
+                                    {
+                                        return Some(ch.to_string());
+                                    }
+                                }
+                                return Some(s);
+                            }
+                        }
+                        // 2. Fallback CMap (embedded font cmap)
+                        if let Some(fb) = entry.fallback.as_ref().and_then(|c| c.lookup(code)) {
+                            if !fb.contains('\u{FFFD}') {
+                                return Some(fb);
+                            }
+                        }
+                        // 3. Differences mapped it? Use Differences result
+                        if let Some(map) = encoding_map {
+                            if let Some(&ch) = map.differences.get(&b) {
+                                return Some(ch.to_string());
+                            }
+                        }
+                        // 4. Printable single-byte fallback
+                        if b >= 0x20 {
+                            return Some(
+                                decode_single_byte_fallback_char(b, use_cp1252_fallback)
+                                    .to_string(),
+                            );
+                        }
+                        None
+                    };
                     let decoded: String = bytes
                         .iter()
                         .filter_map(|&b| {
-                            let code = b as u16;
-                            // 1. Primary CMap
-                            if let Some(s) = entry.primary.lookup(code) {
-                                if !s.contains('\u{FFFD}') {
-                                    if s == (b as char).to_string() {
-                                        if let Some(&ch) = encoding_map
-                                            .and_then(|map| map.identity_overrides.get(&b))
-                                        {
-                                            return Some(ch.to_string());
-                                        }
-                                    }
-                                    return Some(s);
-                                }
+                            let label = decode_byte(b)?;
+                            // A glyph with no outline paints a gap, whatever
+                            // its label says.
+                            if blank_glyph_reads_as_space(encoding_map, b, &label) {
+                                return Some(" ".to_string());
                             }
-                            // 2. Fallback CMap (embedded font cmap)
-                            if let Some(fb) = entry.fallback.as_ref().and_then(|c| c.lookup(code)) {
-                                if !fb.contains('\u{FFFD}') {
-                                    return Some(fb);
-                                }
-                            }
-                            // 3. Differences mapped it? Use Differences result
-                            if let Some(map) = encoding_map {
-                                if let Some(&ch) = map.differences.get(&b) {
-                                    return Some(ch.to_string());
-                                }
-                            }
-                            // 4. Printable single-byte fallback
-                            if b >= 0x20 {
-                                return Some(
-                                    decode_single_byte_fallback_char(b, use_cp1252_fallback)
-                                        .to_string(),
-                                );
-                            }
-                            None
+                            Some(label)
                         })
                         .collect();
                     if !decoded.is_empty() {
@@ -1464,14 +1707,16 @@ pub(crate) fn extract_text_from_operand(
             // The Differences array overrides specific codes in a base encoding (typically
             // WinAnsiEncoding). We must combine Differences entries with the base encoding
             // rather than using filter_map which silently drops unmapped bytes.
-            if let Some(encoding_map) = font_encodings.get(current_font) {
-                let encoding_map = &encoding_map.differences;
-                let has_diff_match = bytes.iter().any(|b| encoding_map.contains_key(b));
+            if let Some(encoding) = font_encodings.get(current_font) {
+                let encoding_map = &encoding.differences;
+                let has_diff_match = bytes
+                    .iter()
+                    .any(|b| encoding_map.contains_key(b) || encoding.blank_codes.contains(b));
                 if has_diff_match {
                     let decoded: String = bytes
                         .iter()
                         .filter_map(|&b| {
-                            if let Some(&ch) = encoding_map.get(&b) {
+                            let label = if let Some(&ch) = encoding_map.get(&b) {
                                 Some(ch)
                             } else if b >= 0x20 {
                                 // Base encoding fallback for printable bytes.
@@ -1480,7 +1725,13 @@ pub(crate) fn extract_text_from_operand(
                                 Some(decode_single_byte_fallback_char(b, use_cp1252_fallback))
                             } else {
                                 None // Skip unmapped control characters
+                            }?;
+                            // A glyph with no outline paints a gap, whatever
+                            // its label says.
+                            if blank_glyph_reads_as_space(Some(encoding), b, &label.to_string()) {
+                                return Some(' ');
                             }
+                            Some(label)
                         })
                         .collect();
                     if !decoded.is_empty() {
@@ -1584,9 +1835,12 @@ pub(crate) fn extract_text_from_operand(
         }
     })();
     result.map(|text| {
-        let text = clean_symbol_pua(text);
+        let (text, legacy_symbol_rewrite) = clean_symbol_pua(text);
         let text = remap_texcm_math_symbols(text, base_font_name);
-        normalize_cp1252_controls(text, use_cp1252_fallback)
+        (
+            normalize_cp1252_controls(text, use_cp1252_fallback),
+            legacy_symbol_rewrite,
+        )
     })
 }
 
@@ -1716,20 +1970,22 @@ fn should_use_cp1252_single_byte_fallback(
     !non_cp1252_names.iter().any(|name| font_name.contains(name))
 }
 
-/// Replace PUA characters in the F000-F0FF range with standard Unicode equivalents.
-/// These come from Symbol/Wingdings fonts whose ToUnicode CMaps map to PUA.
-fn clean_symbol_pua(text: String) -> String {
+/// Apply the existing private-use cleanup without changing its output.
+/// The boolean records an actual heuristic rewrite, not a proven Unicode alias.
+fn clean_symbol_pua(text: String) -> (String, bool) {
     if !text.chars().any(|c| ('\u{F000}'..='\u{F0FF}').contains(&c)) {
-        return text;
+        return (text, false);
     }
-    text.chars()
+    let mut rewritten = false;
+    let text = text
+        .chars()
         .map(|c| {
             let code = c as u32;
             if !(0xF000..=0xF0FF).contains(&code) {
                 return c;
             }
             let low = code - 0xF000;
-            match low {
+            let replacement = match low {
                 // Common bullets
                 0xA1 | 0xA7 | 0xB7 => '\u{2022}',
                 // Checkmark
@@ -1737,9 +1993,12 @@ fn clean_symbol_pua(text: String) -> String {
                 // Printable ASCII range and Latin-1 above: strip F000 offset
                 0x20..=0xFF => char::from_u32(low).unwrap_or(c),
                 _ => c,
-            }
+            };
+            rewritten |= replacement != c;
+            replacement
         })
-        .collect()
+        .collect();
+    (text, rewritten)
 }
 
 fn decode_symbol_fallback(bytes: &[u8], base_font_name: Option<&str>) -> Option<String> {
@@ -1987,7 +2246,7 @@ mod tests {
             "Flags" => 32,
         });
         assert_eq!(
-            descriptor_style_flags(&doc, &font_dict, &mut FontStyleCache::new()),
+            font_style(&doc, &font_dict, &mut FontStyleCache::new()).flags(),
             (true, false)
         );
     }
@@ -2001,7 +2260,7 @@ mod tests {
             "Flags" => 64, // bit 7: Italic
         });
         assert_eq!(
-            descriptor_style_flags(&doc, &font_dict, &mut FontStyleCache::new()),
+            font_style(&doc, &font_dict, &mut FontStyleCache::new()).flags(),
             (true, false)
         );
     }
@@ -2015,7 +2274,7 @@ mod tests {
             "Flags" => 1 << 18, // ForceBold
         });
         assert_eq!(
-            descriptor_style_flags(&doc, &font_dict, &mut FontStyleCache::new()),
+            font_style(&doc, &font_dict, &mut FontStyleCache::new()).flags(),
             (false, true)
         );
     }
@@ -2030,7 +2289,7 @@ mod tests {
             "Flags" => 32,
         });
         assert_eq!(
-            descriptor_style_flags(&doc, &font_dict, &mut FontStyleCache::new()),
+            font_style(&doc, &font_dict, &mut FontStyleCache::new()).flags(),
             (false, false)
         );
     }
@@ -2040,7 +2299,7 @@ mod tests {
         let doc = Document::with_version("1.4");
         let font_dict = dictionary! { "Type" => "Font", "BaseFont" => "Tc1" };
         assert_eq!(
-            descriptor_style_flags(&doc, &font_dict, &mut FontStyleCache::new()),
+            font_style(&doc, &font_dict, &mut FontStyleCache::new()).flags(),
             (false, false)
         );
     }
@@ -2048,6 +2307,11 @@ mod tests {
     /// Synthetic sfnt containing just the tables needed to parse a face.
     /// No source-document font bytes are needed for these style tests.
     fn sfnt_with_style(mac_style: u16, os2_selection: Option<u16>) -> Vec<u8> {
+        sfnt_with_style_and_weight(mac_style, os2_selection.map(|selection| (selection, 0)))
+    }
+
+    /// [`sfnt_with_style`] whose OS/2 table also carries a `usWeightClass`.
+    fn sfnt_with_style_and_weight(mac_style: u16, os2: Option<(u16, u16)>) -> Vec<u8> {
         let mut head = vec![0u8; 54];
         head[18..20].copy_from_slice(&1000u16.to_be_bytes()); // unitsPerEm
         head[44..46].copy_from_slice(&mac_style.to_be_bytes());
@@ -2056,9 +2320,10 @@ mod tests {
         maxp[..4].copy_from_slice(&0x00005000u32.to_be_bytes());
         maxp[4..6].copy_from_slice(&1u16.to_be_bytes()); // numGlyphs
         let mut tables = vec![(*b"head", head), (*b"hhea", hhea), (*b"maxp", maxp)];
-        if let Some(selection) = os2_selection {
+        if let Some((selection, weight_class)) = os2 {
             let mut os2 = vec![0u8; 78]; // version 0
-            os2[62..64].copy_from_slice(&selection.to_be_bytes());
+            os2[4..6].copy_from_slice(&weight_class.to_be_bytes()); // usWeightClass
+            os2[62..64].copy_from_slice(&selection.to_be_bytes()); // fsSelection
             tables.push((*b"OS/2", os2));
         }
         tables.sort_by_key(|(tag, _)| *tag);
@@ -2099,7 +2364,7 @@ mod tests {
             "BaseFont" => "ABCDEF+OpaqueFace",
             "FontDescriptor" => descriptor,
         };
-        descriptor_style_flags(&doc, &font_dict, &mut FontStyleCache::new())
+        font_style(&doc, &font_dict, &mut FontStyleCache::new()).flags()
     }
 
     #[test]
@@ -2114,6 +2379,190 @@ mod tests {
     fn embedded_os2_bold_remains_authoritative() {
         assert_eq!(descriptor_flags_from_sfnt(0, Some(1 << 5)), (false, true));
         assert_eq!(descriptor_flags_from_sfnt(1, Some(1 << 6)), (false, false));
+    }
+
+    /// A TrueType font dictionary embedding `font_file`, with the given
+    /// BaseFont and descriptor entries on top of the plain flags.
+    fn embedded_font(
+        base_font: &str,
+        font_file: Vec<u8>,
+        descriptor_extra: lopdf::Dictionary,
+    ) -> (Document, lopdf::Dictionary) {
+        let mut doc = Document::with_version("1.4");
+        let font_file = doc.add_object(lopdf::Stream::new(dictionary! {}, font_file));
+        let mut descriptor = dictionary! {
+            "Type" => "FontDescriptor",
+            "FontName" => base_font,
+            "Flags" => 4,
+            "ItalicAngle" => 0,
+            "FontFile2" => font_file,
+        };
+        for (key, value) in descriptor_extra.into_iter() {
+            descriptor.set(key.clone(), value.clone());
+        }
+        let descriptor = doc.add_object(descriptor);
+        let font_dict = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "TrueType",
+            "BaseFont" => base_font,
+            "FontDescriptor" => descriptor,
+        };
+        (doc, font_dict)
+    }
+
+    #[test]
+    fn weight_class_comes_from_the_embedded_os2_table_first() {
+        // usWeightClass 700 on a face whose fsSelection bold bit is unset,
+        // whose descriptor claims /FontWeight 400 and whose name says
+        // nothing: the embedded table wins, and it does not make the font
+        // bold on its own.
+        let (doc, font_dict) = embedded_font(
+            "ABCDEF+OpaqueFace",
+            sfnt_with_style_and_weight(0, Some((0, 700))),
+            dictionary! { "FontWeight" => 400 },
+        );
+        assert_eq!(
+            font_style(&doc, &font_dict, &mut FontStyleCache::new()),
+            FontStyle {
+                italic: false,
+                bold: false,
+                weight: Some(700),
+            }
+        );
+    }
+
+    #[test]
+    fn weight_class_falls_back_to_the_descriptor_then_the_name() {
+        // No OS/2 table: the descriptor's /FontWeight decides ...
+        let (doc, font_dict) = embedded_font(
+            "ABCDEF+Face-Bold",
+            sfnt_with_style_and_weight(0, None),
+            dictionary! { "FontWeight" => 300 },
+        );
+        assert_eq!(
+            font_style(&doc, &font_dict, &mut FontStyleCache::new()).weight,
+            Some(300)
+        );
+        // ... and without one the weight word of the BaseFont name does.
+        let (doc, font_dict) = embedded_font(
+            "ABCDEF+Face-Bold",
+            sfnt_with_style_and_weight(0, None),
+            dictionary! {},
+        );
+        assert_eq!(
+            font_style(&doc, &font_dict, &mut FontStyleCache::new()).weight,
+            Some(700)
+        );
+        // An OS/2 table that leaves usWeightClass at 0 says nothing.
+        let (doc, font_dict) = embedded_font(
+            "ABCDEF+Face-Md",
+            sfnt_with_style_and_weight(0, Some((0, 0))),
+            dictionary! {},
+        );
+        assert_eq!(
+            font_style(&doc, &font_dict, &mut FontStyleCache::new()).weight,
+            Some(500)
+        );
+    }
+
+    #[test]
+    fn descriptor_font_weight_is_clamped_to_the_scale() {
+        for (value, expected) in [
+            (lopdf::Object::Integer(700), Some(700)),
+            (lopdf::Object::Real(500.0), Some(500)),
+            (lopdf::Object::Integer(1000), Some(900)),
+            (lopdf::Object::Integer(0), None),
+            (lopdf::Object::Integer(-1), None),
+            (lopdf::Object::Name(b"Bold".to_vec()), None),
+        ] {
+            let (doc, font_dict) = doc_with_descriptor(dictionary! {
+                "Type" => "FontDescriptor",
+                "FontName" => "Tc1",
+                "Flags" => 32,
+                "FontWeight" => value.clone(),
+            });
+            assert_eq!(
+                font_style(&doc, &font_dict, &mut FontStyleCache::new()).weight,
+                expected,
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn indirect_font_weight_is_resolved() {
+        let mut doc = Document::with_version("1.4");
+        let weight_id = doc.add_object(lopdf::Object::Integer(600));
+        let desc_id = doc.add_object(dictionary! {
+            "Type" => "FontDescriptor",
+            "FontName" => "Tc1",
+            "Flags" => 32,
+            "ItalicAngle" => 0,
+            "FontWeight" => weight_id,
+        });
+        let font_dict = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "TrueType",
+            "BaseFont" => "Tc1",
+            "FontDescriptor" => desc_id,
+        };
+        assert_eq!(
+            font_style(&doc, &font_dict, &mut FontStyleCache::new()).weight,
+            Some(600)
+        );
+    }
+
+    #[test]
+    fn type3_fonts_carry_no_weight_class() {
+        // A Type3 font's glyph procedures draw whatever they like: neither a
+        // weight word in its name nor a /FontWeight in its descriptor says
+        // how heavy that ink is, while its style flags stay as they were.
+        let mut doc = Document::with_version("1.4");
+        let desc_id = doc.add_object(dictionary! {
+            "Type" => "FontDescriptor",
+            "FontName" => "Glyphs-Bold",
+            "Flags" => 4 | (1 << 18),
+            "ItalicAngle" => 0,
+            "FontWeight" => 700,
+        });
+        let font_dict = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type3",
+            "BaseFont" => "Glyphs-Bold",
+            "FontDescriptor" => desc_id,
+        };
+        assert_eq!(
+            font_style(&doc, &font_dict, &mut FontStyleCache::new()),
+            FontStyle {
+                italic: false,
+                bold: true,
+                weight: None,
+            }
+        );
+        // The same holds for a font dictionary without a subtype at all.
+        let font_dict = dictionary! { "Type" => "Font", "BaseFont" => "Anything-Bold" };
+        assert_eq!(
+            font_style(&doc, &font_dict, &mut FontStyleCache::new()).weight,
+            None
+        );
+    }
+
+    #[test]
+    fn name_weight_needs_no_descriptor() {
+        let doc = Document::with_version("1.4");
+        let font_dict = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica-Light",
+        };
+        assert_eq!(
+            font_style(&doc, &font_dict, &mut FontStyleCache::new()),
+            FontStyle {
+                italic: false,
+                bold: false,
+                weight: Some(300),
+            }
+        );
     }
 
     #[test]
@@ -2136,7 +2585,7 @@ mod tests {
             "DescendantFonts" => vec![lopdf::Object::Reference(cid_id)],
         };
         assert_eq!(
-            descriptor_style_flags(&doc, &font_dict, &mut FontStyleCache::new()),
+            font_style(&doc, &font_dict, &mut FontStyleCache::new()).flags(),
             (true, false)
         );
     }
@@ -2150,6 +2599,40 @@ mod tests {
         data.push(1 + name.len() as u8); // offset past last name
         data.extend_from_slice(name.as_bytes());
         data
+    }
+
+    #[test]
+    fn bare_cff_name_weight_outranks_the_descriptor() {
+        // A Type1C program's own PostScript name carries the style
+        // abbreviation; the descriptor's /FontWeight and the opaque
+        // BaseFont say nothing useful.
+        let mut doc = Document::with_version("1.4");
+        let ff_id = doc.add_object(lopdf::Object::Stream(lopdf::Stream::new(
+            dictionary! {},
+            bare_cff_with_name("ABCDEF+Face-Md"),
+        )));
+        let desc_id = doc.add_object(dictionary! {
+            "Type" => "FontDescriptor",
+            "FontName" => "ABCDEF+Face-Md",
+            "ItalicAngle" => 0,
+            "Flags" => 32,
+            "FontWeight" => 400,
+            "FontFile3" => ff_id,
+        });
+        let font_dict = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Tc1",
+            "FontDescriptor" => desc_id,
+        };
+        assert_eq!(
+            font_style(&doc, &font_dict, &mut FontStyleCache::new()),
+            FontStyle {
+                italic: false,
+                bold: false,
+                weight: Some(500),
+            }
+        );
     }
 
     #[test]
@@ -2177,7 +2660,7 @@ mod tests {
 
         let mut cache = FontStyleCache::new();
         assert_eq!(
-            descriptor_style_flags(&doc, &font_dict, &mut cache),
+            font_style(&doc, &font_dict, &mut cache).flags(),
             (true, true)
         );
         assert_eq!(cache.by_font_file.len(), 1);
@@ -2190,13 +2673,13 @@ mod tests {
             Object::Stream(Stream::new(dictionary! {}, vec![0u8; 4])),
         );
         assert_eq!(
-            descriptor_style_flags(&doc, &font_dict, &mut cache),
+            font_style(&doc, &font_dict, &mut cache).flags(),
             (true, true)
         );
         // A cold cache parses the (now garbage) stream, proving the warm
         // call above answered from the memo.
         assert_eq!(
-            descriptor_style_flags(&doc, &font_dict, &mut FontStyleCache::new()),
+            font_style(&doc, &font_dict, &mut FontStyleCache::new()).flags(),
             (false, false)
         );
     }
@@ -2393,7 +2876,7 @@ mod tests {
             &font_widths,
         );
 
-        let text = result.expect("CID font fallback should still emit a marker");
+        let (text, _) = result.expect("CID font fallback should still emit a marker");
         assert!(
             !text.contains('\u{00CD}') && !text.contains('\u{00D9}'),
             "CID font with unparseable CMap leaked Latin-1 mojibake: {text:?}"
@@ -2427,7 +2910,7 @@ mod tests {
         let mut font_widths: PageFontWidths = HashMap::new();
         font_widths.insert("F1".to_string(), make_font_info(&[], 1000, false));
 
-        let text = extract_text_from_operand(
+        let (text, _) = extract_text_from_operand(
             &obj,
             "F1",
             None,
@@ -2448,6 +2931,21 @@ mod tests {
     }
 
     #[test]
+    fn legacy_cleanup_evidence_tracks_changes_without_changing_aliases() {
+        for (source, expected, rewritten) in [
+            ("AΩμ$•✓", "AΩμ$•✓", false),
+            ("\u{f057}\u{f0b7}\u{f0fc}", "W•✓", true),
+            ("\u{f010}\u{e123}", "\u{f010}\u{e123}", false),
+            ("Price \u{f024}", "Price $", true),
+        ] {
+            assert_eq!(
+                clean_symbol_pua(source.to_string()),
+                (expected.to_string(), rewritten)
+            );
+        }
+    }
+
+    #[test]
     fn simple_font_single_byte_fallback_maps_cp1252_punctuation() {
         let bytes = vec![b'l', 0x92_u8, b'a', b'c', b'a', b'd'];
         let obj = Object::String(bytes, lopdf::StringFormat::Hexadecimal);
@@ -2460,7 +2958,7 @@ mod tests {
         let mut decisions = CMapDecisionCache::new();
         let font_widths: PageFontWidths = HashMap::new();
 
-        let text = extract_text_from_operand(
+        let (text, _) = extract_text_from_operand(
             &obj,
             "F1",
             None,
@@ -2570,7 +3068,8 @@ end",
         let (doc, page_id) = gid_font_doc(bfchar);
         let cmaps = FontCMaps::from_doc(&doc);
         let fonts = doc.get_page_fonts(page_id).unwrap();
-        let (_, has_gid_fonts) = build_font_encodings(&doc, &fonts, &cmaps);
+        let (_, has_gid_fonts) =
+            build_font_encodings(&doc, &fonts, &cmaps, &mut FontStyleCache::new());
         has_gid_fonts
     }
 
@@ -2662,3 +3161,7 @@ end",
 #[cfg(test)]
 #[path = "stale_cmap_tests.rs"]
 mod stale_cmap_tests;
+
+#[cfg(test)]
+#[path = "blank_glyph_tests.rs"]
+mod blank_glyph_tests;
