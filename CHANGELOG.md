@@ -42,6 +42,17 @@ version and date. Earlier releases are described in their
   read (`/=`, `/;`) and that has neither a base encoding nor blank glyphs,
   as the single-byte characters those codes read as, rather than giving
   them no width.
+- A string of one or two glyphs shown in a subset font whose ToUnicode
+  CMap has a repaired counterpart (rebuilt through the font's
+  `/CIDToGIDMap`, or renumbered for a renumbered subset) reads through the
+  repair, before the font's choice between the two, only when the repair
+  reads it better without counting short common words. Such a string is
+  too short for them to be evidence, and a wrong repair spells them by
+  chance: a glyph read as `a` where the CMap reads `m`, `-` or `—`, or a
+  pair read as `aT` where it reads `re`, took the repair (`engagement` read
+  as `engageaent`, `AND` as `ANa`, `Three` as `ThaTe`). Longer strings, and
+  the font's choice over its first strings, weigh every common word as
+  before.
 
 ## [1.25.0] - 2026-09-25
 

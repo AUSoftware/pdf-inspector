@@ -10516,3 +10516,361 @@ fn test_type1_program_declaring_standard_encoding_is_the_base_under_differences(
     );
     assert_eq!(lines, ["Bfi", "it\u{2019}s"]);
 }
+
+/// A subset Type0 font (Identity-H over a TrueType CID font, no program
+/// embedded) whose ToUnicode CMap maps `entries`, code to character, with
+/// the CID font's `/CIDToGIDMap` (the name `Identity` when `cid_to_gid` is
+/// `None`, else a stream of each CID's glyph index) and `/W` array.
+fn add_identity_h_subset_font(
+    doc: &mut lopdf::Document,
+    entries: &[(u16, char)],
+    cid_to_gid: Option<&[u16]>,
+    widths: Vec<lopdf::Object>,
+) -> lopdf::ObjectId {
+    use lopdf::{dictionary, Object, Stream};
+
+    let mut cmap = String::from(
+        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+         /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
+         1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
+    );
+    cmap.push_str(&format!("{} beginbfchar\n", entries.len()));
+    for &(code, ch) in entries {
+        cmap.push_str(&format!("<{code:04X}> <{:04X}>\n", ch as u32));
+    }
+    cmap.push_str("endbfchar\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+    let cmap_id = doc.add_object(Stream::new(dictionary! {}, cmap.into_bytes()));
+    let cid_to_gid: Object = match cid_to_gid {
+        None => "Identity".into(),
+        Some(gids) => doc
+            .add_object(Stream::new(
+                dictionary! {},
+                gids.iter().flat_map(|gid| gid.to_be_bytes()).collect(),
+            ))
+            .into(),
+    };
+    let descriptor_id = doc.add_object(dictionary! {
+        "Type" => "FontDescriptor",
+        "FontName" => "AAAAAA+Subset",
+        "Flags" => 32,
+        "FontBBox" => vec![0.into(), (-200).into(), 1000.into(), 800.into()],
+        "ItalicAngle" => 0,
+        "Ascent" => 800,
+        "Descent" => -200,
+        "CapHeight" => 700,
+        "StemV" => 80,
+    });
+    let cid_font_id = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "CIDFontType2",
+        "BaseFont" => "AAAAAA+Subset",
+        "CIDSystemInfo" => dictionary! {
+            "Registry" => Object::string_literal("Adobe"),
+            "Ordering" => Object::string_literal("Identity"),
+            "Supplement" => 0,
+        },
+        "FontDescriptor" => descriptor_id,
+        "DW" => 500,
+        "W" => widths,
+        "CIDToGIDMap" => cid_to_gid,
+    });
+    doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type0",
+        "BaseFont" => "AAAAAA+Subset",
+        "Encoding" => "Identity-H",
+        "DescendantFonts" => vec![cid_font_id.into()],
+        "ToUnicode" => cmap_id,
+    })
+}
+
+/// The text of each line of a one-page document showing `lines` in the
+/// font `add_font` adds: each line a TJ of strings, each string its
+/// two-byte codes (one code per string, as some producers write every
+/// glyph, or pieces of words, as kerning splits them).
+fn identity_h_lines(
+    add_font: impl FnOnce(&mut lopdf::Document) -> lopdf::ObjectId,
+    lines: &[Vec<Vec<u16>>],
+) -> Vec<String> {
+    let mut doc = lopdf::Document::with_version("1.5");
+    let font_id = add_font(&mut doc);
+    let content: String = lines
+        .iter()
+        .enumerate()
+        .map(|(line, strings)| {
+            let strings: Vec<String> = strings
+                .iter()
+                .map(|codes| {
+                    let hex: String = codes.iter().map(|code| format!("{code:04X}")).collect();
+                    format!("<{hex}>")
+                })
+                .collect();
+            format!(
+                "BT /F1 12 Tf 72 {} Td [{}] TJ ET\n",
+                700 - 30 * line as i64,
+                strings.join(" ")
+            )
+        })
+        .collect();
+    let pages_id = doc.new_object_id();
+    let page_id = add_page(
+        &mut doc,
+        pages_id,
+        &content,
+        LETTER_BOX,
+        None,
+        &[("F1", font_id)],
+    );
+    let pdf = finish_document(doc, pages_id, vec![page_id]);
+    let items = pdf_inspector::extractor::extract_text_with_positions_mem(&pdf).unwrap();
+    let mut rows: Vec<(i64, String)> = Vec::new();
+    for item in items {
+        let y = item.y.round() as i64;
+        match rows.iter_mut().find(|(row_y, _)| *row_y == y) {
+            Some((_, text)) => text.push_str(&item.text),
+            None => rows.push((y, item.text)),
+        }
+    }
+    rows.sort_by_key(|(y, _)| -y);
+    rows.into_iter().map(|(_, text)| text).collect()
+}
+
+/// A `/W` array covering the CIDs the `/CIDToGIDMap` fixtures show
+/// (0x0100 onwards), so none of them looks like a renumbered subset.
+fn cid_widths() -> Vec<lopdf::Object> {
+    vec![
+        0x0100.into(),
+        vec![lopdf::Object::Integer(500); 0x80].into(),
+    ]
+}
+
+/// Each glyph of `text` as a string of its own, through `code`.
+fn glyph_strings(text: &str, code: impl Fn(char) -> u16) -> Vec<Vec<u16>> {
+    text.chars().map(|ch| vec![code(ch)]).collect()
+}
+
+#[test]
+fn test_cid_keyed_cmap_keeps_its_reading_where_a_repair_reads_a_lone_common_word() {
+    // A ToUnicode CMap keyed by CID, right as it is, beside a CIDToGIDMap
+    // stream that sends the CID of `m` to the glyph index that is the CID of
+    // `a`. Read through the map, the repaired CMap agrees with the CMap
+    // everywhere but there. Each glyph is a string of its own, so each is
+    // read before the font's decision: the `m` stays an `m`, though the
+    // repair's `a` is a common word.
+    let text = "Stakeholder engagement";
+    let cid = |ch: char| 0x0100 + ch as u16;
+    let mut entries: Vec<(u16, char)> = text.chars().map(|ch| (cid(ch), ch)).collect();
+    entries.sort();
+    entries.dedup();
+    let mut gids: Vec<u16> = (0..=cid('z')).collect();
+    gids[usize::from(cid('m'))] = cid('a');
+    let lines = identity_h_lines(
+        |doc| add_identity_h_subset_font(doc, &entries, Some(&gids), cid_widths()),
+        &[glyph_strings(text, cid)],
+    );
+    assert_eq!(lines, [text]);
+}
+
+#[test]
+fn test_cid_keyed_cmap_keeps_its_reading_where_a_repair_reads_a_short_common_word() {
+    // The same shape, with a map that sends the CIDs of `r` and `e` to
+    // those of `a` and `T`, and words shown in pieces, as kerning splits
+    // them: the piece `re` reads through the repair as `aT`, a common word
+    // lowercased, and stays `re`.
+    let cid = |ch: char| 0x0100 + ch as u16;
+    let pieces: [&[&str]; 3] = [&["Th", "re", "e"], &["Inte", "re", "st"], &["a", "re"]];
+    let text: String = pieces.iter().flat_map(|p| p.iter().copied()).collect();
+    let mut entries: Vec<(u16, char)> = text.chars().map(|ch| (cid(ch), ch)).collect();
+    entries.sort();
+    entries.dedup();
+    let mut gids: Vec<u16> = (0..=cid('z')).collect();
+    gids[usize::from(cid('r'))] = cid('a');
+    gids[usize::from(cid('e'))] = cid('T');
+    let lines: Vec<Vec<Vec<u16>>> = pieces
+        .iter()
+        .map(|pieces| {
+            pieces
+                .iter()
+                .map(|piece| piece.chars().map(cid).collect())
+                .collect()
+        })
+        .collect();
+    let lines = identity_h_lines(
+        |doc| add_identity_h_subset_font(doc, &entries, Some(&gids), cid_widths()),
+        &lines,
+    );
+    assert_eq!(lines, ["Three", "Interest", "are"]);
+}
+
+#[test]
+fn test_a_repair_reads_a_lone_glyph_the_cmap_reads_as_a_control() {
+    // A CMap that maps the CID of `m` to a control character, which reads as
+    // a replacement character, and a CIDToGIDMap that sends that CID to a
+    // glyph index the CMap maps to `m`: the lone glyph's letter over the
+    // CMap's replacement character is evidence, and the repair reads it.
+    let text = "Stakeholder engagement";
+    let cid = |ch: char| 0x0100 + ch as u16;
+    let mut entries: Vec<(u16, char)> = text
+        .chars()
+        .map(|ch| (cid(ch), if ch == 'm' { '\u{0001}' } else { ch }))
+        .collect();
+    entries.push((0x0300, 'm'));
+    entries.sort();
+    entries.dedup();
+    let mut gids: Vec<u16> = (0..=0x0300).collect();
+    gids[usize::from(cid('m'))] = 0x0300;
+    let lines = identity_h_lines(
+        |doc| add_identity_h_subset_font(doc, &entries, Some(&gids), cid_widths()),
+        &[glyph_strings(text, cid)],
+    );
+    assert_eq!(lines, [text]);
+}
+
+#[test]
+fn test_subset_fonts_whose_cmap_misses_their_codes_still_read_through_the_repair() {
+    let text = [
+        "The quick brown fox jumps over the lazy dog.",
+        "Pack my box with five dozen liquor jugs.",
+        "How vexingly quick daft zebras jump.",
+    ];
+    let mut chars: Vec<char> = text.concat().chars().collect();
+    chars.sort();
+    chars.dedup();
+    let index = |ch: char| chars.iter().position(|&c| c == ch).unwrap() as u16;
+
+    // A ToUnicode CMap keyed by glyph index, shown by CIDs the font's
+    // CIDToGIDMap sends to those glyphs: the CMap has no entry at any CID,
+    // and the repair reads every one.
+    let cid = |ch: char| 0x0100 + ch as u16;
+    let entries: Vec<(u16, char)> = chars.iter().map(|&ch| (3 + index(ch), ch)).collect();
+    let mut gids = vec![0u16; usize::from(cid('z')) + 1];
+    for &ch in &chars {
+        gids[usize::from(cid(ch))] = 3 + index(ch);
+    }
+    let lines: Vec<Vec<Vec<u16>>> = text.iter().map(|line| glyph_strings(line, cid)).collect();
+    let read = identity_h_lines(
+        |doc| add_identity_h_subset_font(doc, &entries, Some(&gids), cid_widths()),
+        &lines,
+    );
+    assert_eq!(read, text, "CIDToGIDMap repair");
+
+    // A subset renumbered its glyphs 1, 2, 3, … and kept the ToUnicode
+    // CMap of the whole font, keyed by the glyphs' old indexes: the width
+    // array covers the new glyphs only, and the codes read through the CMap
+    // renumbered in order.
+    let entries: Vec<(u16, char)> = chars.iter().map(|&ch| (0x0200 + index(ch), ch)).collect();
+    let sequential = |ch: char| 1 + index(ch);
+    let lines: Vec<Vec<Vec<u16>>> = text
+        .iter()
+        .map(|line| glyph_strings(line, sequential))
+        .collect();
+    let widths = vec![
+        0.into(),
+        vec![lopdf::Object::Integer(500); chars.len() + 1].into(),
+    ];
+    let read = identity_h_lines(
+        |doc| add_identity_h_subset_font(doc, &entries, None, widths),
+        &lines,
+    );
+    assert_eq!(read, text, "sequential remap");
+}
+
+#[test]
+fn test_renumbered_subset_whose_stale_cmap_collides_reads_common_words_through_the_repair() {
+    // A subset renumbered its glyphs and kept the whole font's ToUnicode
+    // CMap, whose old glyph indexes (3 onwards) overlap the new codes (1
+    // onwards): the stale CMap reads each new code as a letter two places
+    // back, as many letters as the repair reads, and the codes of `a` and
+    // `b` not at all. Each word is a string of its own, too few bytes for
+    // the font's decision, so each is read on its own: the repair's common
+    // words of three letters or more are evidence, and every word reads
+    // through the repair.
+    let words = [
+        "the", "and", "that", "for", "with", "from", "this", "are", "not", "our",
+    ];
+    let entries: Vec<(u16, char)> = ('a'..='z')
+        .map(|ch| (3 + (ch as u16 - 'a' as u16), ch))
+        .collect();
+    let code = |ch: char| 1 + (ch as u16 - 'a' as u16);
+    let lines: Vec<Vec<Vec<u16>>> = words
+        .iter()
+        .map(|word| vec![word.chars().map(code).collect()])
+        .collect();
+    let read = identity_h_lines(
+        |doc| {
+            add_identity_h_subset_font(
+                doc,
+                &entries,
+                None,
+                vec![0.into(), vec![lopdf::Object::Integer(500); 27].into()],
+            )
+        },
+        &lines,
+    );
+    assert_eq!(read, words);
+}
+
+#[test]
+fn test_renumbered_subset_collision_reads_short_common_words_of_longer_strings_through_the_repair()
+{
+    // The same renumbered subset, its stale CMap reading the space as `y`,
+    // over three lines of Italian, each a string of its own and too few
+    // bytes for the font's choice: a line is long enough for its short
+    // common words to count, and every line reads through the repair.
+    let line = "in un giorno di sole";
+    let mut entries: Vec<(u16, char)> = ('a'..='z')
+        .map(|ch| (3 + (ch as u16 - 'a' as u16), ch))
+        .collect();
+    entries.push((29, ' '));
+    let code = |ch: char| match ch {
+        ' ' => 27,
+        ch => 1 + (ch as u16 - 'a' as u16),
+    };
+    let lines: Vec<Vec<Vec<u16>>> = (0..3)
+        .map(|_| vec![line.chars().map(code).collect()])
+        .collect();
+    let read = identity_h_lines(
+        |doc| {
+            add_identity_h_subset_font(
+                doc,
+                &entries,
+                None,
+                vec![0.into(), vec![lopdf::Object::Integer(500); 28].into()],
+            )
+        },
+        &lines,
+    );
+    assert_eq!(read, [line; 3]);
+}
+
+#[test]
+fn test_renumbered_subset_collision_keeps_the_stale_reading_of_short_words_before_the_font_choice()
+{
+    // The price of not trusting short words: in the colliding renumbered
+    // subset, a word of one or two letters shown as a string of its own is
+    // no evidence for the repair, so `of`, `to`, `in` and `is` keep the
+    // stale CMap's letters until the font's choice (never made here, on so
+    // few bytes).
+    let words = ["of", "to", "in", "is"];
+    let entries: Vec<(u16, char)> = ('a'..='z')
+        .map(|ch| (3 + (ch as u16 - 'a' as u16), ch))
+        .collect();
+    let code = |ch: char| 1 + (ch as u16 - 'a' as u16);
+    let lines: Vec<Vec<Vec<u16>>> = words
+        .iter()
+        .map(|word| vec![word.chars().map(code).collect()])
+        .collect();
+    let read = identity_h_lines(
+        |doc| {
+            add_identity_h_subset_font(
+                doc,
+                &entries,
+                None,
+                vec![0.into(), vec![lopdf::Object::Integer(500); 27].into()],
+            )
+        },
+        &lines,
+    );
+    assert_eq!(read, ["md", "rm", "gl", "gq"]);
+}
