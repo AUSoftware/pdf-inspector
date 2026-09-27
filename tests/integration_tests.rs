@@ -5806,8 +5806,6 @@ fn add_type0_font_with_tounicode_ranges(
     ranges: &[(u16, u16, u32)],
     highest_code: u16,
 ) -> lopdf::ObjectId {
-    use lopdf::{dictionary, Object, Stream};
-
     let mut cmap = String::from(
         "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
          /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
@@ -5819,6 +5817,17 @@ fn add_type0_font_with_tounicode_ranges(
         cmap.push_str(&format!("<{first:04X}> <{last:04X}> <{base:04X}>\n"));
     }
     cmap.push_str("endbfrange\nendcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+    add_type0_font_with_tounicode_cmap(doc, cmap, highest_code)
+}
+
+/// A Type0/Identity-H font added to `doc` as `add_type0_font_with_tounicode_ranges`
+/// makes it, under the ToUnicode CMap text `cmap`.
+fn add_type0_font_with_tounicode_cmap(
+    doc: &mut lopdf::Document,
+    cmap: String,
+    highest_code: u16,
+) -> lopdf::ObjectId {
+    use lopdf::{dictionary, Object, Stream};
 
     let font_file = minimal_truetype_subset(usize::from(highest_code));
     let font_file_id = doc.add_object(Stream::new(
@@ -10070,4 +10079,125 @@ fn document_information_entries_are_decoded_in_every_result() {
     let detect_only = process_pdf_mem_with_options(&pdf, PdfOptions::detect_only()).unwrap();
     assert_eq!(detect_only.producer.as_deref(), Some("Test Library 1.0"));
     assert_eq!(detect_only.author.as_deref(), Some("José Martínez"));
+}
+
+/// A ToUnicode CMap declaring the two-byte codespace `<0000> <FFFF>` over
+/// one-byte `bfchar` entries, plus `wide` entries written with four hex
+/// digits — the shape some producers give a simple font's CMap.
+fn wide_codespace_cmap(entries: &[(u16, char)], wide: &[(u16, char)]) -> String {
+    let mut cmap = String::from(
+        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+         /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
+         1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
+    );
+    cmap.push_str(&format!("{} beginbfchar\n", entries.len() + wide.len()));
+    for &(code, ch) in entries {
+        cmap.push_str(&format!("<{code:02X}> <{:04X}>\n", ch as u32));
+    }
+    for &(code, ch) in wide {
+        cmap.push_str(&format!("<{code:04X}> <{:04X}>\n", ch as u32));
+    }
+    cmap.push_str("endbfchar\nendcmap\n");
+    cmap.push_str("CMapName currentdict /CMap defineresource pop\nend\nend\n");
+    cmap
+}
+
+/// The codes of "Income Statement" under `wide_codespace_cmap`.
+const WIDE_CODESPACE_ENTRIES: [(u16, char); 10] = [
+    (0x01, 'I'),
+    (0x04, ' '),
+    (0x08, 'o'),
+    (0x0A, 'n'),
+    (0x0F, 't'),
+    (0x12, 'e'),
+    (0x13, 'm'),
+    (0x14, 'a'),
+    (0x82, 'c'),
+    (0x8E, 'S'),
+];
+
+#[test]
+fn test_simple_font_reads_one_byte_per_code_under_a_two_byte_codespace_cmap() {
+    use lopdf::{dictionary, Stream};
+
+    // A base-14 face (widths from its metrics), and a subset face with no
+    // width table at all: both are simple fonts, whatever their widths.
+    for base_font in ["Helvetica", "ABCDEF+SubsetFace"] {
+        let mut doc = lopdf::Document::with_version("1.5");
+        let cmap_id = doc.add_object(Stream::new(
+            dictionary! {},
+            wide_codespace_cmap(&WIDE_CODESPACE_ENTRIES, &[(0x0020, ' ')]).into_bytes(),
+        ));
+        // The Differences name the codes by glyph index, which says nothing
+        // without the program: the CMap is the only reading of these codes.
+        let mut differences: Vec<lopdf::Object> = Vec::new();
+        for (index, &(code, _)) in WIDE_CODESPACE_ENTRIES.iter().enumerate() {
+            differences.push(i64::from(code).into());
+            differences.push(lopdf::Object::Name(
+                format!("gid{:05}", index + 1).into_bytes(),
+            ));
+        }
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => base_font,
+            "Encoding" => dictionary! {
+                "Type" => "Encoding",
+                "BaseEncoding" => "WinAnsiEncoding",
+                "Differences" => differences,
+            },
+            "ToUnicode" => cmap_id,
+        });
+        // One TJ of one-, two- and three-byte strings, as kerned text is shown.
+        let content =
+            "BT /F1 12 Tf 72 700 Td [(\\001) (\\012\\202) (\\010\\023\\022) (\\004\\216) \
+                       (\\017) (\\024) (\\017) (\\022) (\\023\\022) (\\012) (\\017)] TJ ET\n";
+        let pages_id = doc.new_object_id();
+        let page_id = add_page(
+            &mut doc,
+            pages_id,
+            content,
+            LETTER_BOX,
+            None,
+            &[("F1", font_id)],
+        );
+        let pdf = finish_document(doc, pages_id, vec![page_id]);
+
+        let text: String = pdf_inspector::extractor::extract_text_with_positions_mem(&pdf)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.text)
+            .collect();
+        assert_eq!(
+            text, "Income Statement",
+            "{base_font}: every string of the simple font is read one byte per code"
+        );
+    }
+}
+
+#[test]
+fn test_type0_font_keeps_reading_two_byte_codes_under_the_same_cmap_shape() {
+    // The same CMap shape on a Type0 font, with a two-byte entry `<0A82>`
+    // whose bytes read as `n` and `c` one by one: the font's codes stay two
+    // bytes wide, so the code reads as its own entry.
+    let mut doc = lopdf::Document::with_version("1.5");
+    let cmap = wide_codespace_cmap(&WIDE_CODESPACE_ENTRIES, &[(0x0020, ' '), (0x0A82, 'X')]);
+    let font_id = add_type0_font_with_tounicode_cmap(&mut doc, cmap, 0x0A82);
+    let pages_id = doc.new_object_id();
+    let page_id = add_page(
+        &mut doc,
+        pages_id,
+        "BT /F1 12 Tf 72 700 Td <0A820008> Tj ET\n",
+        LETTER_BOX,
+        None,
+        &[("F1", font_id)],
+    );
+    let pdf = finish_document(doc, pages_id, vec![page_id]);
+    let text: String = pdf_inspector::extractor::extract_text_with_positions_mem(&pdf)
+        .unwrap()
+        .into_iter()
+        .map(|item| item.text)
+        .collect();
+    assert_eq!(text, "Xo");
 }

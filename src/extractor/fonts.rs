@@ -5,7 +5,7 @@ use crate::glyph_names::glyph_name_to_string;
 use crate::tounicode::{CidDecodeStats, CodeMapping, FontCMaps};
 use crate::types::{
     BaseEncoding, BoldSource, FontEncoding, FontEncodingMap, FontLabel, FontWidthInfo,
-    PageFontEncodings, PageFontWidths, PendingCoverage,
+    PageFontEncodings, PageFontKinds, PageFontWidths, PendingCoverage,
 };
 use log::debug;
 use lopdf::{Document, Encoding, Object, ObjectId};
@@ -192,6 +192,23 @@ pub(crate) fn build_font_widths(
     }
 
     widths
+}
+
+/// Whether each of `fonts` is composite, by its `/Subtype`
+/// (see [`PageFontKinds`]).
+pub(crate) fn build_font_kinds(
+    fonts: &std::collections::BTreeMap<Vec<u8>, &lopdf::Dictionary>,
+) -> PageFontKinds {
+    fonts
+        .iter()
+        .filter_map(|(font_name, font_dict)| {
+            let subtype = font_dict.get(b"Subtype").ok()?.as_name().ok()?;
+            Some((
+                String::from_utf8_lossy(font_name).to_string(),
+                subtype == b"Type0",
+            ))
+        })
+        .collect()
 }
 
 /// Visual-size scale factors for Type3 fonts, keyed by resource name.
@@ -1434,7 +1451,10 @@ fn stale_identity_cmap_overrides(
         }
         let cmap_ref = font_dict.get(b"ToUnicode").ok()?.as_reference().ok()?;
         let entry = cmaps.get_by_obj(cmap_ref.0)?;
-        if entry.primary.code_byte_length != 1 || entry.remapped.is_some() {
+        // A Type1 font's strings are read one byte per code whatever width
+        // its CMap declares (see `extract_text_from_operand`), so a CMap
+        // written as two bytes wide over one-byte entries is judged too.
+        if entry.remapped.is_some() {
             return None;
         }
         let mapped = |code: u8| {
@@ -2296,10 +2316,20 @@ pub(crate) fn extract_text_from_operand(
     encoding_cache: &HashMap<String, Encoding<'_>>,
     cmap_decisions: &mut CMapDecisionCache,
     font_widths: &PageFontWidths,
+    font_kinds: &PageFontKinds,
 ) -> Option<(String, bool)> {
     let is_type0_cid_font = font_widths
         .get(current_font)
         .is_some_and(|info| info.is_cid);
+    // A simple font (any font but Type0) shows one byte per code
+    // (PDF 32000-1:2008, 9.6), whatever byte width its ToUnicode CMap
+    // declares: a codespace written as `<0000> <FFFF>` over one-byte entries
+    // must not pair the bytes of a string into codes. The font's subtype
+    // decides, as it does for the detector; a font whose subtype is not a
+    // name keeps the CMap's reading there too.
+    let is_simple_font = font_kinds
+        .get(current_font)
+        .is_some_and(|&composite| !composite);
     let use_cp1252_fallback =
         should_use_cp1252_single_byte_fallback(base_font_name, is_type0_cid_font);
     // The name the font's CMap coverage is counted under: the `/BaseFont`
@@ -2310,10 +2340,12 @@ pub(crate) fn extract_text_from_operand(
     let result = (|| -> Option<String> {
         if let Object::String(bytes, _) = obj {
             let mut decode_with_entry = |entry: &crate::tounicode::CMapEntry| -> Option<String> {
-                // For single-byte CMaps, merge CMap + Differences at the byte level:
-                // try CMap first, then Differences, then Latin-1 fallback per byte.
-                // This prevents partial CMap results from blocking the Differences path.
-                if entry.primary.code_byte_length == 1 {
+                // For single-byte CMaps, and for any CMap of a simple font,
+                // merge CMap + Differences at the byte level: try CMap first,
+                // then Differences, then Latin-1 fallback per byte. This
+                // prevents partial CMap results from blocking the Differences
+                // path.
+                if entry.primary.code_byte_length == 1 || is_simple_font {
                     let encoding_map = font_encodings.get(current_font);
                     let decode_byte = |b: u8| -> Option<String> {
                         let code = b as u16;
@@ -3157,6 +3189,7 @@ mod tests {
             &encoding_cache,
             &mut decisions,
             &font_widths,
+            &font_kinds("F0", false),
         )
         .expect("text decoded");
         assert_eq!(text, "AB");
@@ -3190,6 +3223,7 @@ mod tests {
                 &HashMap::new(),
                 decisions,
                 &HashMap::new(),
+                &font_kinds("F0", true),
             )
             .map(|(text, _)| text)
         };
@@ -3252,6 +3286,12 @@ mod tests {
         widths
     }
 
+    /// The kinds `build_font_kinds` records for a page whose one font,
+    /// `name`, is composite or simple.
+    fn font_kinds(name: &str, composite: bool) -> PageFontKinds {
+        PageFontKinds::from([(name.to_string(), composite)])
+    }
+
     /// `bytes` read through a Type0 font whose only CMap is `primary`, with
     /// the coverage the reading recorded for the run.
     fn decode_through(
@@ -3279,6 +3319,7 @@ mod tests {
             &HashMap::new(),
             &mut decisions,
             &cid_font_widths(),
+            &font_kinds("F0", true),
         )
         .map(|(text, _)| text);
         (text, decisions.take_run_coverage())
@@ -3368,9 +3409,11 @@ mod tests {
     #[test]
     fn a_simple_fonts_cmap_that_cannot_read_a_string_records_no_gap() {
         use crate::tounicode::{CMapEntry, ToUnicodeCMap};
-        // A ToUnicode CMap keyed by two-byte codes on a simple font, whose
-        // even-length one-byte string it cannot read: the encoding reads
-        // the string, and the coverage lists no gap.
+        // A ToUnicode CMap keyed by two-byte codes on a simple font, and an
+        // even-length string of one-byte codes: the simple font reads its
+        // codes one by one through the CMap, and a font whose subtype
+        // cannot be read keeps the CMap's width, which cannot read the
+        // string, so its encoding does. Neither reading lists a gap.
         let mut primary = ToUnicodeCMap {
             code_byte_length: 2,
             ..Default::default()
@@ -3387,22 +3430,25 @@ mod tests {
                 fallback: None,
             },
         );
-        let mut decisions = CMapDecisionCache::new();
-        let text = extract_text_from_operand(
-            &Object::String(b"Te".to_vec(), lopdf::StringFormat::Literal),
-            "F0",
-            Some("AAAAAA+Font"),
-            &FontCMaps::default(),
-            &HashMap::new(),
-            &inline_cmaps,
-            &HashMap::new(),
-            &HashMap::new(),
-            &mut decisions,
-            &HashMap::new(),
-        )
-        .map(|(text, _)| text);
-        assert_eq!(text.as_deref(), Some("Te"));
-        assert!(decisions.take_run_coverage().is_empty());
+        for kinds in [font_kinds("F0", false), PageFontKinds::new()] {
+            let mut decisions = CMapDecisionCache::new();
+            let text = extract_text_from_operand(
+                &Object::String(b"Te".to_vec(), lopdf::StringFormat::Literal),
+                "F0",
+                Some("AAAAAA+Font"),
+                &FontCMaps::default(),
+                &HashMap::new(),
+                &inline_cmaps,
+                &HashMap::new(),
+                &HashMap::new(),
+                &mut decisions,
+                &HashMap::new(),
+                &kinds,
+            )
+            .map(|(text, _)| text);
+            assert_eq!(text.as_deref(), Some("Te"), "{kinds:?}");
+            assert!(decisions.take_run_coverage().is_empty(), "{kinds:?}");
+        }
     }
 
     #[test]
@@ -3435,6 +3481,7 @@ mod tests {
             &HashMap::new(),
             &mut decisions,
             &cid_font_widths(),
+            &font_kinds("F0", true),
         )
         .map(|(text, _)| text);
         assert_eq!(text.as_deref(), Some("A\u{FFFD}"));
@@ -3517,6 +3564,7 @@ mod tests {
             &HashMap::new(),
             &mut decisions,
             &cid_font_widths(),
+            &font_kinds("F0", true),
         )
         .map(|(text, _)| text);
         assert_eq!(text.as_deref(), Some("ABC"));
@@ -3639,6 +3687,7 @@ mod tests {
             &encoding_cache,
             &mut decisions,
             &font_widths,
+            &font_kinds("F0", false),
         );
         let text = decoded.map(|(text, _)| text).unwrap_or_default();
         assert!(
@@ -3710,6 +3759,7 @@ mod tests {
             &encoding_cache,
             &mut decisions,
             &font_widths,
+            &font_kinds("F0", false),
         )
         .expect("text decoded");
         // "ft", a space, "ffi", "a"; the unreadable `f_zzz` code reads as nothing.
@@ -3952,6 +4002,7 @@ mod tests {
             &encoding_cache,
             &mut decisions,
             &font_widths,
+            &font_kinds("F0", false),
         )
         .expect("text decoded");
         assert_eq!(text, "a=b;");
@@ -3996,6 +4047,7 @@ mod tests {
             &encoding_cache,
             &mut decisions,
             &font_widths,
+            &font_kinds("F0", false),
         )
         .expect("text decoded");
         assert_eq!(text, "AB");
@@ -4013,6 +4065,7 @@ mod tests {
             &encoding_cache,
             &mut decisions,
             &font_widths,
+            &font_kinds("F0", false),
         )
         .expect("text decoded");
         assert_eq!(text, "A\u{2022}B");
@@ -4984,6 +5037,7 @@ mod tests {
             &encoding_cache,
             &mut decisions,
             &font_widths,
+            &font_kinds("F0", true),
         );
 
         let (text, _) = result.expect("CID font fallback should still emit a marker");
@@ -5296,6 +5350,7 @@ mod tests {
             &encoding_cache,
             &mut CMapDecisionCache::new(),
             &font_widths,
+            &build_font_kinds(&fonts),
         )
         .expect("text decoded");
         text
@@ -5345,6 +5400,7 @@ mod tests {
                 &HashMap::new(),
                 &mut decisions,
                 &font_widths,
+                &font_kinds("F1", true),
             )
             .expect("text decoded");
             let unmapped: u32 = decisions
@@ -5528,6 +5584,7 @@ mod tests {
                 &HashMap::new(),
                 &mut CMapDecisionCache::new(),
                 &font_widths,
+                &font_kinds("F1", false),
             )
             .expect("text decoded");
             text
@@ -6216,6 +6273,7 @@ mod tests {
             &encoding_cache,
             &mut decisions,
             &font_widths,
+            &font_kinds("F1", false),
         )
         .expect("simple font should round-trip Latin-1 bytes");
         assert_eq!(text, "$G\u{00B6}V");
@@ -6264,6 +6322,7 @@ mod tests {
             &encoding_cache,
             &mut decisions,
             &font_widths,
+            &font_kinds("F1", false),
         )
         .expect("simple font should decode CP1252 punctuation");
 

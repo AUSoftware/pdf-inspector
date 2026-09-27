@@ -7,6 +7,21 @@ version. A separate release pull request bumps the manifests with
 version and date. Earlier releases are described in their
 [GitHub releases](https://github.com/firecrawl/pdf-inspector/releases).
 
+## [Unreleased]
+
+### Fixed
+
+- Simple fonts (Type1, TrueType, Type3) read one byte per code when their
+  ToUnicode CMap declares a two-byte codespace. A CMap written with
+  `<0000> <FFFF>` over one-byte entries, one of them spelled in four hex
+  digits (which kept the CMap two bytes wide), paired the bytes of each
+  even-length string into codes it has no entry for, so text shown as a
+  kerned run of short strings lost every two-byte string: `Income
+  Statement` read as `Iometatent`. The check for a stale ToUnicode CMap on
+  a Type1 font now judges a CMap declared this way too, and the page
+  detector counts such a font's text byte by byte as well. Composite
+  (Type0) fonts keep reading their codes as their CMap says.
+
 ## [1.25.0] - 2026-09-25
 
 Changes since 1.24.0.

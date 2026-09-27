@@ -216,6 +216,12 @@ impl FontWidthInfo {
 /// All font width info for a page, keyed by font resource name
 pub(crate) type PageFontWidths = HashMap<String, FontWidthInfo>;
 
+/// Whether each font resource of a page is composite (`/Subtype /Type0`): a
+/// composite font's codes are as wide as its CMap says, every other font
+/// shows one byte per code (PDF 32000-1:2008, 9.6). A font whose subtype
+/// cannot be read has no entry.
+pub(crate) type PageFontKinds = HashMap<String, bool>;
+
 // ── Public types ─────────────────────────────────────────────────────
 
 /// Type of extracted item
