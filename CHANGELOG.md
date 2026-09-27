@@ -21,6 +21,27 @@ version and date. Earlier releases are described in their
   a Type1 font now judges a CMap declared this way too, and the page
   detector counts such a font's text byte by byte as well. Composite
   (Type0) fonts keep reading their codes as their CMap says.
+- A Type1 font whose `/Encoding` names no base encoding (none at all, or
+  an encoding dictionary without `/BaseEncoding`) reads through the
+  built-in encoding of its embedded program, which PDF 32000-1:2008
+  (Table 114) makes the base of such a font. TeX's fonts carry their layout
+  in the program and have no `/Encoding`, so their ligatures (`efficiency`
+  read as `eciency`), curly quotes and dashes (`{` read for an en dash)
+  and math symbols (`2` read for `∈`, `f` and `g` for braces, nothing for a
+  minus sign) now read as the glyphs the program names. A ToUnicode CMap,
+  the `/Differences` and a base encoding the font names still come first.
+  A program whose encoding cannot be read, and a glyph name that does not
+  read or reads as a private code point or a lone combining mark, leave
+  their codes as they were read; a code the program leaves at `.notdef`,
+  other than the word space (code 32), has no glyph and reads as nothing,
+  except in a font where nothing else reads (no name that reads, no base
+  encoding, no blank glyphs), which reads as before.
+- The base-14 width fallback (a standard font without `/Widths`) measures
+  the codes of a font the decoder reads without an encoding, one whose
+  `/Differences` or embedded program give only glyph names that do not
+  read (`/=`, `/;`) and that has neither a base encoding nor blank glyphs,
+  as the single-byte characters those codes read as, rather than giving
+  them no width.
 
 ## [1.25.0] - 2026-09-25
 

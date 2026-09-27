@@ -10201,3 +10201,318 @@ fn test_type0_font_keeps_reading_two_byte_codes_under_the_same_cmap_shape() {
         .collect();
     assert_eq!(text, "Xo");
 }
+
+/// A Type 1 font program whose cleartext part declares `encoding`, with
+/// bytes standing in for its encrypted part.
+fn type1_program(encoding: &str) -> Vec<u8> {
+    let mut program = format!(
+        "%!PS-AdobeFont-1.0: TeXFace 1.0\n11 dict begin\n/FontName /TeXFace def\n\
+         /PaintType 0 def\n/FontType 1 def\n/FontMatrix [0.001 0 0 0.001 0 0] readonly def\n\
+         {encoding}\n/FontBBox {{-40 -250 1009 750}} readonly def\ncurrentdict end\n\
+         currentfile eexec\n"
+    )
+    .into_bytes();
+    program.extend_from_slice(&[0xd9, 0xd6, 0x6f, 0x63, 0x3b, 0x84, 0x6a, 0x98]);
+    program
+}
+
+/// The encoding array of a text face laid out the way TeX's are: letters
+/// and digits where ASCII has them, the ligatures below the space, curly
+/// quotes and dashes where ASCII has straight quotes, a backslash and
+/// braces, a glyph whose name no glyph list reads, an old-style zero,
+/// which the glyph list reads as a private code point, and a wide accent
+/// and an arrow accent, which read as combining marks.
+fn tex_text_encoding() -> String {
+    let mut entry = String::from("/Encoding 256 array\n0 1 255 {1 index exch /.notdef put} for\n");
+    for (code, name) in [
+        (11, "ff"),
+        (12, "fi"),
+        (13, "fl"),
+        (14, "ffi"),
+        (15, "ffl"),
+        (34, "quotedblright"),
+        (48, "zerooldstyle"),
+        (49, "one"),
+        (50, "two"),
+        (88, "negationslash"),
+        (92, "quotedblleft"),
+        (94, "hatwide"),
+        (123, "endash"),
+        (124, "emdash"),
+        (126, "uni20D7"),
+    ] {
+        entry.push_str(&format!("dup {code} /{name} put\n"));
+    }
+    for letter in b'a'..=b'z' {
+        entry.push_str(&format!("dup {letter} /{} put\n", letter as char));
+    }
+    entry.push_str("readonly def");
+    entry
+}
+
+/// A subset Type 1 font embedding `program`, with the `/Encoding` and
+/// `/ToUnicode` entries given.
+fn add_embedded_type1_font(
+    doc: &mut lopdf::Document,
+    program: Vec<u8>,
+    encoding: Option<lopdf::Object>,
+    to_unicode: Option<lopdf::ObjectId>,
+) -> lopdf::ObjectId {
+    use lopdf::{dictionary, Stream};
+
+    let length1 = program.windows(5).position(|w| w == b"eexec").unwrap() + 6;
+    let length2 = program.len() - length1;
+    let font_file = doc.add_object(Stream::new(
+        dictionary! {
+            "Length1" => length1 as i64,
+            "Length2" => length2 as i64,
+            "Length3" => 0,
+        },
+        program,
+    ));
+    let descriptor = doc.add_object(dictionary! {
+        "Type" => "FontDescriptor",
+        "FontName" => "ABCDEF+TeXFace",
+        "Flags" => 4,
+        "FontBBox" => vec![(-40).into(), (-250).into(), 1009.into(), 750.into()],
+        "ItalicAngle" => 0,
+        "Ascent" => 694,
+        "Descent" => -194,
+        "CapHeight" => 683,
+        "StemV" => 65,
+        "FontFile" => font_file,
+    });
+    let mut font = dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type1",
+        "BaseFont" => "ABCDEF+TeXFace",
+        "FontDescriptor" => descriptor,
+    };
+    if let Some(encoding) = encoding {
+        font.set("Encoding", encoding);
+    }
+    if let Some(cmap) = to_unicode {
+        font.set("ToUnicode", cmap);
+    }
+    doc.add_object(font)
+}
+
+/// The text of each line of `strings`, each shown on a line of its own in
+/// the font `add_font` adds.
+fn embedded_type1_lines(
+    add_font: impl FnOnce(&mut lopdf::Document) -> lopdf::ObjectId,
+    strings: &[&str],
+) -> Vec<String> {
+    let mut doc = lopdf::Document::with_version("1.5");
+    let font_id = add_font(&mut doc);
+    let content: String = strings
+        .iter()
+        .enumerate()
+        .map(|(line, string)| {
+            format!(
+                "BT /F1 12 Tf 72 {} Td ({string}) Tj ET\n",
+                700 - 40 * line as i64
+            )
+        })
+        .collect();
+    let pages_id = doc.new_object_id();
+    let page_id = add_page(
+        &mut doc,
+        pages_id,
+        &content,
+        LETTER_BOX,
+        None,
+        &[("F1", font_id)],
+    );
+    let pdf = finish_document(doc, pages_id, vec![page_id]);
+    let result = pdf_inspector::extractor::extract_text_with_positions_mem(&pdf).unwrap();
+    let mut lines: Vec<(i64, String)> = Vec::new();
+    for item in result {
+        let y = item.y.round() as i64;
+        match lines.iter_mut().find(|(line_y, _)| *line_y == y) {
+            Some((_, text)) => text.push_str(&item.text),
+            None => lines.push((y, item.text)),
+        }
+    }
+    lines.sort_by_key(|(y, _)| -y);
+    lines.into_iter().map(|(_, text)| text).collect()
+}
+
+/// Ligatures, curly quotes and a dash, as TeX's text faces show them, and
+/// the glyph whose name does not read, the old-style zero, the accents, a
+/// code the program leaves at `.notdef` between two letters, and the word
+/// space, which the program leaves at `.notdef` too.
+const TEX_STRINGS: [&str; 10] = [
+    "\\014nd",
+    "e\\013ect",
+    "\\134quoted\\042",
+    "1\\1732",
+    "\\130",
+    "\\0601",
+    "\\136",
+    "\\176",
+    "x\\041y",
+    "x y",
+];
+
+#[test]
+fn test_type1_font_without_an_encoding_reads_through_its_programs_encoding() {
+    // No /Encoding and no ToUnicode: the embedded program's encoding is the
+    // font's, so the codes below the space and the ones where TeX's layout
+    // parts from ASCII read as the glyphs it names. A name no glyph list
+    // reads, one it reads as a private code point and one it reads as a
+    // lone combining mark leave their codes as they were read before; a
+    // code the program leaves at `.notdef` has no glyph and reads as
+    // nothing, but the word space, which PDF spaces words by, still reads
+    // as a space.
+    let lines = embedded_type1_lines(
+        |doc| add_embedded_type1_font(doc, type1_program(&tex_text_encoding()), None, None),
+        &TEX_STRINGS,
+    );
+    assert_eq!(
+        lines,
+        [
+            "find",
+            "effect",
+            "\u{201C}quoted\u{201D}",
+            "1\u{2013}2",
+            "X",
+            "01",
+            "^",
+            "~",
+            "xy",
+            "x y"
+        ]
+    );
+}
+
+#[test]
+fn test_type1_programs_encoding_yields_to_the_fonts_own_readings() {
+    use lopdf::{dictionary, Object, Stream};
+
+    // A ToUnicode CMap reads the codes it maps; the program reads the rest.
+    let lines = embedded_type1_lines(
+        |doc| {
+            let cmap = "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+                        /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
+                        1 begincodespacerange\n<00> <FF>\nendcodespacerange\n\
+                        1 beginbfchar\n<0C> <0046>\nendbfchar\nendcmap\n\
+                        CMapName currentdict /CMap defineresource pop\nend\nend\n";
+            let cmap_id = doc.add_object(Stream::new(dictionary! {}, cmap.as_bytes().to_vec()));
+            add_embedded_type1_font(
+                doc,
+                type1_program(&tex_text_encoding()),
+                None,
+                Some(cmap_id),
+            )
+        },
+        &TEX_STRINGS[..2],
+    );
+    assert_eq!(lines, ["Fnd", "effect"], "ToUnicode");
+
+    // The Differences name their codes; the program is their base.
+    let lines = embedded_type1_lines(
+        |doc| {
+            let encoding = dictionary! {
+                "Type" => "Encoding",
+                "Differences" => vec![12.into(), Object::Name(b"A".to_vec())],
+            };
+            add_embedded_type1_font(
+                doc,
+                type1_program(&tex_text_encoding()),
+                Some(encoding.into()),
+                None,
+            )
+        },
+        &TEX_STRINGS[..2],
+    );
+    assert_eq!(lines, ["And", "effect"], "Differences");
+
+    // A base the font names, in its encoding dictionary or outright, is the
+    // font's base: the program is not read, and the codes read as before.
+    for encoding in [
+        Object::from(dictionary! {
+            "Type" => "Encoding",
+            "BaseEncoding" => "WinAnsiEncoding",
+        }),
+        Object::Name(b"WinAnsiEncoding".to_vec()),
+    ] {
+        let lines = embedded_type1_lines(
+            |doc| {
+                add_embedded_type1_font(
+                    doc,
+                    type1_program(&tex_text_encoding()),
+                    Some(encoding.clone()),
+                    None,
+                )
+            },
+            &[TEX_STRINGS[0], TEX_STRINGS[3]],
+        );
+        assert_eq!(lines, ["nd", "1{2"], "{encoding:?}");
+    }
+
+    // Differences whose names none reads (glyphs named by the character
+    // itself) keep the font without an encoding, whatever its program says:
+    // the codes read as the single-byte characters they are.
+    for program in [
+        type1_program(&tex_text_encoding()),
+        type1_program("/Encoding StandardEncoding def"),
+    ] {
+        let lines = embedded_type1_lines(
+            |doc| {
+                let encoding = dictionary! {
+                    "Type" => "Encoding",
+                    "Differences" => vec![
+                        0x3D.into(),
+                        Object::Name(b"=".to_vec()),
+                        0x3B.into(),
+                        Object::Name(b";".to_vec()),
+                    ],
+                };
+                add_embedded_type1_font(doc, program.clone(), Some(encoding.into()), None)
+            },
+            &["a=b;"],
+        );
+        assert_eq!(lines, ["a=b;"], "names that do not read");
+    }
+
+    // A program whose encoding cannot be read leaves the font as it was.
+    let lines = embedded_type1_lines(
+        |doc| {
+            add_embedded_type1_font(
+                doc,
+                type1_program("/Encoding ISOLatin1Encoding def"),
+                None,
+                None,
+            )
+        },
+        &[TEX_STRINGS[0], TEX_STRINGS[3]],
+    );
+    assert_eq!(lines, ["nd", "1{2"], "unreadable program");
+}
+
+#[test]
+fn test_type1_program_declaring_standard_encoding_is_the_base_under_differences() {
+    use lopdf::{dictionary, Object};
+
+    // An encoding dictionary with Differences only: the codes it leaves
+    // read through StandardEncoding, the program's, where they read through
+    // the single-byte fallback before (`fi` at 0xAE, not `®`; a curly
+    // apostrophe at 0x27).
+    let lines = embedded_type1_lines(
+        |doc| {
+            let encoding = dictionary! {
+                "Type" => "Encoding",
+                "Differences" => vec![65.into(), Object::Name(b"B".to_vec())],
+            };
+            add_embedded_type1_font(
+                doc,
+                type1_program("/Encoding StandardEncoding def"),
+                Some(encoding.into()),
+                None,
+            )
+        },
+        &["A\\256", "it\\047s"],
+    );
+    assert_eq!(lines, ["Bfi", "it\u{2019}s"]);
+}
