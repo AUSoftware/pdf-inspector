@@ -18,7 +18,10 @@ jobs:
     # Guard manual dispatches: npm trusted publishing matches
     # repo+workflow+environment but NOT branch, so without this a
     # workflow_dispatch from any branch could publish unmerged code.
-    if: github.ref == 'refs/heads/main'
+    # Upstream's release: the AUSoftware fork publishes only the .NET
+    # package (package-nuget.yml), so a synced version bump must not
+    # publish, or queue for runners the fork does not have.
+    if: github.repository == 'firecrawl/pdf-inspector' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.check.outputs.changed }}
