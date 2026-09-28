@@ -10874,3 +10874,189 @@ fn test_renumbered_subset_collision_keeps_the_stale_reading_of_short_words_befor
     );
     assert_eq!(read, ["md", "rm", "gl", "gq"]);
 }
+
+/// [`add_identity_h_subset_font`] with `program` embedded as the CID
+/// font's TrueType program (`/FontFile2`).
+fn add_identity_h_subset_font_with_program(
+    doc: &mut lopdf::Document,
+    entries: &[(u16, char)],
+    cid_to_gid: Option<&[u16]>,
+    widths: Vec<lopdf::Object>,
+    program: Vec<u8>,
+) -> lopdf::ObjectId {
+    use lopdf::{dictionary, Stream};
+
+    let font_id = add_identity_h_subset_font(doc, entries, cid_to_gid, widths);
+    let program_id = doc.add_object(Stream::new(
+        dictionary! { "Length1" => program.len() as i64 },
+        program,
+    ));
+    let cid_font_id = doc
+        .get_dictionary(font_id)
+        .unwrap()
+        .get(b"DescendantFonts")
+        .unwrap()
+        .as_array()
+        .unwrap()[0]
+        .as_reference()
+        .unwrap();
+    let descriptor_id = doc
+        .get_dictionary(cid_font_id)
+        .unwrap()
+        .get(b"FontDescriptor")
+        .unwrap()
+        .as_reference()
+        .unwrap();
+    doc.get_dictionary_mut(descriptor_id)
+        .unwrap()
+        .set("FontFile2", program_id);
+    font_id
+}
+
+#[test]
+fn test_cid_keyed_cmap_under_a_renumbering_cid_to_gid_map_is_not_repaired() {
+    // A Latin subset as some producers write it: CIDs are the characters
+    // less 28 (the space at 4, `a` at 0x45), typographic punctuation sits
+    // at high CIDs, the ToUnicode CMap is keyed by CID, right as it is, and
+    // the CIDToGIDMap numbers the glyphs 1, 2, 3, … in CID order. The glyph
+    // indexes fall among the CMap's CIDs, so the CMap read through the map
+    // reads each code as another character. No program is embedded. Each
+    // quoted word is a string of its own, read before the font's choice,
+    // and read through the map it spells letters that outscore the
+    // quotation marks (`“me”` as `yaYz`).
+    let mut entries: Vec<(u16, char)> = Vec::new();
+    for (first, last, ch) in [
+        (0x04, 0x04, ' '),
+        (0x08, 0x1F, '$'),
+        (0x22, 0x22, '>'),
+        (0x24, 0x3F, '@'),
+        (0x41, 0x41, ']'),
+        (0x43, 0x43, '_'),
+        (0x45, 0x5E, 'a'),
+        (0x60, 0x60, '|'),
+        (0x62, 0x62, '~'),
+        (0x63, 0x63, '\u{00A0}'),
+        (0x6C, 0x6C, '©'),
+        (0x71, 0x71, '®'),
+        (0x73, 0x73, '°'),
+        (0x164, 0x165, '–'),
+        (0x166, 0x167, '‘'),
+        (0x169, 0x16A, '“'),
+        (0x16E, 0x16E, '•'),
+        (0x177, 0x177, '™'),
+    ] {
+        for (cid, ch) in (first..=last).zip(ch as u32..) {
+            entries.push((cid, char::from_u32(ch).unwrap()));
+        }
+    }
+    let mut gids = vec![0u16; 0x178];
+    for (glyph, &(cid, _)) in (1..).zip(&entries) {
+        gids[usize::from(cid)] = glyph;
+    }
+    let cid = |ch: char| entries.iter().find(|&&(_, c)| c == ch).unwrap().0;
+    let words = ["“me”", "“so”.", "“up”."];
+    let lines: Vec<Vec<Vec<u16>>> = words
+        .iter()
+        .map(|word| vec![word.chars().map(cid).collect()])
+        .collect();
+    let read = identity_h_lines(
+        |doc| {
+            add_identity_h_subset_font(
+                doc,
+                &entries,
+                Some(&gids),
+                vec![0.into(), vec![lopdf::Object::Integer(500); 0x178].into()],
+            )
+        },
+        &lines,
+    );
+    assert_eq!(read, words);
+}
+
+/// The ToUnicode entries of [`test_renumbering_look_alike_whose_program_reads_the_cmap_as_written_keeps_it`]
+/// and [`test_renumbered_subset_whose_program_reads_the_renumbered_codes_is_remapped`]:
+/// parentheses and digits from code 3, as a subset that kept its glyph
+/// indexes has them.
+const PARENTHESES_AND_DIGITS: [(u16, char, &str); 12] = [
+    (3, '(', "parenleft"),
+    (4, ')', "parenright"),
+    (5, '0', "zero"),
+    (6, '1', "one"),
+    (7, '2', "two"),
+    (8, '3', "three"),
+    (9, '4', "four"),
+    (10, '5', "five"),
+    (11, '6', "six"),
+    (12, '7', "seven"),
+    (13, '8', "eight"),
+    (14, '9', "nine"),
+];
+
+#[test]
+fn test_renumbering_look_alike_whose_program_reads_the_cmap_as_written_keeps_it() {
+    // A subset that kept its glyph indexes, under an Identity CIDToGIDMap,
+    // with a ToUnicode CMap from code 3 and a W array that gives glyphs 0
+    // to 2 their widths and leaves the rest to the default: the shape a
+    // subset that renumbered its glyphs and kept a stale CMap leaves. Its
+    // program names each glyph as the CMap reads its code, so the CMap is
+    // right and is not renumbered. Renumbered, `(2)(4)` would read as the
+    // digits `041061` and outscore the parentheses.
+    let entries: Vec<(u16, char)> = PARENTHESES_AND_DIGITS
+        .iter()
+        .map(|&(code, ch, _)| (code, ch))
+        .collect();
+    let names: Vec<(u16, &str)> = PARENTHESES_AND_DIGITS
+        .iter()
+        .map(|&(code, _, name)| (code, name))
+        .collect();
+    let code = |ch: char| entries.iter().find(|&&(_, c)| c == ch).unwrap().0;
+    let lines = vec![vec!["(2)(4)".chars().map(code).collect::<Vec<u16>>()]];
+    let read = identity_h_lines(
+        |doc| {
+            add_identity_h_subset_font_with_program(
+                doc,
+                &entries,
+                None,
+                vec![0.into(), vec![lopdf::Object::Integer(500); 3].into()],
+                minimal_truetype_subset_with(14, &names, &[]),
+            )
+        },
+        &lines,
+    );
+    assert_eq!(read, ["(2)(4)"]);
+}
+
+#[test]
+fn test_renumbered_subset_whose_program_reads_the_renumbered_codes_is_remapped() {
+    // The same stale CMap in a subset that did renumber its glyphs 1, 2,
+    // 3, … in the order of their old indexes: its program names glyph 1
+    // `(`, glyph 3 `0`, and the codes read through the renumbered CMap.
+    let entries: Vec<(u16, char)> = PARENTHESES_AND_DIGITS
+        .iter()
+        .map(|&(code, ch, _)| (code, ch))
+        .collect();
+    let names: Vec<(u16, &str)> = (1..)
+        .zip(&PARENTHESES_AND_DIGITS)
+        .map(|(glyph, &(_, _, name))| (glyph, name))
+        .collect();
+    let code = |ch: char| {
+        1 + PARENTHESES_AND_DIGITS
+            .iter()
+            .position(|&(_, c, _)| c == ch)
+            .unwrap() as u16
+    };
+    let lines = vec![vec!["(2)(4)".chars().map(code).collect::<Vec<u16>>()]];
+    let read = identity_h_lines(
+        |doc| {
+            add_identity_h_subset_font_with_program(
+                doc,
+                &entries,
+                None,
+                vec![0.into(), vec![lopdf::Object::Integer(500); 3].into()],
+                minimal_truetype_subset_with(12, &names, &[]),
+            )
+        },
+        &lines,
+    );
+    assert_eq!(read, ["(2)(4)"]);
+}

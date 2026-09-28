@@ -17,6 +17,18 @@ version and date. Earlier releases are described in their
   exponent that reads its minus sign lost its `<sup>` markup. A run of
   signs alone, and one whose signs are more than a quarter larger than
   its letters and digits, are still sized by their largest glyph.
+- The ToUnicode CMap of a subset font is no longer repaired where the font
+  shows it right as written. The repair through a `/CIDToGIDMap`, which
+  takes the CMap to be keyed by glyph index, is skipped when the CMap has
+  entries for more of the codes the map sends to other glyphs than for
+  those glyphs' indexes. A CMap keyed by code, as the specification has
+  it, was read through the map wherever the repair read a string better,
+  so a quoted word shown as one string read as other letters (`“me”` as
+  `yaYz`) and table cells lost their `%` and `$` signs. The renumbering of
+  a subset whose width array looks renumbered is skipped when the embedded
+  program, where it says what its glyphs are, reads more of the codes as
+  the CMap has them than as renumbered: a subset that kept its glyph
+  indexes read `(2)(4)` as `041061`.
 
 ## [1.25.1] - 2026-09-27
 
