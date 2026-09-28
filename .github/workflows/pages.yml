@@ -19,6 +19,8 @@ concurrency:
 jobs:
   deploy:
     name: Build & deploy to GitHub Pages
+    # Upstream's landing page; the AUSoftware fork does not deploy it.
+    if: github.repository == 'firecrawl/pdf-inspector'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
