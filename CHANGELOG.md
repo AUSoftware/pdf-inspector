@@ -7,7 +7,9 @@ version. A separate release pull request bumps the manifests with
 version and date. Earlier releases are described in their
 [GitHub releases](https://github.com/firecrawl/pdf-inspector/releases).
 
-## [Unreleased]
+## [1.25.2] - 2026-09-28
+
+Changes since 1.25.1.
 
 ### Fixed
 
@@ -17,6 +19,7 @@ version and date. Earlier releases are described in their
   exponent that reads its minus sign lost its `<sup>` markup. A run of
   signs alone, and one whose signs are more than a quarter larger than
   its letters and digits, are still sized by their largest glyph.
+  ([#603](https://github.com/firecrawl/pdf-inspector/pull/603))
 - The ToUnicode CMap of a subset font is no longer repaired where the font
   shows it right as written. The repair through a `/CIDToGIDMap`, which
   takes the CMap to be keyed by glyph index, is skipped when the CMap has
@@ -29,6 +32,7 @@ version and date. Earlier releases are described in their
   program, where it says what its glyphs are, reads more of the codes as
   the CMap has them than as renumbered: a subset that kept its glyph
   indexes read `(2)(4)` as `041061`.
+  ([#605](https://github.com/firecrawl/pdf-inspector/pull/605))
 
 ## [1.25.1] - 2026-09-27
 
