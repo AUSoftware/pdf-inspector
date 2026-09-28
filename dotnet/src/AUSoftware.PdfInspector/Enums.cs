@@ -84,3 +84,38 @@ public enum MarkdownProfile
     /// <summary>Prefer compact output, e.g. collapsing long dot leaders.</summary>
     Compact,
 }
+
+/// <summary>
+/// Where <see cref="TextItem.IsBold"/> came from. When more than one source
+/// says bold, the first of them in this order is reported.
+/// </summary>
+[JsonConverter(typeof(BoldSourceConverter))]
+public enum BoldSource
+{
+    /// <summary>
+    /// A bold word or foundry style abbreviation in the font name
+    /// (<c>"Bold"</c>, <c>"-Bd"</c>, <c>"Black"</c>, <c>"Demi"</c>,
+    /// <c>"-Hv"</c>, <c>"W7"</c>).
+    /// </summary>
+    FontName,
+
+    /// <summary>
+    /// The <c>FontDescriptor</c>'s ForceBold flag, or the embedded font
+    /// program's own bold selection (OS/2 <c>fsSelection</c>, the
+    /// <c>head</c> table's <c>macStyle</c>).
+    /// </summary>
+    FontFlags,
+
+    /// <summary>
+    /// The weight class: <see cref="TextItem.FontWeight"/> at or above
+    /// <see cref="PositionOptions.BoldWeightThreshold"/>. Only reported with
+    /// <see cref="PositionOptions.BoldFromWeight"/>.
+    /// </summary>
+    WeightClass,
+
+    /// <summary>
+    /// Text filled and stroked to look heavier, in a face that is not bold
+    /// itself.
+    /// </summary>
+    Painted,
+}

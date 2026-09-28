@@ -121,9 +121,43 @@ from the embedded font program's OS/2 table, else the FontDescriptor's
 "Black", "W6"); it is omitted when none of them says. `isBold` is unchanged
 and independent of it, so a medium face reports `fontWeight: 500` with
 `isBold: false`. Pass `{ boldFromWeight: true }` to also read `isBold` from a
-weight class of 600 (SemiBold) or more and to keep adjacent runs of different
-weight as separate items, so a heavier run inside a lighter paragraph keeps
-its own item instead of merging into it.
+weight class of 600 (SemiBold) or more — or of `boldWeightThreshold`, any
+class on the 100..900 scale — and to merge adjacent runs by that verdict, so a
+heavier run inside a lighter paragraph keeps its own item while runs whose
+weights differ but agree on bold merge as usual.
+
+`boldSource` says where `isBold` came from — `"FontName"` (a bold word or
+style abbreviation in the font name), `"FontFlags"` (the FontDescriptor's
+ForceBold flag or the embedded program's bold selection), `"WeightClass"`
+(the weight class, with `boldFromWeight`) or `"Painted"` (text filled and
+stroked to look heavier), the first of them in that order when more than one
+says bold — so a face whose name says Bold over a `fontWeight` of 400 can be
+told from one whose weight class says so. It is omitted when `isBold` is
+`false`.
+
+`fixedPitch` is `true` when the FontDescriptor's FixedPitch flag or the
+embedded program's `post` table says the font is monospaced, else measured
+from the font's width table: `true` when a dozen or more of its glyphs share
+one advance, `false` when two differ. It is omitted when the font declares
+nothing and no two advances differ but fewer than a dozen share one. Many
+producers write `/Flags 4`
+whatever the face, so the flag is only ever read as a yes.
+
+`fillColor` and `strokeColor` are the colours a run was shown with, as sRGB
+`[red, green, blue]` arrays of 0..255: its glyphs are filled with the first in
+render modes 0, 2, 4 and 6 and outlined with the second in modes 1, 2, 5 and
+6. DeviceRGB is read as sRGB, DeviceGray as three equal components and
+DeviceCMYK converted the way the PDF specification converts it to DeviceRGB;
+ICCBased spaces are read by their component count and Indexed spaces through
+their palette. A colour is omitted for any other colour space (Separation,
+DeviceN, Pattern, CalRGB, Lab, ...). `renderMode` is the text render mode
+(`Tr`) the run was shown with, 0..7: runs in mode 3 (invisible, the mode of OCR
+text layers) and mode 7 (clipping only) put no glyphs on the page, so a caller
+can tell visible text from invisible text. The colours and the mode are
+graphics state — they hold across text objects, `q`/`Q` save and restore them,
+and a Form XObject starts with the paint it was invoked under — and reporting
+them changes nothing about which runs are extracted. All three are omitted for
+image, link and form-field items, and a merged item keeps its first run's.
 
 `legacySymbolRewrite: true` marks items whose decoded text includes a character
 changed by legacy symbol cleanup. Merged items retain this evidence from either
@@ -142,8 +176,11 @@ for (const item of extractTextWithPositions(pdf, [1])) { // pages are 1-indexed
 // Boxes as a renderer draws the page (`/Rotate` applied)
 const rendered = extractTextWithPositions(pdf, undefined, { frame: 'display' })
 
-// Bold also from the weight class; runs of different weight stay apart
+// Bold also from the weight class, SemiBold (600) and heavier
 const weighted = extractTextWithPositions(pdf, undefined, { boldFromWeight: true })
+
+// ... or from Bold (700) and heavier
+const heavier = extractTextWithPositions(pdf, undefined, { boldFromWeight: true, boldWeightThreshold: 700 })
 ```
 
 ### `extractTextWithPositionsAndRotations(buffer: Buffer, pages?: number[], options?: FrameOptions): PositionedText`
@@ -231,6 +268,24 @@ interface PdfClassification {
   confidence: number        // 0.0 - 1.0
 }
 
+interface PdfResult {       // processPdf / detectPdf (excerpt)
+  pdfType: string
+  markdown?: string         // omitted by detectPdf
+  pageCount: number
+  // The document information dictionary's entries, decoded as PDF text
+  // strings (UTF-16 or UTF-8 after a byte order mark, PDFDocEncoding
+  // otherwise); each omitted when missing or not a string.
+  title?: string
+  author?: string
+  subject?: string
+  keywords?: string
+  creator?: string          // the application the document was authored in
+  producer?: string         // the application that wrote the PDF
+  creationDate?: string     // as written, e.g. "D:20240115103000+01'00'"
+  modDate?: string
+  // ...
+}
+
 interface PageRegions {
   page: number              // 0-indexed
   regions: number[][]       // [[x1, y1, x2, y2], ...] in PDF points, top-left origin of the visible page box
@@ -239,7 +294,8 @@ interface PageRegions {
 
 interface FrameOptions {
   frame?: "sheet" | "display" // coordinate frame of items and region bboxes; "sheet" by default
-  boldFromWeight?: boolean    // also read isBold from fontWeight >= 600 and keep runs of different weight apart; false by default
+  boldFromWeight?: boolean    // also read isBold from fontWeight >= boldWeightThreshold and merge runs by that verdict; false by default
+  boldWeightThreshold?: number // the weight class boldFromWeight reads bold from, 100..900; 600 by default
 }
 
 interface PositionedText {

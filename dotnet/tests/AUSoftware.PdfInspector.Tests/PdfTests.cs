@@ -123,6 +123,33 @@ public class PdfTests
     // -----------------------------------------------------------------
 
     [Fact]
+    public void Detect_ReportsTheDocumentInformationDictionary()
+    {
+        // This fixture was written by pypdf and names nothing else.
+        PdfResult result = Pdf.Detect(TestEnvironment.Fixture(UntaggedFixture));
+
+        Assert.Equal("pypdf", result.Producer);
+        Assert.Null(result.Title);
+        Assert.Null(result.Author);
+        Assert.Null(result.CreationDate);
+        Assert.Null(result.ModDate);
+
+        // Detection decodes no text, so it reports no CMap gaps.
+        Assert.Empty(result.CmapGaps);
+    }
+
+    [Fact]
+    public void Process_ReportsCmapGapsAsAList()
+    {
+        PdfResult result = Pdf.Process(TestEnvironment.Fixture(TextFixture));
+
+        Assert.NotNull(result.CmapGaps);
+        Assert.All(
+            result.CmapGaps,
+            gap => Assert.True(gap.Interpolated + gap.Unmapped <= gap.Codes, gap.Font));
+    }
+
+    [Fact]
     public void Detect_DoesNotExtractMarkdown()
     {
         PdfResult result = Pdf.Detect(TestEnvironment.FixtureBytes(TextFixture));
@@ -250,6 +277,48 @@ public class PdfTests
             item => Assert.True(
                 item.FontWeight is null || item.FontWeight < 600 || item.IsBold,
                 $"a weight class of {item.FontWeight} should read as bold"));
+    }
+
+    [Fact]
+    public void ExtractTextWithPositions_CarriesPaintAndBoldProvenance()
+    {
+        IReadOnlyList<TextItem> items =
+            Pdf.ExtractTextWithPositions(TestEnvironment.FixtureBytes(TextFixture));
+
+        Assert.NotEmpty(items);
+
+        // A source is reported exactly when the run is bold, and without
+        // BoldFromWeight it is never the weight class.
+        Assert.All(items, item => Assert.Equal(item.IsBold, item.BoldSource is not null));
+        Assert.DoesNotContain(items, item => item.BoldSource == BoldSource.WeightClass);
+        Assert.All(items, item => Assert.True(item.RenderMode is null or (>= 0 and <= 7)));
+
+        // The body text of this fixture is filled in the default mode.
+        Assert.Equal(0, items[0].RenderMode);
+        Assert.NotNull(items[0].FillColor);
+    }
+
+    [Fact]
+    public void ExtractTextWithPositions_HonoursTheBoldWeightThreshold()
+    {
+        // At the bottom of the weight scale every run with a stated weight
+        // reads as bold, and says why.
+        IReadOnlyList<TextItem> items = Pdf.ExtractTextWithPositions(
+            TestEnvironment.FixtureBytes(TextFixture),
+            new PdfOptions
+            {
+                Pages = new[] { 1 },
+                Position = new PositionOptions { BoldFromWeight = true, BoldWeightThreshold = 100 },
+            });
+
+        Assert.NotEmpty(items);
+        Assert.All(
+            items.Where(item => item.FontWeight is not null),
+            item =>
+            {
+                Assert.True(item.IsBold);
+                Assert.NotNull(item.BoldSource);
+            });
     }
 
     [Fact]

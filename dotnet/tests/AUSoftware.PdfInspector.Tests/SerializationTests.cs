@@ -157,6 +157,41 @@ public class SerializationTests
             Serialize(new PdfOptions { Position = new PositionOptions() }));
     }
 
+    [Fact]
+    public void PositionOptions_CarryTheBoldWeightThreshold()
+    {
+        Assert.Equal(
+            """{"position":{"bold_from_weight":true,"bold_weight_threshold":700}}""",
+            Serialize(new PdfOptions
+            {
+                Position = new PositionOptions { BoldFromWeight = true, BoldWeightThreshold = 700 },
+            }));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(99)]
+    [InlineData(901)]
+    public void BoldWeightThreshold_OffTheWeightScale_IsRejected(int threshold)
+    {
+        PositionOptions options = new PositionOptions();
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => options.BoldWeightThreshold = threshold);
+        Assert.Null(options.BoldWeightThreshold);
+    }
+
+    [Theory]
+    [InlineData(100)]
+    [InlineData(900)]
+    public void BoldWeightThreshold_AtTheEndsOfTheWeightScale_IsAccepted(int threshold)
+    {
+        PositionOptions options = new PositionOptions { BoldWeightThreshold = threshold };
+
+        Assert.Equal(threshold, options.BoldWeightThreshold);
+        options.BoldWeightThreshold = null;
+        Assert.Null(options.BoldWeightThreshold);
+    }
+
     [Theory]
     [InlineData("not_a_pdf", PdfErrorKind.NotAPdf)]
     [InlineData("invalid_argument", PdfErrorKind.InvalidArgument)]
@@ -246,6 +281,130 @@ public class SerializationTests
         TextItem item = Assert.Single(envelope!.Data!);
         Assert.Null(item.FontWeight);
         Assert.False(item.LegacySymbolRewrite);
+    }
+
+    [Fact]
+    public void TextItemPaintAndBoldProvenance_DeserialiseFromTheirSnakeCaseNames()
+    {
+        const string json = """
+        {"ok":true,"data":[{
+          "text":"x","x":1,"y":2,"width":3,"height":4,
+          "rotation":0,"advance_known":true,
+          "font":"Courier-Bold","font_tag":"F1","font_size":10,
+          "font_weight":700,"legacy_symbol_rewrite":false,
+          "page":1,"is_bold":true,"bold_source":"font_name",
+          "fixed_pitch":true,"fill_color":[255,0,128],"stroke_color":[0,0,0],
+          "render_mode":2,"is_italic":false,
+          "is_underline":false,"is_strikeout":false,
+          "baseline_shift":0,"item_type":"text","mcid":null
+        },{
+          "text":"y","x":1,"y":2,"width":3,"height":4,
+          "rotation":0,"advance_known":true,
+          "font":"Helvetica","font_tag":"F2","font_size":10,
+          "font_weight":null,"legacy_symbol_rewrite":false,
+          "page":1,"is_bold":false,"bold_source":null,
+          "fixed_pitch":null,"fill_color":null,"stroke_color":null,
+          "render_mode":null,"is_italic":false,
+          "is_underline":false,"is_strikeout":false,
+          "baseline_shift":0,"item_type":"text","mcid":null
+        }]}
+        """;
+
+        Envelope<IReadOnlyList<TextItem>>? envelope =
+            JsonSerializer.Deserialize(json, PdfJsonContext.Default.TextItemsEnvelope);
+        IReadOnlyList<TextItem> items = envelope!.Data!;
+        Assert.Equal(2, items.Count);
+
+        TextItem painted = items[0];
+        Assert.Equal(BoldSource.FontName, painted.BoldSource);
+        Assert.True(painted.FixedPitch);
+        Assert.Equal(new RgbColor(255, 0, 128), painted.FillColor);
+        Assert.Equal(new RgbColor(0, 0, 0), painted.StrokeColor);
+        Assert.Equal(2, painted.RenderMode);
+        Assert.Equal("#ff0080", painted.FillColor!.Value.ToString());
+
+        TextItem plain = items[1];
+        Assert.Null(plain.BoldSource);
+        Assert.Null(plain.FixedPitch);
+        Assert.Null(plain.FillColor);
+        Assert.Null(plain.StrokeColor);
+        Assert.Null(plain.RenderMode);
+    }
+
+    [Theory]
+    [InlineData("\"font_name\"", BoldSource.FontName)]
+    [InlineData("\"font_flags\"", BoldSource.FontFlags)]
+    [InlineData("\"weight_class\"", BoldSource.WeightClass)]
+    [InlineData("\"painted\"", BoldSource.Painted)]
+    public void BoldSourceValues_RoundTripThroughTheirWireNames(string wire, BoldSource expected)
+    {
+        Assert.Equal(expected, JsonSerializer.Deserialize<BoldSource>(wire, JsonSerializerOptions.Default));
+        Assert.Equal(wire, JsonSerializer.Serialize(expected, JsonSerializerOptions.Default));
+    }
+
+    [Fact]
+    public void UnknownBoldSource_IsRejectedRatherThanSilentlyDefaulted()
+    {
+        Assert.Throws<JsonException>(
+            () => JsonSerializer.Deserialize<BoldSource>("\"heavy\"", JsonSerializerOptions.Default));
+    }
+
+    [Theory]
+    [InlineData("[1,2]")]
+    [InlineData("[1,2,3,4]")]
+    [InlineData("[1,2,256]")]
+    [InlineData("[1,2,-1]")]
+    [InlineData("\"#010203\"")]
+    public void MalformedRgbColor_IsRejected(string wire)
+    {
+        Assert.Throws<JsonException>(
+            () => JsonSerializer.Deserialize<RgbColor>(wire, JsonSerializerOptions.Default));
+    }
+
+    [Fact]
+    public void PdfResultDocumentInformationAndCmapGaps_DeserialiseFromTheirSnakeCaseNames()
+    {
+        const string json = """
+        {"ok":true,"data":{
+          "pdf_type":"text_based","markdown":"# x","page_count":1,
+          "processing_time_ms":3,"pages_needing_ocr":[],"ocr_reasons_by_page":[],
+          "title":"T","author":"A","subject":"S","keywords":"K",
+          "creator":"Writer","producer":"pypdf",
+          "creation_date":"D:20240115103000+01'00'","mod_date":null,
+          "confidence":0.9,"is_complex_layout":false,
+          "pages_with_tables":[],"pages_with_columns":[],
+          "has_encoding_issues":true,
+          "cmap_gaps":[{"font":"AAAAAA+Subset","codes":24,"interpolated":8,"unmapped":2}]
+        }}
+        """;
+
+        Envelope<PdfResult>? envelope =
+            JsonSerializer.Deserialize(json, PdfJsonContext.Default.PdfResultEnvelope);
+        PdfResult result = envelope!.Data!;
+
+        Assert.Equal("T", result.Title);
+        Assert.Equal("A", result.Author);
+        Assert.Equal("S", result.Subject);
+        Assert.Equal("K", result.Keywords);
+        Assert.Equal("Writer", result.Creator);
+        Assert.Equal("pypdf", result.Producer);
+        Assert.Equal("D:20240115103000+01'00'", result.CreationDate);
+        Assert.Null(result.ModDate);
+
+        FontCMapGaps gap = Assert.Single(result.CmapGaps);
+        Assert.Equal("AAAAAA+Subset", gap.Font);
+        Assert.Equal(24, gap.Codes);
+        Assert.Equal(8, gap.Interpolated);
+        Assert.Equal(2, gap.Unmapped);
+    }
+
+    [Fact]
+    public void RgbColor_HasValueSemantics()
+    {
+        Assert.Equal(new RgbColor(1, 2, 3), new RgbColor(1, 2, 3));
+        Assert.True(new RgbColor(1, 2, 3) == new RgbColor(1, 2, 3));
+        Assert.True(new RgbColor(1, 2, 3) != new RgbColor(1, 2, 4));
+        Assert.Equal(new RgbColor(1, 2, 3).GetHashCode(), new RgbColor(1, 2, 3).GetHashCode());
     }
 
     [Fact]

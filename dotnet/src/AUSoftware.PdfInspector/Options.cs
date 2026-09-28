@@ -63,14 +63,45 @@ public sealed class PositionOptions
     /// <summary>
     /// Also read bold from the font's weight class. When true,
     /// <see cref="TextItem.IsBold"/> is additionally true for a
-    /// <see cref="TextItem.FontWeight"/> of 600 or more, and adjacent runs
-    /// whose weight class differs stay separate items instead of merging, so
-    /// a heavier run inside a lighter paragraph keeps its own item. Default:
-    /// false, where <see cref="TextItem.IsBold"/> and item merging are
-    /// exactly what they were before the option existed.
-    /// <see cref="TextItem.FontWeight"/> is reported either way.
+    /// <see cref="TextItem.FontWeight"/> at or above
+    /// <see cref="BoldWeightThreshold"/> (600, SemiBold, by default) — with
+    /// <see cref="TextItem.BoldSource"/> <see cref="PdfInspector.BoldSource.WeightClass"/>
+    /// unless the font's name or flags already said bold — and adjacent runs
+    /// are merged by that verdict: a run the weight makes bold stays apart
+    /// from its plain neighbours, so a heavier run inside a lighter paragraph
+    /// keeps its own item, while runs whose weights differ but agree on bold
+    /// merge as usual. Default: false, where <see cref="TextItem.IsBold"/>
+    /// and item merging are exactly what they were before the option
+    /// existed. <see cref="TextItem.FontWeight"/> is reported either way.
     /// </summary>
     public bool? BoldFromWeight { get; set; }
+
+    /// <summary>
+    /// The weight class from which <see cref="BoldFromWeight"/> reads bold,
+    /// on the 100–900 scale. Defaults to 600, so SemiBold and heavier faces
+    /// are bold. It only matters when <see cref="BoldFromWeight"/> is true.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The value is outside 100–900.
+    /// </exception>
+    public int? BoldWeightThreshold
+    {
+        get => _boldWeightThreshold;
+        set
+        {
+            if (value is < 100 or > 900)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(value),
+                    value,
+                    "The bold weight threshold must be a weight class from 100 to 900.");
+            }
+
+            _boldWeightThreshold = value;
+        }
+    }
+
+    private int? _boldWeightThreshold;
 }
 
 /// <summary>Tuning for the PDF type detector.</summary>

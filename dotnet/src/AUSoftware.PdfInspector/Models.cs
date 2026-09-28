@@ -1,5 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Text.Json.Serialization;
+using AUSoftware.PdfInspector.Json;
 
 namespace AUSoftware.PdfInspector;
 
@@ -38,6 +41,38 @@ public sealed class PageOcrReasons
 }
 
 /// <summary>
+/// A font whose ToUnicode CMap — or, for a font without one, the embedded
+/// program's cmap table — had no entry for some of the codes the document
+/// shows through it, and what became of those codes.
+/// <c>Codes - Interpolated - Unmapped</c> of its codes had an entry.
+/// </summary>
+public sealed class FontCMapGaps
+{
+    /// <summary>The font's <c>/BaseFont</c> name, or its resource name when it has none.</summary>
+    public string Font { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Codes shown through the font's CMap, repeats included: two-byte codes,
+    /// or the bytes of a single-byte CMap.
+    /// </summary>
+    public long Codes { get; init; }
+
+    /// <summary>
+    /// Codes without an entry that were read from the mapped codes around
+    /// them: a CMap mapping code 36 to <c>A</c> and code 38 to <c>C</c> says
+    /// code 37 is <c>B</c>, for a run of digits or of letters of one case in
+    /// alphabetical glyph order.
+    /// </summary>
+    public long Interpolated { get; init; }
+
+    /// <summary>
+    /// Codes without an entry that could not be read; each is a U+FFFD in
+    /// the text.
+    /// </summary>
+    public long Unmapped { get; init; }
+}
+
+/// <summary>
 /// The result of a full <see cref="Pdf.Process(string, PdfOptions?)"/> or
 /// <see cref="Pdf.Detect(string, PdfOptions?)"/> call.
 /// </summary>
@@ -64,8 +99,44 @@ public sealed class PdfResult
     /// <summary>Why each page in <see cref="PagesNeedingOcr"/> needs OCR.</summary>
     public IReadOnlyList<PageOcrReasons> OcrReasonsByPage { get; init; } = Array.Empty<PageOcrReasons>();
 
-    /// <summary>Document title from the PDF metadata, when present.</summary>
+    /// <summary>
+    /// The <c>/Title</c> of the document information dictionary, decoded as a
+    /// PDF text string (UTF-16 or UTF-8 after a byte order mark,
+    /// PDFDocEncoding otherwise). <see langword="null"/> when the entry is
+    /// missing or not a string. The other document information properties
+    /// follow the same decoding and missing-value rule.
+    /// </summary>
     public string? Title { get; init; }
+
+    /// <summary>The document information dictionary's <c>/Author</c>.</summary>
+    public string? Author { get; init; }
+
+    /// <summary>The document information dictionary's <c>/Subject</c>.</summary>
+    public string? Subject { get; init; }
+
+    /// <summary>The document information dictionary's <c>/Keywords</c>.</summary>
+    public string? Keywords { get; init; }
+
+    /// <summary>
+    /// The document information dictionary's <c>/Creator</c>: the
+    /// application the document was authored in.
+    /// </summary>
+    public string? Creator { get; init; }
+
+    /// <summary>
+    /// The document information dictionary's <c>/Producer</c>: the
+    /// application that wrote the PDF.
+    /// </summary>
+    public string? Producer { get; init; }
+
+    /// <summary>
+    /// The document information dictionary's <c>/CreationDate</c> as written,
+    /// a PDF date string such as <c>D:20240115103000+01'00'</c>.
+    /// </summary>
+    public string? CreationDate { get; init; }
+
+    /// <summary>The document information dictionary's <c>/ModDate</c> as written.</summary>
+    public string? ModDate { get; init; }
 
     /// <summary>Detection confidence, 0.0–1.0.</summary>
     public double Confidence { get; init; }
@@ -85,6 +156,15 @@ public sealed class PdfResult
     /// route to OCR instead.
     /// </summary>
     public bool HasEncodingIssues { get; init; }
+
+    /// <summary>
+    /// Fonts whose ToUnicode CMap — or, for a font without one, the embedded
+    /// program's cmap table — lacked an entry for a code the document shows
+    /// through them. Always empty for <see cref="Pdf.Detect(string, PdfOptions?)"/>
+    /// and <see cref="ProcessMode.DetectOnly"/>, which decode no text;
+    /// otherwise empty when every such code had an entry.
+    /// </summary>
+    public IReadOnlyList<FontCMapGaps> CmapGaps { get; init; } = Array.Empty<FontCMapGaps>();
 }
 
 /// <summary>
@@ -193,8 +273,65 @@ public sealed class TextItem
     /// <summary>1-indexed page number.</summary>
     public int Page { get; init; }
 
-    /// <summary>True when the font is bold.</summary>
+    /// <summary>
+    /// True when the font is bold: from the font name, the
+    /// <c>FontDescriptor</c>'s ForceBold flag, the embedded program's bold
+    /// selection, or text filled and stroked to look heavier. With
+    /// <see cref="PositionOptions.BoldFromWeight"/> also true when
+    /// <see cref="FontWeight"/> is at or above
+    /// <see cref="PositionOptions.BoldWeightThreshold"/>.
+    /// <see cref="BoldSource"/> says which.
+    /// </summary>
     public bool IsBold { get; init; }
+
+    /// <summary>
+    /// Where <see cref="IsBold"/> came from, the first in
+    /// <see cref="PdfInspector.BoldSource"/> order when more than one says
+    /// bold — so a verdict can be weighed against <see cref="FontWeight"/>:
+    /// a face whose name says Bold over a weight class of 400 reports
+    /// <see cref="PdfInspector.BoldSource.FontName"/>.
+    /// <see langword="null"/> when <see cref="IsBold"/> is false, and for
+    /// image, link and form-field items.
+    /// </summary>
+    public BoldSource? BoldSource { get; init; }
+
+    /// <summary>
+    /// Whether the font is fixed-pitch (monospaced): true when the
+    /// <c>FontDescriptor</c>'s FixedPitch flag or the embedded program's
+    /// <c>post</c> table says so, else measured from the font's width table —
+    /// true when a dozen or more of its glyphs share one advance, false when
+    /// two differ. <see langword="null"/> when neither holds, and for image,
+    /// link and form-field items.
+    /// </summary>
+    public bool? FixedPitch { get; init; }
+
+    /// <summary>
+    /// The fill colour the run was shown with: what its glyphs are filled
+    /// with in the render modes that fill (0, 2, 4, 6). DeviceRGB is read as
+    /// sRGB, DeviceGray as three equal components and DeviceCMYK converted as
+    /// the PDF specification converts it; ICCBased spaces are read by their
+    /// component count and Indexed spaces through their palette.
+    /// <see langword="null"/> for any other colour space (Separation,
+    /// DeviceN, Pattern, CalRGB, Lab, …) and for image, link and form-field
+    /// items. A merged item keeps its first run's colour.
+    /// </summary>
+    public RgbColor? FillColor { get; init; }
+
+    /// <summary>
+    /// The stroke colour the run was shown with, read like
+    /// <see cref="FillColor"/>: what its glyph outlines are stroked with in
+    /// the render modes that stroke (1, 2, 5, 6).
+    /// </summary>
+    public RgbColor? StrokeColor { get; init; }
+
+    /// <summary>
+    /// The text render mode (<c>Tr</c>) the run was shown with, 0–7: 0 fill,
+    /// 1 stroke, 2 fill and stroke, 3 invisible (the mode of OCR text
+    /// layers), 4–6 as 0–2 plus clip, 7 clip only. Runs in modes 3 and 7 put
+    /// no glyphs on the page; which runs are extracted is unchanged by it.
+    /// <see langword="null"/> for image, link and form-field items.
+    /// </summary>
+    public int? RenderMode { get; init; }
 
     /// <summary>True when the font is italic.</summary>
     public bool IsItalic { get; init; }
@@ -311,4 +448,48 @@ public sealed class PageRegionText
 
     /// <summary>One result per requested region, in the order requested.</summary>
     public IReadOnlyList<RegionText> Regions { get; init; } = Array.Empty<RegionText>();
+}
+
+/// <summary>An 8-bit sRGB colour.</summary>
+[JsonConverter(typeof(RgbColorConverter))]
+public readonly struct RgbColor : IEquatable<RgbColor>
+{
+    /// <summary>Creates a colour from its components.</summary>
+    /// <param name="r">Red, 0–255.</param>
+    /// <param name="g">Green, 0–255.</param>
+    /// <param name="b">Blue, 0–255.</param>
+    public RgbColor(byte r, byte g, byte b)
+    {
+        R = r;
+        G = g;
+        B = b;
+    }
+
+    /// <summary>Red, 0–255.</summary>
+    public byte R { get; }
+
+    /// <summary>Green, 0–255.</summary>
+    public byte G { get; }
+
+    /// <summary>Blue, 0–255.</summary>
+    public byte B { get; }
+
+    /// <inheritdoc/>
+    public bool Equals(RgbColor other) => R == other.R && G == other.G && B == other.B;
+
+    /// <inheritdoc/>
+    public override bool Equals(object? obj) => obj is RgbColor other && Equals(other);
+
+    /// <inheritdoc/>
+    public override int GetHashCode() => (R << 16) | (G << 8) | B;
+
+    /// <summary>Value equality.</summary>
+    public static bool operator ==(RgbColor left, RgbColor right) => left.Equals(right);
+
+    /// <summary>Value inequality.</summary>
+    public static bool operator !=(RgbColor left, RgbColor right) => !left.Equals(right);
+
+    /// <summary>The colour as a CSS-style hex string, <c>#rrggbb</c>.</summary>
+    public override string ToString() =>
+        string.Format(CultureInfo.InvariantCulture, "#{0:x2}{1:x2}{2:x2}", R, G, B);
 }
