@@ -7,6 +7,17 @@ version. A separate release pull request bumps the manifests with
 version and date. Earlier releases are described in their
 [GitHub releases](https://github.com/firecrawl/pdf-inspector/releases).
 
+## [Unreleased]
+
+### Fixed
+
+- A super- or subscript run is sized by its letters and digits. A sign
+  set from a symbol font a design size above them, as TeX sets the minus
+  of an exponent, took the run past the size a script may have, so an
+  exponent that reads its minus sign lost its `<sup>` markup. A run of
+  signs alone, and one whose signs are more than a quarter larger than
+  its letters and digits, are still sized by their largest glyph.
+
 ## [1.25.1] - 2026-09-27
 
 Changes since 1.25.0.
