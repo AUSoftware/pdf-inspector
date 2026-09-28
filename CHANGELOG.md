@@ -7,7 +7,9 @@ version. A separate release pull request bumps the manifests with
 version and date. Earlier releases are described in their
 [GitHub releases](https://github.com/firecrawl/pdf-inspector/releases).
 
-## [Unreleased]
+## [1.25.1] - 2026-09-27
+
+Changes since 1.25.0.
 
 ### Fixed
 
@@ -21,6 +23,7 @@ version and date. Earlier releases are described in their
   a Type1 font now judges a CMap declared this way too, and the page
   detector counts such a font's text byte by byte as well. Composite
   (Type0) fonts keep reading their codes as their CMap says.
+  ([#595](https://github.com/firecrawl/pdf-inspector/pull/595))
 - A Type1 font whose `/Encoding` names no base encoding (none at all, or
   an encoding dictionary without `/BaseEncoding`) reads through the
   built-in encoding of its embedded program, which PDF 32000-1:2008
@@ -36,12 +39,14 @@ version and date. Earlier releases are described in their
   other than the word space (code 32), has no glyph and reads as nothing,
   except in a font where nothing else reads (no name that reads, no base
   encoding, no blank glyphs), which reads as before.
+  ([#596](https://github.com/firecrawl/pdf-inspector/pull/596))
 - The base-14 width fallback (a standard font without `/Widths`) measures
   the codes of a font the decoder reads without an encoding, one whose
   `/Differences` or embedded program give only glyph names that do not
   read (`/=`, `/;`) and that has neither a base encoding nor blank glyphs,
   as the single-byte characters those codes read as, rather than giving
   them no width.
+  ([#596](https://github.com/firecrawl/pdf-inspector/pull/596))
 - A string of one or two glyphs shown in a subset font whose ToUnicode
   CMap has a repaired counterpart (rebuilt through the font's
   `/CIDToGIDMap`, or renumbered for a renumbered subset) reads through the
@@ -53,6 +58,7 @@ version and date. Earlier releases are described in their
   as `engageaent`, `AND` as `ANa`, `Three` as `ThaTe`). Longer strings, and
   the font's choice over its first strings, weigh every common word as
   before.
+  ([#597](https://github.com/firecrawl/pdf-inspector/pull/597))
 
 ## [1.25.0] - 2026-09-25
 
