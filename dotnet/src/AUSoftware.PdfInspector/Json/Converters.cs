@@ -196,6 +196,88 @@ internal sealed class PositionFrameConverter : SnakeCaseEnumConverter<PositionFr
     };
 }
 
+internal sealed class BoldSourceConverter : SnakeCaseEnumConverter<BoldSource>
+{
+    protected override bool TryParse(string value, out BoldSource result)
+    {
+        switch (value)
+        {
+            case "font_name":
+                result = BoldSource.FontName;
+                return true;
+            case "font_flags":
+                result = BoldSource.FontFlags;
+                return true;
+            case "weight_class":
+                result = BoldSource.WeightClass;
+                return true;
+            case "painted":
+                result = BoldSource.Painted;
+                return true;
+            default:
+                result = default;
+                return false;
+        }
+    }
+
+    protected override string Format(BoldSource value) => value switch
+    {
+        BoldSource.FontName => "font_name",
+        BoldSource.FontFlags => "font_flags",
+        BoldSource.WeightClass => "weight_class",
+        BoldSource.Painted => "painted",
+        _ => throw new JsonException($"Unrecognised BoldSource value '{value}'."),
+    };
+}
+
+/// <summary>
+/// Reads and writes an <see cref="RgbColor"/> as the <c>[r, g, b]</c> array
+/// of 0–255 components the native library sends.
+/// </summary>
+internal sealed class RgbColorConverter : JsonConverter<RgbColor>
+{
+    public override RgbColor Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType != JsonTokenType.StartArray)
+        {
+            throw new JsonException($"Expected an [r, g, b] array for RgbColor, found {reader.TokenType}.");
+        }
+
+        byte[] components = new byte[3];
+        int count = 0;
+        while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+        {
+            if (count == 3 || reader.TokenType != JsonTokenType.Number || !reader.TryGetByte(out byte component))
+            {
+                throw new JsonException("An RgbColor is exactly three components from 0 to 255.");
+            }
+
+            components[count++] = component;
+        }
+
+        if (count != 3)
+        {
+            throw new JsonException("An RgbColor is exactly three components from 0 to 255.");
+        }
+
+        return new RgbColor(components[0], components[1], components[2]);
+    }
+
+    public override void Write(Utf8JsonWriter writer, RgbColor value, JsonSerializerOptions options)
+    {
+        if (writer is null)
+        {
+            throw new ArgumentNullException(nameof(writer));
+        }
+
+        writer.WriteStartArray();
+        writer.WriteNumberValue(value.R);
+        writer.WriteNumberValue(value.G);
+        writer.WriteNumberValue(value.B);
+        writer.WriteEndArray();
+    }
+}
+
 /// <summary>
 /// Writes a <see cref="ScanStrategy"/> as the tagged object the native
 /// library expects: <c>{"type":"sample","count":8}</c>.

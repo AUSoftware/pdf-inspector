@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use pdf_inspector::detector::{DetectionConfig, ScanStrategy};
 use pdf_inspector::markdown::{MarkdownOptions, MarkdownProfile};
 use pdf_inspector::{PdfOptions, PositionFrame, PositionOptions, ProcessMode};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 /// How far the pipeline should run.
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -170,12 +170,32 @@ impl From<FrameDto> for PositionFrame {
 
 /// Options of the positioned-text and region entry points. Omitted fields
 /// keep the crate defaults: the sheet frame, bold not read from the weight
-/// class.
+/// class, and a threshold of 600 when it is.
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct PositionOptionsDto {
     pub frame: Option<FrameDto>,
     pub bold_from_weight: Option<bool>,
+    /// The weight class from which `bold_from_weight` reads bold, 100..=900.
+    /// Only matters with `bold_from_weight`, but a value outside the range
+    /// is rejected either way — as the Node binding does — rather than
+    /// clamped by the core crate.
+    #[serde(deserialize_with = "weight_threshold")]
+    pub bold_weight_threshold: Option<u16>,
+}
+
+/// Parse `bold_weight_threshold`, refusing a weight class outside 100..=900
+/// so the mistake surfaces as `invalid_options`.
+fn weight_threshold<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u16>, D::Error> {
+    let threshold = Option::<u16>::deserialize(deserializer)?;
+    if let Some(threshold) = threshold {
+        if !(100..=900).contains(&threshold) {
+            return Err(serde::de::Error::custom(format!(
+                "bold_weight_threshold {threshold} is outside 100..=900"
+            )));
+        }
+    }
+    Ok(threshold)
 }
 
 impl PositionOptionsDto {
@@ -188,6 +208,9 @@ impl PositionOptionsDto {
         }
         if let Some(bold_from_weight) = self.bold_from_weight {
             options = options.bold_from_weight(bold_from_weight);
+        }
+        if let Some(threshold) = self.bold_weight_threshold {
+            options = options.bold_weight_threshold(threshold);
         }
         options
     }
@@ -410,6 +433,41 @@ mod tests {
             serde_json::from_str(r#"{"position":{"frame":"sheet","bold_from_weight":false}}"#)
                 .unwrap();
         assert!(!dto.has_position_options());
+    }
+
+    #[test]
+    fn bold_weight_threshold_reaches_the_position_options() {
+        let dto: OptionsDto = serde_json::from_str(
+            r#"{"position":{"bold_from_weight":true,"bold_weight_threshold":700}}"#,
+        )
+        .unwrap();
+        let options = dto.position_options();
+        assert!(options.bold_from_weight);
+        assert_eq!(options.bold_weight_threshold, 700);
+
+        // The default threshold, spelled out, is no override.
+        let dto: OptionsDto =
+            serde_json::from_str(r#"{"position":{"bold_weight_threshold":600}}"#).unwrap();
+        assert!(!dto.has_position_options());
+    }
+
+    #[test]
+    fn bold_weight_threshold_outside_the_weight_scale_is_rejected() {
+        for threshold in ["99", "901", "0", "70000", "-1"] {
+            let json = format!(r#"{{"position":{{"bold_weight_threshold":{threshold}}}}}"#);
+            assert!(
+                serde_json::from_str::<OptionsDto>(&json).is_err(),
+                "{threshold} should be refused"
+            );
+        }
+        for threshold in ["100", "900"] {
+            let json = format!(r#"{{"position":{{"bold_weight_threshold":{threshold}}}}}"#);
+            assert!(serde_json::from_str::<OptionsDto>(&json).is_ok());
+        }
+        // An explicit null means "the default".
+        let dto: OptionsDto =
+            serde_json::from_str(r#"{"position":{"bold_weight_threshold":null}}"#).unwrap();
+        assert_eq!(dto.position_options(), PositionOptions::default());
     }
 
     #[test]

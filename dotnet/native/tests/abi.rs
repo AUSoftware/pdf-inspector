@@ -88,6 +88,47 @@ fn process_file_returns_markdown_and_metadata() {
 }
 
 #[test]
+fn detect_reports_document_information_and_cmap_gaps() {
+    // thermo-freon12.pdf was written by pypdf and names nothing else in its
+    // information dictionary.
+    let path = c(fixture("thermo-freon12.pdf").to_str().unwrap());
+    let data = data(unsafe { pdfi_detect_pdf_file(path.as_ptr(), std::ptr::null()) });
+
+    assert_eq!(data["producer"], "pypdf");
+    for absent in [
+        "title",
+        "author",
+        "subject",
+        "keywords",
+        "creator",
+        "creation_date",
+        "mod_date",
+    ] {
+        // Always sent, `null` when the entry is missing.
+        assert!(
+            data.get(absent).is_some_and(Value::is_null),
+            "{absent}: {data}"
+        );
+    }
+    // Detection decodes no text, so it never reports CMap gaps.
+    assert_eq!(data["cmap_gaps"], Value::Array(Vec::new()));
+}
+
+#[test]
+fn process_reports_cmap_gaps_as_a_list() {
+    let path = c(fixture("2013-app2.pdf").to_str().unwrap());
+    let data = data(unsafe { pdfi_process_pdf_file(path.as_ptr(), std::ptr::null()) });
+    let gaps = data["cmap_gaps"].as_array().expect("cmap_gaps is a list");
+    for gap in gaps {
+        assert!(gap["font"].is_string());
+        let codes = gap["codes"].as_u64().unwrap();
+        let interpolated = gap["interpolated"].as_u64().unwrap();
+        let unmapped = gap["unmapped"].as_u64().unwrap();
+        assert!(interpolated + unmapped <= codes, "{gap}");
+    }
+}
+
+#[test]
 fn process_bytes_matches_process_file() {
     let bytes = fixture_bytes("2013-app2.pdf");
     let path = c(fixture("2013-app2.pdf").to_str().unwrap());
@@ -276,6 +317,81 @@ fn position_options_reach_the_extractor() {
     let items = items.as_array().unwrap();
     assert!(!items.is_empty());
     assert!(items.iter().all(|item| item["is_bold"].is_boolean()));
+}
+
+#[test]
+fn positions_carry_paint_and_bold_provenance() {
+    let bytes = fixture_bytes("2013-app2.pdf");
+    let data = data(unsafe {
+        pdfi_extract_text_with_positions_bytes(bytes.as_ptr(), bytes.len(), std::ptr::null())
+    });
+    let items = data.as_array().unwrap();
+    assert!(!items.is_empty());
+
+    // Added in 1.21.0-1.24.0, and always sent (`null` when unknown).
+    for item in items {
+        for key in [
+            "bold_source",
+            "fixed_pitch",
+            "fill_color",
+            "stroke_color",
+            "render_mode",
+        ] {
+            assert!(item.get(key).is_some(), "{key} is always sent: {item}");
+        }
+        let source = &item["bold_source"];
+        if item["is_bold"] == Value::Bool(true) {
+            assert!(
+                ["font_name", "font_flags", "painted"].contains(&source.as_str().unwrap()),
+                "bold without the weight class says why: {item}"
+            );
+        } else {
+            assert!(source.is_null(), "no source for a plain run: {item}");
+        }
+        assert!(item["fixed_pitch"].is_null() || item["fixed_pitch"].is_boolean());
+        for key in ["fill_color", "stroke_color"] {
+            let color = &item[key];
+            assert!(
+                color.is_null()
+                    || color.as_array().is_some_and(|rgb| rgb.len() == 3
+                        && rgb.iter().all(|c| c.as_u64().is_some_and(|c| c <= 255))),
+                "{key} is null or [r, g, b]: {color}"
+            );
+        }
+    }
+
+    // The body text of this fixture is filled in the default mode.
+    assert_eq!(items[0]["render_mode"], 0);
+    assert!(items[0]["fill_color"].is_array());
+}
+
+#[test]
+fn bold_weight_threshold_is_accepted_on_the_weight_scale_only() {
+    let bytes = fixture_bytes("2013-app2.pdf");
+
+    let options =
+        c(r#"{"position":{"bold_from_weight":true,"bold_weight_threshold":100},"pages":[1]}"#);
+    let items = data(unsafe {
+        pdfi_extract_text_with_positions_bytes(bytes.as_ptr(), bytes.len(), options.as_ptr())
+    });
+    // At a threshold of 100 every run with a stated weight is bold, and
+    // says so through its source.
+    for item in items.as_array().unwrap() {
+        if item["font_weight"].is_u64() {
+            assert_eq!(item["is_bold"], true, "{item}");
+            assert!(item["bold_source"].is_string(), "{item}");
+        }
+    }
+
+    for threshold in [0, 99, 901, 70000] {
+        let options = c(&format!(
+            r#"{{"position":{{"bold_from_weight":true,"bold_weight_threshold":{threshold}}}}}"#
+        ));
+        let kind = error_kind(unsafe {
+            pdfi_extract_text_with_positions_bytes(bytes.as_ptr(), bytes.len(), options.as_ptr())
+        });
+        assert_eq!(kind, "invalid_options", "threshold {threshold}");
+    }
 }
 
 #[test]

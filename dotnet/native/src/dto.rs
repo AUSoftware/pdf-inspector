@@ -8,8 +8,8 @@
 use pdf_inspector::detector::PdfType;
 use pdf_inspector::types::ItemType;
 use pdf_inspector::{
-    PageMarkdown, PageOcrReasons, PageRegionResult, PagesExtractionResult, PdfClassification,
-    PdfProcessResult, RegionText, StructureElement, TextItem,
+    FontCMapGaps, PageMarkdown, PageOcrReasons, PageRegionResult, PagesExtractionResult,
+    PdfClassification, PdfProcessResult, RegionText, StructureElement, TextItem,
 };
 use serde::Serialize;
 
@@ -43,6 +43,34 @@ fn ocr_reasons(reasons: &[PageOcrReasons]) -> Vec<PageOcrReasonsDto> {
     reasons.iter().map(PageOcrReasonsDto::from).collect()
 }
 
+/// A font whose ToUnicode CMap — or, for a font without one, the embedded
+/// program's cmap table — had no entry for some of the codes the document
+/// shows through it. `codes - interpolated - unmapped` of its codes had one.
+#[derive(Debug, Serialize)]
+pub struct FontCMapGapsDto {
+    /// The font's `/BaseFont` name, or its resource name without one.
+    pub font: String,
+    /// Codes shown through the font's CMap, repeats included.
+    pub codes: u32,
+    /// Codes without an entry that were read from the mapped codes around
+    /// them.
+    pub interpolated: u32,
+    /// Codes without an entry that could not be read; each is a U+FFFD in
+    /// the text.
+    pub unmapped: u32,
+}
+
+impl From<FontCMapGaps> for FontCMapGapsDto {
+    fn from(g: FontCMapGaps) -> Self {
+        Self {
+            font: g.font,
+            codes: g.codes,
+            interpolated: g.interpolated,
+            unmapped: g.unmapped,
+        }
+    }
+}
+
 /// Full processing result (detection + markdown + layout metadata).
 #[derive(Debug, Serialize)]
 pub struct PdfResultDto {
@@ -53,7 +81,17 @@ pub struct PdfResultDto {
     /// 1-indexed page numbers that need OCR.
     pub pages_needing_ocr: Vec<u32>,
     pub ocr_reasons_by_page: Vec<PageOcrReasonsDto>,
+    /// The document information dictionary's `/Title`, decoded as a PDF text
+    /// string; `null` when missing or not a string. The entries below follow
+    /// the same rule, the two dates as written (`D:20240115103000+01'00'`).
     pub title: Option<String>,
+    pub author: Option<String>,
+    pub subject: Option<String>,
+    pub keywords: Option<String>,
+    pub creator: Option<String>,
+    pub producer: Option<String>,
+    pub creation_date: Option<String>,
+    pub mod_date: Option<String>,
     pub confidence: f32,
     pub is_complex_layout: bool,
     /// 1-indexed pages where tables were detected.
@@ -61,6 +99,9 @@ pub struct PdfResultDto {
     /// 1-indexed pages where multi-column layout was detected.
     pub pages_with_columns: Vec<u32>,
     pub has_encoding_issues: bool,
+    /// Fonts whose CMap lacked an entry for a code the document shows
+    /// through it. Always empty in detect-only mode, which decodes no text.
+    pub cmap_gaps: Vec<FontCMapGapsDto>,
 }
 
 impl From<PdfProcessResult> for PdfResultDto {
@@ -73,11 +114,19 @@ impl From<PdfProcessResult> for PdfResultDto {
             pages_needing_ocr: r.pages_needing_ocr,
             ocr_reasons_by_page: ocr_reasons(&r.ocr_reasons_by_page),
             title: r.title,
+            author: r.author,
+            subject: r.subject,
+            keywords: r.keywords,
+            creator: r.creator,
+            producer: r.producer,
+            creation_date: r.creation_date,
+            mod_date: r.mod_date,
             confidence: r.confidence,
             is_complex_layout: r.layout.is_complex,
             pages_with_tables: r.layout.pages_with_tables,
             pages_with_columns: r.layout.pages_with_columns,
             has_encoding_issues: r.has_encoding_issues,
+            cmap_gaps: r.cmap_gaps.into_iter().map(FontCMapGapsDto::from).collect(),
         }
     }
 }
@@ -149,6 +198,28 @@ pub struct TextItemDto {
     /// 1-indexed page number.
     pub page: u32,
     pub is_bold: bool,
+    /// Where `is_bold` came from — `"font_name"`, `"font_flags"`,
+    /// `"weight_class"` (only with `bold_from_weight`) or `"painted"`, the
+    /// first of them in that order when more than one says bold. `null` when
+    /// `is_bold` is false, and for image, link and form-field items.
+    pub bold_source: Option<&'static str>,
+    /// Whether the font is fixed-pitch: `true` when the FontDescriptor's
+    /// FixedPitch flag or the embedded program's `post` table says so, else
+    /// measured from the width table (`true` when a dozen or more glyphs
+    /// share one advance, `false` when two differ). `null` when neither
+    /// holds, and for image, link and form-field items.
+    pub fixed_pitch: Option<bool>,
+    /// The fill colour the run was shown with, as 8-bit sRGB
+    /// `[red, green, blue]`. `null` for colour spaces that are not read
+    /// (Separation, DeviceN, Pattern, CalRGB, Lab, …) and for image, link
+    /// and form-field items.
+    pub fill_color: Option<[u8; 3]>,
+    /// The stroke colour the run was shown with, read like `fill_color`.
+    pub stroke_color: Option<[u8; 3]>,
+    /// The text render mode (`Tr`), 0..=7: 0 fill, 1 stroke, 2 fill and
+    /// stroke, 3 invisible, 4..=6 as 0..=2 plus clip, 7 clip only. `null`
+    /// for image, link and form-field items.
+    pub render_mode: Option<u8>,
     pub is_italic: bool,
     pub is_underline: bool,
     pub is_strikeout: bool,
@@ -189,6 +260,11 @@ impl From<TextItem> for TextItemDto {
             legacy_symbol_rewrite: item.legacy_symbol_rewrite,
             page: item.page,
             is_bold: item.is_bold,
+            bold_source: item.bold_source.map(|source| source.as_str()),
+            fixed_pitch: item.fixed_pitch,
+            fill_color: item.fill_color,
+            stroke_color: item.stroke_color,
+            render_mode: item.render_mode,
             is_italic: item.is_italic,
             is_underline: item.is_underline,
             is_strikeout: item.is_strikeout,

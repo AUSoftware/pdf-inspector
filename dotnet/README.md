@@ -106,7 +106,16 @@ value as "needs OCR, cause unknown" — the list can grow.
 
 Note that `HasEncodingIssues` on `PdfResult` matters even when the type is
 `TextBased`: it means the fonts decoded badly and the Markdown may be
-garbled, so the document should go to OCR anyway.
+garbled, so the document should go to OCR anyway. `CmapGaps` says which
+fonts were short of a ToUnicode entry for a code the document shows, how many
+of those codes were read from their mapped neighbours (`Interpolated`) and how
+many were left as U+FFFD (`Unmapped`); it is always empty for `Detect`, which
+decodes no text.
+
+`PdfResult` also carries the document information dictionary: `Title`,
+`Author`, `Subject`, `Keywords`, `Creator`, `Producer`, and `CreationDate` /
+`ModDate` as written (`D:20240115103000+01'00'`). Each is `null` when the
+entry is missing, and `Detect` reports them too.
 
 ### Options
 
@@ -139,6 +148,7 @@ PositionOptions position = new PositionOptions
 {
     Frame = PositionFrame.Display,   // line boxes up with a rendered page
     BoldFromWeight = true,           // read bold from the weight class too
+    BoldWeightThreshold = 700,       // ... from Bold up (default 600, SemiBold)
 };
 
 var items = Pdf.ExtractTextWithPositions(path, new PdfOptions { Position = position });
@@ -240,10 +250,26 @@ bold), read from the embedded font program's OS/2 table, else the
 `FontDescriptor`'s `/FontWeight`, else a weight word in the font name. It is
 `null` when nothing states one, which is common and not an error. It does not
 by itself change `IsBold`: a medium face reports `500` with `IsBold` false.
-Set `PositionOptions.BoldFromWeight` to have a weight class of 600 or more
-read as bold as well — adjacent runs whose weight class differs then stay
-separate items, so a heavier run inside a lighter paragraph keeps its own
-item.
+Set `PositionOptions.BoldFromWeight` to have a weight class at or above
+`PositionOptions.BoldWeightThreshold` (600 by default; 100–900, anything else
+throws `ArgumentOutOfRangeException`) read as bold as well — adjacent runs are
+then merged by that verdict, so a heavier run inside a lighter paragraph keeps
+its own item. `BoldSource` says where a `true` `IsBold` came from —
+`FontName`, `FontFlags`, `WeightClass` or `Painted` (filled and stroked to
+look heavier) — and is `null` for a run that is not bold. `FixedPitch` is
+whether the face is monospaced, `null` when neither the font nor its widths
+say.
+
+`FillColor` and `StrokeColor` are the colours the run was painted with, as
+8-bit sRGB `RgbColor` values (`null` for colour spaces such as Separation or
+Pattern that are not read), and `RenderMode` is the text render mode `Tr`,
+0–7. Modes 3 (invisible — the mode of OCR text layers) and 7 (clip only) put
+no glyphs on the page, so they tell hidden text from visible text:
+
+```csharp
+var visible = Pdf.ExtractTextWithPositions(path)
+    .Where(item => item.RenderMode is not (3 or 7));
+```
 
 `LegacySymbolRewrite` marks a run whose text was changed by the legacy
 private-use symbol cleanup. It is decoding *provenance*, not an OCR verdict:
